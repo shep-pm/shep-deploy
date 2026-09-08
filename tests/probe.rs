@@ -43,7 +43,7 @@ fn the_version_answer_is_the_one_shep_reads() {
     assert!(output.status.success(), "{:?}", output.status);
 
     let text = String::from_utf8(output.stdout).expect("the answer is text");
-    let answer = shep_core::dogs::parse_version_answer(&text)
+    let answer = shep_client::shep_core::dogs::parse_version_answer(&text)
         .expect("the answer shep's own parser cannot read is the bug this pins");
 
     assert_eq!(answer.version, env!("CARGO_PKG_VERSION"));

@@ -184,11 +184,14 @@ class rather than the instances.
   `#[shep(secret)]` marks a credential, and this section has none; a mark
   that names a field the schema lacks (what `#[serde(rename)]` produces) is
   not a compile error, it makes `--schema` exit 1 at runtime.
-- **`shep-core` is a direct dependency for one reason: `features =
-  ["schema"]`.** shep-client's own `schema` feature does not turn shep-core's
-  on, and without it `UpDuration` has no `JsonSchema` impl and the section
-  has no schema at all. Source still names the type through
-  `shep_client::shep_core::`, as it always did.
+- **shep-client is floored at 0.7.3 for its `schema` feature, not for a
+  protocol number.** 0.7.2's `schema` did not forward to `shep-core/schema`,
+  so `UpDuration` had no `JsonSchema` impl and this dog's section had no
+  schema to publish; the workaround was a direct shep-core dependency whose
+  only job was turning that feature on. shep-pm/shep#198 fixed the forward
+  and the dependency is gone. shep-core is reached through
+  `shep_client::shep_core::` only, `tests/probe.rs` included; naming it at
+  the crate root is what quietly makes that dependency load-bearing again.
 - **The dog's section is `[deploy]` in `$SHEP_HOME/dogs.toml`**, since shep
   0.1.32; before that it was `[dog.deploy]` in `shep.toml`, and a shepherd
   migrates the old spelling only at boot. A test that writes the section

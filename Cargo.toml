@@ -10,16 +10,15 @@ keywords = ["shep", "process-manager", "deploy", "git"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-shep-client = "0.7.2"
-# Already in the tree twice over: shep-client depends on it and re-exports it
-# as `shep_client::shep_core`, which is how every path in `src/` still names
-# it. The direct edge exists for the feature, which a re-export cannot turn
-# on. `schema` is what gives `UpDuration` its `JsonSchema` impl, and the
-# dog's whole `[deploy]` section is durations - without it the section has no
-# schema to publish and `shep lookout`'s settings pane has no form to draw.
-# shep-cli takes this same edge for the same reason, for its own two dogs.
-shep-core = { version = "0.7.2", features = ["schema"] }
-# The `JsonSchema` derive on `config::Section`. Version-matched to the one
+# 0.7.3 floor, and it buys one thing this crate needs: its `schema` feature
+# forwards to `shep-core/schema`, which is where `UpDuration`'s `JsonSchema`
+# impl lives. 0.7.2's did not, so publishing `config::Section`'s schema at
+# all meant naming shep-core directly, as a dependency whose only job was to
+# turn that feature on. See shep-pm/shep#198.
+shep-client = "0.7.3"
+# The `JsonSchema` derive on `config::Section`. Still needed, and not the
+# same question the line above answers: shep-client does not re-export
+# schemars, so a dog derives against its own. Version-matched to the one
 # shep-client resolves, since `dogs::probe` takes a `T: schemars::JsonSchema`
 # and two schemars in one tree are two unrelated traits.
 schemars = { version = "1.2.2", features = ["derive"] }
