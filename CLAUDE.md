@@ -43,19 +43,31 @@ green against an installed 0.1.8 while CI, which installs the current release,
 failed.
 
 The floor moves with `shep-client`, too, and in both directions. The lockfile
-pins shep-client 0.2.0, which speaks protocol 3, so a shep older than 0.2.0
+pins shep-client 0.7.2, which speaks protocol 8, so a shep older than 0.7.0
 fails every integration test at connect with `protocol mismatch (this client
-speaks 3)`. The other direction bit on 2026-09-04: the lockfile spoke 2, shep
+speaks 8)`. The other direction bit on 2026-09-04: the lockfile spoke 2, shep
 0.2.0 shipped speaking 3 within the hour, and CI, which installs the current
 release, failed all seven tests at connect while the local tier was green
 against a scratch 0.1.31. When that happens the fix is the dependency, not
 the tests: bump `shep-client` in Cargo.toml and `cargo update -p
-shep-client`. Note that `cargo info shep-client` reports the newest
-semver-compatible version as "latest", so a 0.1.x lockfile never sees a
-0.2.0; ask for it by name, `cargo info shep-client@0.2.0`. Check
-`shep --version` before trusting either a green or a red integration run. To
-test against the current release without touching the machine's own shep,
-install one into a scratch root and point `SHEP_BIN` at it:
+shep-client`.
+
+**`cargo info shep-client` reports the newest version SEMVER-COMPATIBLE WITH
+THE LOCKFILE and calls it "latest", so it under-reports by as many majors as
+you are behind.** Ask by name, and keep asking until it stops moving. On
+2026-09-08 a 0.2.0 lockfile made `cargo info` answer "latest 0.4.3"; taking
+0.4.3 made the same command answer "latest 0.7.2", which was the real one.
+Two rounds, and a caret bump to `"0.4.3"` would have quietly landed on 0.4.6
+and looked deliberate. `cargo info shep-client@<version>` and
+`cargo info shep` are the cross-checks.
+
+shep 0.7.2 also raised MIN_SUPPORTED to 8, so this is a floor rather than a
+preference: `shep --version` says `speaks protocol 8, accepts 8 and newer`,
+and every shep-deploy built before 2026-09-08 is refused at the handshake by
+it. Check `shep --version` before trusting either a green or a red
+integration run. To test against the current release without touching the
+machine's own shep, install one into a scratch root and point `SHEP_BIN` at
+it:
 
 ```bash
 cargo install shep --locked --force --root /tmp/shep-root
@@ -97,7 +109,7 @@ SHEP_BIN="$(command -v shep)" cargo test --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
 
-396 unit tests and 7 integration as of 2026-09-04, ~24s and ~32s. The number moves with every task; treat it as a shape, not a checksum.
+399 unit tests, 7 integration and 3 probe as of 2026-09-08, ~24s, ~32s and instant. The number moves with every task; treat it as a shape, not a checksum.
 
 ## Architecture
 
@@ -114,6 +126,12 @@ both in scope in their own test modules.
 
 `tests/integration.rs` is a separate compilation target and keeps its own copy
 of those helpers. That is the cost of the boundary, not an oversight.
+
+`tests/probe.rs` is the other one, and unlike the integration tier it is NOT
+feature-gated and needs no shepherd: it spawns the built binary with
+`--version` and `--schema`. Both questions are asked of a dog that has never
+run and cannot connect to anything, so a test that wanted a live daemon would
+be testing something else. It runs in a bare `cargo test`.
 
 ## The security surface, which is the whole point of reviewing this crate
 
@@ -150,6 +168,27 @@ class rather than the instances.
   that way.
 - **`Error::Config` is built at dozens of sites across ten modules.** It is
   not the dog-section variant its doc used to claim.
+- **`main` answers `--version` and `--schema` before it does anything else.**
+  `shep_client::dogs::probe::<config::Section>` is the first line, ahead of
+  the runtime, and it exits the process when the run is a probe. Order is the
+  whole point: `shep adopt` and `shep restart deploy` both spawn the binary
+  with `--version`, and a dog that does not recognise the flag starts its
+  ordinary poll loop against the live shepherd until shep kills its process
+  group a second or two later. `route` never sees either flag, which is why
+  neither has an arm there.
+- **`config::Section` is the schema, so its field docs are operator-facing.**
+  They are what `shep lookout`'s settings pane prints, not commentary for the
+  next reader; the reasoning belongs on `config::DogConfig`. The type-level
+  doc is overridden with `#[schemars(description = ...)]` for the same
+  reason, since schemars would otherwise publish the Rust doc verbatim.
+  `#[shep(secret)]` marks a credential, and this section has none; a mark
+  that names a field the schema lacks (what `#[serde(rename)]` produces) is
+  not a compile error, it makes `--schema` exit 1 at runtime.
+- **`shep-core` is a direct dependency for one reason: `features =
+  ["schema"]`.** shep-client's own `schema` feature does not turn shep-core's
+  on, and without it `UpDuration` has no `JsonSchema` impl and the section
+  has no schema at all. Source still names the type through
+  `shep_client::shep_core::`, as it always did.
 - **The dog's section is `[deploy]` in `$SHEP_HOME/dogs.toml`**, since shep
   0.1.32; before that it was `[dog.deploy]` in `shep.toml`, and a shepherd
   migrates the old spelling only at boot. A test that writes the section
@@ -179,11 +218,15 @@ class rather than the instances.
   serialises as `[origin]` plus its sub-tables at the END of the file
   whatever the field's position, because this crate's `toml` hoists every
   scalar above every table. It holds `env` verbatim, so the file is written
-  0o600. Two compatibility edges, both
-  accepted by Rin on 2026-09-04: a shep-deploy older than that refuses a
-  record with the field (`deny_unknown_fields`), and `AppConfig` itself is
-  `deny_unknown_fields` in shep-core, so a record written against a newer
-  shep-core than the reader's refuses too.
+  0o600. A shep-deploy older than 2026-09-04 refuses a record
+  carrying the field at all (`deny_unknown_fields` on the record), which Rin
+  accepted that day. `AppConfig` itself was `deny_unknown_fields` in
+  shep-core until 0.7, and is NOT any more: shep-core dropped it on purpose
+  and says in its own comment not to restore it. So a record or a muster
+  roll written by a newer shep-core is now READ by an older reader, with the
+  fields it does not know dropped in silence. See `roll.rs`'s own module doc
+  for why that trade is the right way round for `survey` and the wrong way
+  round for `optin`, which persists the result and replays it on removal.
 - **A committed Flockfile is refused for more than `user`/`group`.** `exec`
   probes, `out_file`/`err_file`, non-loopback probe targets, and `watch`,
   because the daemon acts on all of them at its own uid (read out of
