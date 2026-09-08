@@ -114,19 +114,81 @@ pub struct DogConfig {
     pub passthrough: Vec<String>,
 }
 
-/// The wire shape, kept separate from [`DogConfig`] so the validated type
-/// cannot be constructed without going through [`DogConfig::parse`].
-#[derive(Deserialize)]
+/// The `[deploy]` section as an operator types it, kept separate from
+/// [`DogConfig`] so the validated type cannot be constructed without going
+/// through [`DogConfig::parse`].
+///
+/// Also the type shep asks this binary about. `crate::main` hands it to
+/// `shep_client::dogs::probe`, which answers `--schema` with the JSON
+/// Schema `schemars` derives from it, and `shep lookout`'s settings pane
+/// draws a form from that answer. Two consequences worth knowing before
+/// editing this type:
+///
+/// - **The doc comment on each field below is what an operator reads** in
+///   that pane, so they are written to be read there rather than here.
+///   The reasoning about why a value is what it is stays on [`DogConfig`],
+///   which is the type this crate's own code passes around.
+/// - **The field names are the section's keys**, so renaming one is a
+///   breaking change to a hand-edited file whatever `deny_unknown_fields`
+///   is doing.
+///
+/// No field carries `#[shep(secret)]`, and none should: an interval, a
+/// count and a list of variable NAMES are not credentials. `passthrough`
+/// is the one worth pausing on, and it names variables rather than
+/// carrying their values - the values stay in the dog's environment and
+/// never enter this file. The derive is here all the same, because a
+/// config type with nothing to mark still needs the impl for shep to have
+/// a schema to ask for at all.
+#[derive(Deserialize, schemars::JsonSchema, shep_client::dogs::DogConfig)]
 #[serde(default, deny_unknown_fields)]
-struct Raw {
+// `rename` sets the root schema's title, which the settings pane heads its
+// form with. `Section` alone would name this crate's Rust type at an
+// operator who is looking at a section of a TOML file.
+#[schemars(rename = "deploy")]
+// `description` overrides the doc comment above, which schemars would
+// otherwise publish verbatim as the section's description: that text is
+// addressed to whoever edits this file, and it would arrive in the settings
+// pane as several paragraphs about Rust types. The field docs need no such
+// override - those were written for the pane in the first place.
+#[schemars(
+    description = "How the deploy dog polls, how long it lets git and a build run, and how many \
+                   releases it keeps. Every target this dog manages shares these; what to deploy \
+                   and where lives in each target's own deploy.toml."
+)]
+pub struct Section {
+    /// How often to look for new commits, for example `"30s"`. A bare
+    /// number is MILLISECONDS, so `30` is thirty milliseconds and not
+    /// thirty seconds. At least one second.
     interval: UpDuration,
+    /// How many of the newest releases to keep per target. The live release
+    /// and the one named in the target's `deploy.toml` are kept whatever
+    /// their age, so a target can hold up to two more than this. At least
+    /// two, since a rollback needs somewhere to go back to.
+    // The floor `DogConfig::parse` refuses below, stated to the pane as
+    // well so a section can be rejected while it is being typed rather
+    // than at the next startup.
+    #[schemars(range(min = 2))]
     retention: usize,
+    /// How long any single git command may run before it is abandoned, for
+    /// example `"5m"`. It bounds a remote that stops answering; a cold
+    /// clone of a large repository legitimately runs minutes. At least one
+    /// second.
     git_timeout: UpDuration,
+    /// How long a build may run before it is abandoned, for example
+    /// `"1h"`. It exists to turn a build that will never finish into an
+    /// ordinary per-target failure, not to put a schedule on honest work,
+    /// so it is set far longer than any build it is meant to bound. At
+    /// least one second.
     build_timeout: UpDuration,
+    /// Environment variables to copy from this dog's own environment into
+    /// a build, by name. A build otherwise starts from a cleared
+    /// environment plus a small fixed set, so anything a build needs from
+    /// the dog is named here and is visible in this file rather than
+    /// inherited invisibly. Names, never values.
     passthrough: Vec<String>,
 }
 
-impl Default for Raw {
+impl Default for Section {
     fn default() -> Self {
         Self {
             interval: DEFAULT_INTERVAL,
@@ -158,7 +220,7 @@ impl DogConfig {
     /// exception and names a line and column instead, because at that point
     /// the parser has no key to name.
     pub fn parse(toml: &str) -> Result<Self, Error> {
-        let raw: Raw = toml::from_str(toml)
+        let raw: Section = toml::from_str(toml)
             .map_err(|source| Error::Config(format!("[dog.<name>]: {source}")))?;
 
         if raw.retention < MINIMUM_RETENTION {
@@ -380,5 +442,77 @@ mod tests {
     fn a_value_of_the_wrong_type_names_the_key() {
         let err = DogConfig::parse("retention = \"five\"").expect_err("refuses");
         assert!(err.to_string().contains("retention"), "{err}");
+    }
+
+    /// fails if a `#[shep(secret)]` mark ever names a field the schema does
+    /// not have, which `#[serde(rename)]` on a marked field is what
+    /// produces. That combination is not a compile error and not a bad
+    /// schema: `probe` prints the complaint to stderr and exits 1, so shep
+    /// reads it as a dog whose schema is unreadable and adopts it anyway,
+    /// with the credential's field left unmarked. Nothing on the happy path
+    /// says so, which is why it is asserted here rather than left to the
+    /// first operator who opens the pane.
+    #[test]
+    fn the_section_renders_a_schema_with_every_mark_landing() {
+        shep_client::dogs::config_schema::<Section>()
+            .expect("every `#[shep(secret)]` field names a property of this type");
+    }
+
+    /// fails if the schema stops describing the keys `parse` accepts.
+    ///
+    /// The two come from one struct and cannot drift by accident, but they
+    /// can by edit: a `#[serde(rename)]` moves both together and a
+    /// `#[schemars(rename)]` moves only one. The consequence is specific
+    /// and quiet. `shep lookout`'s settings pane writes the section from
+    /// the schema's property names, and the section is
+    /// `deny_unknown_fields`, so a name only the schema knows produces a
+    /// `dogs.toml` this dog refuses at its next startup - written by shep's
+    /// own form, on a key the operator never typed.
+    #[test]
+    fn every_property_the_schema_publishes_is_a_key_the_parser_takes() {
+        let schema = shep_client::dogs::config_schema::<Section>().expect("renders");
+        let schema = schema.as_value();
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("a derived struct schema has properties");
+
+        assert_eq!(
+            properties.len(),
+            5,
+            "a property was added or removed without this test being read"
+        );
+        for name in properties.keys() {
+            // The value is deliberately one no field is required to accept:
+            // an unknown key is refused before any value is looked at, so
+            // whether this one type-checks is beside the point and only the
+            // `unknown field` half is asserted. `passthrough = []` really is
+            // valid, and a key that parses is a key the parser knows.
+            if let Err(err) = DogConfig::parse(&format!("{name} = []")) {
+                assert!(
+                    !err.to_string().contains("unknown field"),
+                    "the schema publishes `{name}`, which the parser does not know: {err}"
+                );
+            }
+        }
+    }
+
+    /// fails if the floor the schema advertises stops being the floor the
+    /// parser enforces. The pane refuses below `minimum` while the operator
+    /// is typing; `parse` refuses below `MINIMUM_RETENTION` at startup. Two
+    /// numbers, one rule, and the failure of the pair is a form that
+    /// cheerfully writes a section the dog will not boot on.
+    #[test]
+    fn the_schemas_retention_floor_is_the_one_the_parser_enforces() {
+        let schema = shep_client::dogs::config_schema::<Section>().expect("renders");
+        let minimum = schema
+            .as_value()
+            .pointer("/properties/retention/minimum")
+            .and_then(serde_json::Value::as_u64)
+            .expect("retention states a minimum");
+
+        assert_eq!(minimum, MINIMUM_RETENTION as u64);
+        DogConfig::parse(&format!("retention = {minimum}")).expect("the floor itself is accepted");
+        DogConfig::parse(&format!("retention = {}", minimum - 1)).expect_err("below it is not");
     }
 }

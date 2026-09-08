@@ -727,10 +727,9 @@ mod tests {
     /// constructed with, `cwd` under the deploy tree and `script` an
     /// arbitrary placeholder - what the shepherd is presumed to have had
     /// registered before this dog's removal began - unless it was built
-    /// [`Self::with_unreadable_roll`], which writes a roll no shepherd of
-    /// this crate's `shep-core` could have written, so `roll::registered`
-    /// fails with its own real, crafted cause rather than this double
-    /// inventing one.
+    /// [`Self::with_unreadable_roll`], which writes a roll this crate's
+    /// `shep-core` refuses, so `roll::registered` fails with its own real,
+    /// crafted cause rather than this double inventing one.
     ///
     /// `describe` answers [`Self::instances`] running instances for
     /// whichever name is asked, refusing outright if
@@ -909,15 +908,14 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             let path = dir.keep().join("flock.json");
             if self.unreadable_roll {
-                // An unknown field is what a newer shepherd would actually
-                // write - `AppConfig` is `deny_unknown_fields` - and is what
-                // makes `roll::read` produce its own crafted, actionable
-                // message rather than this double inventing one.
-                fs::write(
-                    &path,
-                    "{\"apps\":[{\"app\":{\"name\":\"w\",\"a_field_from_the_future\":1}}]}",
-                )
-                .expect("write roll");
+                // A field of the wrong type, which is what `AppConfig`
+                // still refuses. An unknown field was the trigger until
+                // shep-core 0.7 dropped `deny_unknown_fields`, at which
+                // point this roll became readable and the test below
+                // asserted nothing. Either way the point is the same: the
+                // roll fails on its own crafted, actionable cause rather
+                // than on one this double invented.
+                fs::write(&path, "{\"apps\":[{\"app\":{\"name\":123}}]}").expect("write roll");
                 return Ok(path);
             }
             let apps: Vec<String> = self

@@ -60,7 +60,7 @@ use std::path::PathBuf;
 use shep_client::{
     Client, LinkState, ReconnectingClient, RequestError,
     shep_core::config::AppConfig,
-    shep_core::protocol::{ProcessInfo, Request, Response, SelectorSpec, Smit},
+    shep_core::protocol::{ProcessInfo, Request, Response, SelectorSpec, SheepRefusal, Smit},
 };
 
 use crate::error::Error;
@@ -310,7 +310,7 @@ impl Daemon for Live {
             selector: SelectorSpec::Name(sheep.to_owned()),
         };
         match self.0.request(asked).await? {
-            Response::Reloading(_) => Ok(()),
+            Response::Reloading { refused, .. } => accepted_whole("Reload", &refused),
             other => Err(unexpected("Reload", &other)),
         }
     }
@@ -320,7 +320,7 @@ impl Daemon for Live {
             selector: SelectorSpec::Name(sheep.to_owned()),
         };
         match self.0.request(asked).await? {
-            Response::Restarted(_) => Ok(()),
+            Response::Restarted { refused, .. } => accepted_whole("Restart", &refused),
             other => Err(unexpected("Restart", &other)),
         }
     }
@@ -350,6 +350,38 @@ fn unexpected(asked: &str, got: &Response) -> Error {
     Error::Protocol(format!("{} in answer to {asked}", named(got)))
 }
 
+/// `Ok` when a walk refused nothing, and an error naming each refusal
+/// otherwise.
+///
+/// `refused` is empty on every request this dog makes. It selects one sheep
+/// by name, and shep refuses a single-app selector whole, through the `Err`
+/// arm `request` has already turned into an error by the time this is
+/// reached; only a walk over several apps fills the field.
+///
+/// Checked all the same, because it arrived in protocol 4 on variants that
+/// used to carry acceptances alone, and the compiler asks for the field
+/// without asking what it means. Ignoring it would let a sheep that was
+/// never reloaded read as reloaded, after which verification watches the
+/// release the sheep is already serving come up, and reports the deploy
+/// that never landed as landed.
+///
+/// The reason is the daemon's own sentence, quoted rather than classified:
+/// shep does not put the class of a refusal on the wire, so the message is
+/// the only thing that tells two of them apart.
+fn accepted_whole(asked: &str, refused: &[SheepRefusal]) -> Result<(), Error> {
+    if refused.is_empty() {
+        return Ok(());
+    }
+    let named: Vec<String> = refused
+        .iter()
+        .map(|sheep| format!("{}: {}", sheep.name, sheep.reason))
+        .collect();
+    Err(Error::Protocol(format!(
+        "{asked} was refused for {}",
+        named.join("; ")
+    )))
+}
+
 /// Name a response without printing its body.
 ///
 /// `Debug` alone would do for most of these, but `DogSection` routinely
@@ -362,8 +394,8 @@ fn named(response: &Response) -> String {
         Response::Described(flock) => format!("a Described of {}", flock.len()),
         Response::Started(flock) => format!("a Started of {}", flock.len()),
         Response::Deleted(ids) => format!("a Deleted of {}", ids.len()),
-        Response::Reloading(flock) => format!("a Reloading of {}", flock.len()),
-        Response::Restarted(flock) => format!("a Restarted of {}", flock.len()),
+        Response::Reloading { accepted, .. } => format!("a Reloading of {}", accepted.len()),
+        Response::Restarted { accepted, .. } => format!("a Restarted of {}", accepted.len()),
         Response::DogSection { .. } => "a DogSection".to_owned(),
         Response::RollSaved { .. } => "a RollSaved".to_owned(),
         Response::SmitPainted(flock) => format!("a SmitPainted of {}", flock.len()),
@@ -493,10 +525,19 @@ mod tests {
         );
         assert_eq!(named(&Response::Started(flock.clone())), "a Started of 2");
         assert_eq!(
-            named(&Response::Reloading(flock.clone())),
+            named(&Response::Reloading {
+                accepted: flock.clone(),
+                refused: Vec::new(),
+            }),
             "a Reloading of 2"
         );
-        assert_eq!(named(&Response::Restarted(flock)), "a Restarted of 2");
+        assert_eq!(
+            named(&Response::Restarted {
+                accepted: flock,
+                refused: Vec::new(),
+            }),
+            "a Restarted of 2"
+        );
         assert_eq!(named(&Response::Deleted(vec![7, 8])), "a Deleted of 2");
         assert_eq!(named(&Response::Flock(Vec::new())), "a Flock of 0");
     }
