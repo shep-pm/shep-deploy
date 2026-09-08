@@ -195,6 +195,30 @@ fn route<'a>(args: &[&'a str]) -> Route<'a> {
 const DRAIN: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn main() -> ExitCode {
+    // Answers shep's two probes and ends the process when this run is one of
+    // them: `--version` with the version and the protocol number this binary
+    // was compiled against, `--schema` with the JSON Schema of
+    // `config::Section`. It returns on every ordinary run.
+    //
+    // First, before the runtime is built and before anything is opened,
+    // because that is the whole point of the call. `shep restart deploy`
+    // probes the binary on disk to see whether it has been upgraded under
+    // the running process, and a dog that does not recognise `--version`
+    // ignores it and starts doing its ordinary job instead - here, a poll
+    // loop against the live shepherd, killed a second or two later. This
+    // dog builds and cuts over releases, so "runs briefly and is then
+    // killed" is not a harmless overlap.
+    //
+    // `route` never sees either flag as a result, which is also why neither
+    // needs an arm there: a leading `-` is not a sheep name, so both used to
+    // land on `USAGE` and exit 2, and shep read that as a dog with no
+    // protocol and no schema.
+    //
+    // The name and the version are passed rather than read inside
+    // shep-client because `env!` expands where it is written, and there it
+    // would report shep-client's own version.
+    shep_client::dogs::probe::<config::Section>(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
 

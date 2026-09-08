@@ -10,7 +10,18 @@ keywords = ["shep", "process-manager", "deploy", "git"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-shep-client = "0.2.0"
+# 0.7.3 floor, and it buys one thing this crate needs: its `schema` feature
+# forwards to `shep-core/schema`, which is where `UpDuration`'s `JsonSchema`
+# impl lives. 0.7.2's did not, so publishing `config::Section`'s schema at
+# all meant naming shep-core directly, as a dependency whose only job was to
+# turn that feature on. See shep-pm/shep#198.
+shep-client = "0.7.3"
+# The `JsonSchema` derive on `config::Section`. Still needed, and not the
+# same question the line above answers: shep-client does not re-export
+# schemars, so a dog derives against its own. Version-matched to the one
+# shep-client resolves, since `dogs::probe` takes a `T: schemars::JsonSchema`
+# and two schemars in one tree are two unrelated traits.
+schemars = { version = "1.2.2", features = ["derive"] }
 # Already in the tree: shep-core depends on it, so this is a direct edge on
 # something every build of this crate already compiles. `fs` for `flock(2)`,
 # `signal` for `killpg(2)`; both are safe wrappers, which is what lets a crate

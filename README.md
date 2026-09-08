@@ -37,6 +37,14 @@ is exactly the one cargo declines to do: it prints `already installed, use
 `shep adopt` registers it with the shepherd, which supervises it from then on.
 `shep dogs` lists what you have adopted.
 
+Adopting runs the binary twice before anything is recorded. `shep-deploy
+--version` answers with the crate version and the shep protocol number this
+build speaks, which is what shep checks against its own floor: a dog built
+below it is refused there and then, rather than at its first handshake.
+`shep-deploy --schema` answers with a JSON Schema for the `[deploy]` section
+below. `shep restart deploy` asks the first question again, to see whether the
+binary on disk has moved ahead of the process still running.
+
 ## Telling it how to build
 
 The build command lives in the deployed repository's own Flockfile, under the
@@ -136,6 +144,11 @@ All five are read once, when the dog starts, so changing any takes a `shep
 restart deploy`. A shep older than 0.1.32 read the same keys from
 `[dog.deploy]` in `shep.toml`; a newer one moves that section into
 `dogs.toml` the next time the shepherd boots.
+
+`shep lookout` renders a form over this section: press `s`, then `e` on the
+dog's row. It has one because of the `--schema` answer above. None of the five
+keys is a credential, so the pane redacts nothing. `passthrough` names
+variables and never carries their values.
 
 `retention` is how many of the newest releases each target keeps. Two are
 spared whatever their age: the one `current` points at, and the one

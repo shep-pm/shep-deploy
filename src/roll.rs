@@ -14,12 +14,35 @@
 //! depend on `shep-daemon`, so the two fields needed here are mirrored and
 //! everything else is ignored. That direction is safe: a field added to
 //! the envelope later cannot break this. The inner [`AppConfig`] is
-//! `shep-core`'s and is shared properly, but it is `deny_unknown_fields`,
-//! so a NEWER shepherd writing a field this crate's `shep-core` does not
-//! know would be refused. [`read`] turns that into a message naming the
-//! file and the likely cause rather than a bare serde complaint, because
-//! an operator meeting "unknown field" with no context has nothing to act
-//! on.
+//! `shep-core`'s and is shared properly.
+//!
+//! # What a newer shepherd's roll does here, which changed in shep-core 0.7
+//!
+//! `AppConfig` was `deny_unknown_fields` until then, so a roll carrying an
+//! app field this crate's `shep-core` had never heard of was REFUSED rather
+//! than read, loudly and with a remedy. shep-core dropped the attribute on
+//! purpose - its own comment says not to restore it - so that roll is now
+//! read, and the unknown fields are dropped in silence.
+//!
+//! For [`crate::survey`] that is the better failure of the two: it reports
+//! what it read and a field it never had is a field it never printed. For
+//! [`crate::optin`] it is the worse one. That path persists this
+//! `AppConfig` into `deploy.toml` as `origin` and hands it back to shep
+//! when the dog is removed, so a field dropped on the way in is a field the
+//! sheep does not get back on the way out - a sheep restored quietly
+//! different from the one that was adopted.
+//!
+//! Nothing here closes that, and the exposure is a skew rather than a
+//! standing hole: the roll is only ever read from a shepherd, and the
+//! `shep-core` this crate parses it with is whichever one `shep-client`
+//! brings, so keeping that dependency current is what keeps the two in
+//! step. There is no direct edge on `shep-core` to bump on its own.
+//! Closing it would mean this crate keeping its own copy of the field list
+//! `shep-core` just stopped enforcing.
+//!
+//! [`read`] still names the file and the likeliest cause rather than
+//! passing a bare serde complaint outward, because the failures that remain
+//! are no more actionable on their own than the one that went away.
 //!
 //! [`ProcessInfo`]: shep_client::shep_core::protocol::ProcessInfo
 
@@ -66,11 +89,12 @@ pub async fn registered<D: Daemon>(daemon: &D) -> Result<BTreeMap<String, AppCon
 fn read(path: &Path, text: &str) -> Result<BTreeMap<String, AppConfig>, Error> {
     parse(text).map_err(|source| {
         Error::Config(format!(
-            "{}: this shepherd's muster roll is not one this dog can read ({source}). The \
-             likeliest cause is a newer shepherd than the shep-core this dog was built against: \
-             the roll carries each sheep's own app config, and an app field added since refuses \
-             to parse rather than being ignored. Rebuilding or reinstalling shep-deploy against \
-             the current shep fixes it.",
+            "{}: this shepherd's muster roll is not one this dog can read ({source}). Either \
+             the file is damaged - truncated, or not JSON at all - or a field this dog does \
+             read has changed type in a shep newer than the shep-core it was built against. \
+             Rebuilding or reinstalling shep-deploy against the current shep fixes the second. \
+             An app field this dog has simply never heard of is NOT the cause: those are \
+             ignored rather than refused.",
             path.display()
         ))
     })
@@ -138,17 +162,17 @@ mod tests {
     }
 
     /// fails if a roll this crate cannot understand produces a bare serde
-    /// message. The likeliest cause by far is a newer shepherd writing an
-    /// AppConfig field this crate's shep-core does not know, and an
-    /// operator meeting "unknown field `foo`" with no context has nothing
-    /// to act on. The message names the file and the likely cause.
+    /// message. An operator meeting `invalid type: integer` with no file
+    /// name and no remedy has nothing to act on, so the message names the
+    /// roll and what to do about it.
     #[test]
     fn an_unreadable_roll_names_the_file_and_the_likely_cause() {
-        // `AppConfig` is `deny_unknown_fields`, so a field this crate's
-        // shep-core has never heard of - the shape a newer shepherd would
-        // actually write - is what makes the parse fail. `{"app":{}}`
-        // alone parses fine: every field but `name` defaults.
-        let text = "{\"apps\":[{\"app\":{\"name\":\"web\",\"a_field_from_the_future\":1}}]}";
+        // A field of the wrong TYPE, which is what still fails to parse.
+        // This test sent an unknown field until shep-core 0.7 dropped
+        // `AppConfig`'s `deny_unknown_fields`; that input now parses
+        // cleanly and asserted nothing. `{"app":{}}` parses too - every
+        // field defaults - so the value has to be wrong rather than extra.
+        let text = "{\"apps\":[{\"app\":{\"name\":123}}]}";
         let err = read(Path::new("/srv/shep/flock.json"), text).expect_err("refuses");
         let shown = err.to_string();
         assert!(shown.contains("/srv/shep/flock.json"), "{shown}");
