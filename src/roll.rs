@@ -34,7 +34,9 @@
 //!
 //! Nothing here closes that, and the exposure is a skew rather than a
 //! standing hole: the roll is only ever read from a shepherd, and the
-//! `shep-core` in `Cargo.toml` is meant to track the shep that wrote it.
+//! `shep-core` this crate parses it with is whichever one `shep-client`
+//! brings, so keeping that dependency current is what keeps the two in
+//! step. There is no direct edge on `shep-core` to bump on its own.
 //! Closing it would mean this crate keeping its own copy of the field list
 //! `shep-core` just stopped enforcing.
 //!

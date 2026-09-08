@@ -43,7 +43,7 @@ green against an installed 0.1.8 while CI, which installs the current release,
 failed.
 
 The floor moves with `shep-client`, too, and in both directions. The lockfile
-pins shep-client 0.7.2, which speaks protocol 8, so a shep older than 0.7.0
+pins shep-client 0.7.3, which speaks protocol 8, so a shep older than 0.7.0
 fails every integration test at connect with `protocol mismatch (this client
 speaks 8)`. The other direction bit on 2026-09-04: the lockfile spoke 2, shep
 0.2.0 shipped speaking 3 within the hour, and CI, which installs the current

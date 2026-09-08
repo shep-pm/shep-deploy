@@ -138,8 +138,10 @@ pub struct DogConfig {
 /// carrying their values - the values stay in the dog's environment and
 /// never enter this file. The derive is here all the same, because a
 /// config type with nothing to mark still needs the impl for shep to have
-/// a schema to ask for at all.
-#[derive(Deserialize, schemars::JsonSchema, shep_client::dogs::DogConfig)]
+/// a schema to ask for at all. It is also why `Debug` is derived rather
+/// than hand-written to redact something (IR-41): there is nothing here to
+/// redact.
+#[derive(Debug, Deserialize, schemars::JsonSchema, shep_client::dogs::DogConfig)]
 #[serde(default, deny_unknown_fields)]
 // `rename` sets the root schema's title, which the settings pane heads its
 // form with. `Section` alone would name this crate's Rust type at an
