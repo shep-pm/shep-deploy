@@ -8,6 +8,12 @@ description = "A deploy dog for shep: watches a git branch, builds a release, sw
 repository = "https://github.com/shep-pm/shep-deploy"
 keywords = ["shep", "process-manager", "deploy", "git"]
 categories = ["command-line-utilities"]
+# `docs/` is this project's own planning and design notes, written by the
+# skills that produced the code. They are worth keeping in the repository
+# and are not worth shipping: a published .crate is permanent, so every
+# draft in there would outlive the decisions it argues about, and docs.rs
+# would carry them beside the API. The repository is where to read them.
+exclude = ["/docs/"]
 
 [dependencies]
 # 0.7.3 floor, and it buys one thing this crate needs: its `schema` feature
