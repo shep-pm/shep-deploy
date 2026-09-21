@@ -350,6 +350,13 @@ pub fn tempdir() -> TempDir {
 ///
 /// Every other method is unimplemented. A test that wants a deploy to
 /// really run wants one of `crate::poll`'s own doubles instead.
+///
+/// `Debug` is hand-written to keep the sections out of it (IR-41). They
+/// are `[dog.<name>]` section bodies, and a real one routinely carries
+/// webhook credentials for other dogs, so a fixture that printed them
+/// would teach the shape even though these particular strings are written
+/// by tests. Prints a count instead, the same way `crate::build::BuildSpec`
+/// prints `env`.
 pub struct Sections {
     /// The sections to hand out, in order.
     sections: Vec<String>,
@@ -357,8 +364,28 @@ pub struct Sections {
     asked: Cell<usize>,
 }
 
+impl core::fmt::Debug for Sections {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Sections")
+            .field(
+                "sections",
+                &format_args!("<{} sections>", self.sections.len()),
+            )
+            .field("asked", &self.asked.get())
+            .finish()
+    }
+}
+
 impl Sections {
     /// A shepherd handing out `sections` in order.
+    ///
+    /// # Panics
+    /// If `sections` is empty, which is a shepherd with no answer to give
+    /// and a test that cannot mean anything. Kept as a named panic rather
+    /// than designed out with a `(first, rest)` signature: the indexing
+    /// below would panic on the empty slice anyway, and it would do it
+    /// several frames away with nothing about the caller in the message.
+    #[track_caller]
     pub fn of(sections: &[&str]) -> Self {
         assert!(!sections.is_empty(), "a shepherd with nothing to answer");
         Self {
@@ -392,4 +419,36 @@ impl Daemon for Sections {
     crate::fixtures::daemon_methods!(unimplemented;
         list_flock, describe, start, delete, reload, restart, save_roll, set_smit,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// fails if a `Sections` printed with `{:?}` shows a section body. A
+    /// real `[dog.<name>]` section routinely carries webhook credentials
+    /// for other dogs, so the hand-written `Debug` prints a count; this
+    /// pins that exact shape, because a later `#[derive(Debug)]` here would
+    /// be silent and would put whatever a test wrote into the failure
+    /// output of every test that ever prints one.
+    #[test]
+    fn debug_does_not_print_the_sections() {
+        let daemon = Sections::of(&["retention = 9", "interval = \"hunter2-distinctive\""]);
+
+        let shown = format!("{daemon:?}");
+
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(!shown.contains("retention"), "{shown}");
+        assert_eq!(shown, "Sections { sections: <2 sections>, asked: 0 }");
+    }
+
+    /// fails if the constructor stops naming the empty slice. It would
+    /// panic anyway on the indexing in `dog_config`, several frames from
+    /// the test that wrote it and with nothing about the caller in the
+    /// message.
+    #[test]
+    #[should_panic(expected = "a shepherd with nothing to answer")]
+    fn a_shepherd_with_no_sections_is_refused_by_name() {
+        let _ = Sections::of(&[]);
+    }
 }

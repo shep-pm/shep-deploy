@@ -361,7 +361,7 @@ fn worth_saying(previous: &mut BTreeMap<String, Repeat>, sheep: &str, line: &str
 ///
 /// Takes the [`Reader`] rather than a [`DogConfig`], because the section is
 /// read again at the top of every tick: an operator who changes `interval`
-/// or `retention` is picked up within one interval and without a restart.
+/// or `retention` is picked up by the next tick, without a restart.
 /// A read that fails keeps the section that last parsed and is reported as
 /// a row of its own; [`config::Reader::refresh`](Reader::refresh) says why
 /// that is not what the startup read does.
@@ -429,9 +429,11 @@ async fn run_with<D: Daemon, O: Write, E: Write>(
     loop {
         // Ahead of the tick rather than after it, so the deploys this tick
         // makes and the sleep that follows them both run on what the
-        // section says now. A change therefore takes effect within one
-        // interval of being written, which is what `shep lookout` tells an
-        // operator has already happened.
+        // section says now. A change therefore takes effect on the next
+        // tick, which is the soonest anything here could act on it. NOT
+        // within one interval: this tick can be a whole deploy, and an edit
+        // written just after it started waits for it to finish and then for
+        // the sleep the old interval asked for.
         let stale = config.refresh(daemon).await;
 
         let Tick {

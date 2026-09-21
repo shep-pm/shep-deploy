@@ -336,9 +336,13 @@ async fn section_of<D: Daemon>(daemon: &D, name: &str) -> Result<DogConfig, Erro
 
 /// This dog's own section, and the means to ask for it again.
 ///
-/// The poll loop refreshes this once a tick, so an `interval` or a
-/// `retention` an operator changes reaches a running dog within one
-/// interval and without a restart. `shep lookout` writes the section and
+/// The poll loop refreshes this at the top of every tick, so an `interval`
+/// or a `retention` an operator changes is picked up by the next tick,
+/// without a restart. By the next tick rather than within one interval:
+/// the refresh comes before the tick and the sleep comes after it, so an
+/// edit written just as a deploy starts waits for that deploy to finish
+/// and then for the sleep the OLD interval asked for.
+/// `shep lookout` writes the section and
 /// then says the dog has been told; before this type existed that sentence
 /// was true about the shepherd and false about the dog, and nothing said
 /// so.
@@ -354,6 +358,13 @@ async fn section_of<D: Daemon>(daemon: &D, name: &str) -> Result<DogConfig, Erro
 /// A dog that had no name to resolve stays on the documented defaults and
 /// asks for nothing at all. That is the same dog [`read`] describes, and a
 /// process nothing adopted has no section to be told about.
+///
+/// `Debug` is derived rather than redacted (IR-41), because neither field
+/// is a secret: the name is what `shep dogs` already prints, and
+/// [`DogConfig`]'s own doc says why an interval and a count are safe. The
+/// raw section text is the part that would need redacting and it never
+/// reaches this type, which is the same reason `DogConfig` gives.
+#[derive(Debug)]
 pub struct Reader {
     /// The name shep adopted this dog under, or `None` when nothing did.
     name: Option<String>,
@@ -401,6 +412,13 @@ impl Reader {
     /// says so every time, through the same mute every other repeated
     /// complaint goes through, so a section left broken is said once and
     /// then hourly rather than once and then never.
+    ///
+    /// # Errors
+    /// Answers `Some` with whatever [`Daemon::dog_config`] returns when the
+    /// shepherd cannot be reached or refuses, and with [`Error::Config`]
+    /// from [`DogConfig::parse`] when the section it answers with will not
+    /// parse. `None` is both answers that are not a complaint: a section
+    /// that parsed, and a dog with no name to ask about.
     pub async fn refresh<D: Daemon>(&mut self, daemon: &D) -> Option<Error> {
         // No name is no complaint, which is what the `?` answers here: a
         // process no shepherd adopted has no section to be told about, and
@@ -680,6 +698,24 @@ mod tests {
             "{complaint}"
         );
         assert_eq!(reader.current().retention, 9, "still the one that parsed");
+    }
+
+    /// fails if `Reader`'s `Debug` starts carrying something an operator
+    /// would not want in a log. The derive is safe only because the raw
+    /// section text never reaches this type, so this pins the shape: a
+    /// name, and a `DogConfig` of parsed values.
+    #[test]
+    fn debug_shows_the_name_and_the_parsed_values_only() {
+        let reader = Reader::primed(
+            Some(ADOPTED.to_owned()),
+            DogConfig::parse("retention = 9").expect("a section"),
+        );
+
+        let shown = format!("{reader:?}");
+
+        assert!(shown.contains("name: Some(\"deploy\")"), "{shown}");
+        assert!(shown.contains("retention: 9"), "{shown}");
+        assert!(!shown.contains("Section"), "no raw section text: {shown}");
     }
 
     /// fails if a dog nothing adopted starts asking the shepherd for a

@@ -141,7 +141,9 @@ passthrough = ["CARGO_HOME"]
 ```
 
 All five are read again at the top of every tick, so changing any takes
-effect within one interval and no restart. A section that stops parsing
+effect on the next tick, with no restart. Not within one interval: a tick
+that is running a deploy finishes it first, and only then sleeps the
+interval it read before the edit. A section that stops parsing
 while the dog runs leaves it polling on the last one that did, and it says
 so; the same mistake at startup stops the dog instead, because there is
 nothing else for it to run on then. A shep older than 0.1.32 read the same
