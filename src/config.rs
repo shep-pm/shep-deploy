@@ -311,15 +311,123 @@ fn at_least_a_second(key: &str, value: UpDuration, harm: &str) -> Result<Duratio
 /// [`adopted_name`]'s own contract: not knowing the name and being adopted
 /// under a name with no section are the same position from here.
 ///
+/// The one-shot verbs use this. The poll loop uses [`Reader`], which is
+/// this plus the name it resolved, so that it can ask again every tick
+/// without listing the flock again every tick.
+///
 /// # Errors
 /// Whatever [`Daemon::dog_config`] returns, plus [`Error::Config`] from
 /// [`DogConfig::parse`].
 pub async fn read<D: Daemon>(daemon: &D) -> Result<DogConfig, Error> {
-    let Some(name) = adopted_name(daemon).await else {
-        return DogConfig::parse("");
-    };
-    let section = daemon.dog_config(&name).await?;
+    match adopted_name(daemon).await {
+        Some(name) => section_of(daemon, &name).await,
+        None => DogConfig::parse(""),
+    }
+}
+
+/// The section registered under `name`, parsed.
+///
+/// # Errors
+/// As [`read`].
+async fn section_of<D: Daemon>(daemon: &D, name: &str) -> Result<DogConfig, Error> {
+    let section = daemon.dog_config(name).await?;
     DogConfig::parse(&section)
+}
+
+/// This dog's own section, and the means to ask for it again.
+///
+/// The poll loop refreshes this once a tick, so an `interval` or a
+/// `retention` an operator changes reaches a running dog within one
+/// interval and without a restart. `shep lookout` writes the section and
+/// then says the dog has been told; before this type existed that sentence
+/// was true about the shepherd and false about the dog, and nothing said
+/// so.
+///
+/// # Why the name is resolved once and the section is not
+///
+/// [`adopted_name`] costs a whole flock listing, and the answer cannot
+/// change under a running process: shep spawns an adopted dog itself and
+/// names it then, so a rename is a respawn. The section is the part that
+/// an operator edits while the dog runs, so it is the part worth asking
+/// for again.
+///
+/// A dog that had no name to resolve stays on the documented defaults and
+/// asks for nothing at all. That is the same dog [`read`] describes, and a
+/// process nothing adopted has no section to be told about.
+pub struct Reader {
+    /// The name shep adopted this dog under, or `None` when nothing did.
+    name: Option<String>,
+    /// The newest section that parsed.
+    current: DogConfig,
+}
+
+impl Reader {
+    /// Resolves this dog's name and reads its section, once, as it starts.
+    ///
+    /// # Errors
+    /// As [`read`]. A dog does not start on a section it cannot read; see
+    /// [`Self::refresh`] for why that is not what a later read does.
+    pub async fn open<D: Daemon>(daemon: &D) -> Result<Self, Error> {
+        let name = adopted_name(daemon).await;
+        let current = match &name {
+            Some(name) => section_of(daemon, name).await?,
+            None => DogConfig::parse("")?,
+        };
+        Ok(Self { name, current })
+    }
+
+    /// The newest section that parsed.
+    pub const fn current(&self) -> &DogConfig {
+        &self.current
+    }
+
+    /// Reads the section again, answering with the complaint when it could
+    /// not be read or would not parse.
+    ///
+    /// # Why this keeps the last section rather than ending the dog
+    ///
+    /// [`Self::open`] propagates and the dog exits, because a dog running
+    /// on defaults it was not asked for looks exactly like one honouring
+    /// the config and there is nothing else for it to run on. Neither half
+    /// holds here. The section that parsed a tick ago is something else to
+    /// run on, and it is one the operator asked for rather than a default.
+    /// And a tick of THIS dog can be a whole deploy - a fetch, a build and
+    /// a reload of a live app - so ending one over a half-typed edit in a
+    /// file somebody is still in the middle of costs more than it does in a
+    /// dog that rotates logs.
+    ///
+    /// What the two answers have in common is the part that matters: the
+    /// dog never quietly runs on something nobody asked for. The caller
+    /// says so every time, through the same mute every other repeated
+    /// complaint goes through, so a section left broken is said once and
+    /// then hourly rather than once and then never.
+    pub async fn refresh<D: Daemon>(&mut self, daemon: &D) -> Option<Error> {
+        // No name is no complaint, which is what the `?` answers here: a
+        // process no shepherd adopted has no section to be told about, and
+        // asking again every tick would list the whole flock forever to be
+        // told so. Cloned because `self` is borrowed mutably for the write
+        // below, across the await.
+        let name = self.name.clone()?;
+        match section_of(daemon, &name).await {
+            Ok(fresh) => {
+                self.current = fresh;
+                None
+            }
+            Err(err) => Some(err),
+        }
+    }
+
+    /// A reader that starts from `current`, for tests whose subject is
+    /// something other than the reading.
+    ///
+    /// A `None` name is a reader [`Self::refresh`] asks nothing for, which
+    /// is what the loop's older tests want: they pin behaviour against a
+    /// config they set by hand, and a double that had to serve a section
+    /// too would put the thing under test behind a fixture.
+    #[cfg(test)]
+    pub const fn primed(name: Option<String>, current: DogConfig) -> Self {
+        Self { name, current }
+    }
 }
 
 #[cfg(test)]
@@ -516,5 +624,76 @@ mod tests {
         assert_eq!(minimum, MINIMUM_RETENTION as u64);
         DogConfig::parse(&format!("retention = {minimum}")).expect("the floor itself is accepted");
         DogConfig::parse(&format!("retention = {}", minimum - 1)).expect_err("below it is not");
+    }
+
+    /// The name a test's shepherd has adopted this dog under.
+    const ADOPTED: &str = "deploy";
+
+    /// A reader that will really ask for its section, starting from the
+    /// documented defaults.
+    fn reading() -> Reader {
+        Reader::primed(
+            Some(ADOPTED.to_owned()),
+            DogConfig::parse("").expect("the defaults"),
+        )
+    }
+
+    /// fails if a section read again stops replacing the one before it, or
+    /// replaces only part of it. This is the whole of what makes an edit
+    /// reach a running dog: `crate::poll` passes `current` to every tick
+    /// and sleeps on its `interval`, so a value that does not land here
+    /// lands nowhere.
+    #[tokio::test]
+    async fn a_refresh_that_parses_replaces_the_whole_section() {
+        let daemon = crate::fixtures::Sections::of(&["interval = \"5m\"\nretention = 9"]);
+        let mut reader = reading();
+
+        assert!(reader.refresh(&daemon).await.is_none(), "it parsed");
+
+        assert_eq!(reader.current().interval, Duration::from_secs(300));
+        assert_eq!(reader.current().retention, 9);
+    }
+
+    /// fails if a section that stops parsing takes the one the dog was
+    /// working on with it.
+    ///
+    /// The startup read refuses to start on a section it cannot parse, and
+    /// this deliberately answers the same mistake differently: there is a
+    /// section that parsed to fall back on by now, it is one the operator
+    /// asked for rather than a default, and a tick of this dog can be a
+    /// whole deploy. The complaint is how it stays honest about that, so
+    /// the error comes back rather than being swallowed.
+    #[tokio::test]
+    async fn a_refresh_that_fails_keeps_the_last_section_that_parsed() {
+        let daemon = crate::fixtures::Sections::of(&["retention = 9", "retention = 1"]);
+        let mut reader = reading();
+
+        assert!(reader.refresh(&daemon).await.is_none(), "the first parsed");
+        assert_eq!(reader.current().retention, 9);
+
+        let complaint = reader
+            .refresh(&daemon)
+            .await
+            .expect("the second is refused");
+        assert!(
+            complaint.to_string().contains("keeps too few releases"),
+            "{complaint}"
+        );
+        assert_eq!(reader.current().retention, 9, "still the one that parsed");
+    }
+
+    /// fails if a dog nothing adopted starts asking the shepherd for a
+    /// section every tick. There is no section to ask for - that is what
+    /// having no name means here - and the ask is a whole flock listing,
+    /// forever, to be told so.
+    #[tokio::test]
+    async fn an_unnamed_dog_asks_for_no_section_at_all() {
+        let daemon = crate::fixtures::Sections::of(&["retention = 9"]);
+        let mut reader = Reader::primed(None, crate::fixtures::dog_config());
+
+        assert!(reader.refresh(&daemon).await.is_none());
+
+        assert_eq!(daemon.asked(), 0, "nothing was asked for");
+        assert_eq!(reader.current(), &crate::fixtures::dog_config());
     }
 }

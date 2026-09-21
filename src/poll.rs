@@ -7,13 +7,26 @@
 //!
 //! # What a tick asks the shepherd for
 //!
-//! One `set_smit` per target, every tick, and nothing more until it has
-//! something to deploy. Targets are read from the filesystem - one
-//! directory per target under `<shep_home>/deploy`, each holding its own
-//! record - and a target whose branch has not moved is answered by `git`
-//! alone. The smit is republished each tick because the daemon holds it in
-//! memory only for as long as this dog's connection lasts; see [`tick`].
-//! Past that, the shepherd is asked only by a deploy that is going ahead.
+//! One `set_smit` per target and one read of this dog's own section, every
+//! tick, and nothing more until it has something to deploy. Targets are read
+//! from the filesystem - one directory per target under
+//! `<shep_home>/deploy`, each holding its own record - and a target whose
+//! branch has not moved is answered by `git` alone. The smit is republished
+//! each tick because the daemon holds it in memory only for as long as this
+//! dog's connection lasts; see [`tick`]. Past that, the shepherd is asked
+//! only by a deploy that is going ahead.
+//!
+//! The section is re-read rather than read once at startup, because
+//! otherwise an operator who changes `interval` or `retention` is told by
+//! `shep lookout` that the dog has been told, and the dog goes on polling
+//! on the section it read when it started until somebody restarts it. It is
+//! a read rather than a subscription to the `config.dog.<name>` the
+//! shepherd already publishes: a subscriber that lags drops events, and
+//! `ReconnectingClient::subscribe` hands out a stream belonging to one
+//! generation of the connection, which this dog outlives on purpose (see
+//! `crate::main::poll_forever`). Both mean a bus alone would silently miss
+//! a change, which is the failure this exists to remove, so the poll would
+//! have had to stay underneath it anyway.
 //!
 //! In particular the roll is never read. [`crate::roll::registered`] is how
 //! `survey` learns what shep has registered, and it goes through
@@ -47,7 +60,7 @@ use std::task::{Context, Poll};
 
 use tokio::time::sleep;
 
-use crate::config::DogConfig;
+use crate::config::{DogConfig, Reader};
 use crate::daemon::Daemon;
 use crate::deploy::{self, Outcome};
 use crate::error::Error;
@@ -346,6 +359,13 @@ fn worth_saying(previous: &mut BTreeMap<String, Repeat>, sheep: &str, line: &str
 /// What it says per target is [`report`]'s, and how often it repeats itself
 /// is [`worth_saying`]'s.
 ///
+/// Takes the [`Reader`] rather than a [`DogConfig`], because the section is
+/// read again at the top of every tick: an operator who changes `interval`
+/// or `retention` is picked up within one interval and without a restart.
+/// A read that fails keeps the section that last parsed and is reported as
+/// a row of its own; [`config::Reader::refresh`](Reader::refresh) says why
+/// that is not what the startup read does.
+///
 /// # Errors
 /// Never returns `Ok`, and in practice never returns at all: a target's
 /// failure is reported and the loop goes on to the next one, because a dog
@@ -374,7 +394,7 @@ fn worth_saying(previous: &mut BTreeMap<String, Repeat>, sheep: &str, line: &str
 /// has gone. A fetch against a host that is not answering is still bounded
 /// by `DogConfig::git_timeout`, so it fails that one target like any other
 /// error rather than holding the loop.
-pub async fn run<D: Daemon>(daemon: &D, shep_home: &Path, config: &DogConfig) -> Result<(), Error> {
+pub async fn run<D: Daemon>(daemon: &D, shep_home: &Path, config: Reader) -> Result<(), Error> {
     run_with(
         daemon,
         shep_home,
@@ -399,17 +419,33 @@ pub async fn run<D: Daemon>(daemon: &D, shep_home: &Path, config: &DogConfig) ->
 async fn run_with<D: Daemon, O: Write, E: Write>(
     daemon: &D,
     shep_home: &Path,
-    config: &DogConfig,
+    mut config: Reader,
     out: &mut O,
     err: &mut E,
 ) -> Result<(), Error> {
     let mut previous: BTreeMap<String, Repeat> = BTreeMap::new();
     let deploy_dir = shep_home.join("deploy").display().to_string();
+    let dogs_file = shep_home.join("dogs.toml").display().to_string();
     loop {
+        // Ahead of the tick rather than after it, so the deploys this tick
+        // makes and the sleep that follows them both run on what the
+        // section says now. A change therefore takes effect within one
+        // interval of being written, which is what `shep lookout` tells an
+        // operator has already happened.
+        let stale = config.refresh(daemon).await;
+
         let Tick {
             targets,
             mut results,
-        } = tick(daemon, shep_home, config).await;
+        } = tick(daemon, shep_home, config.current()).await;
+
+        // A row rather than a bare `eprintln!`, for the reason the smit
+        // refusal above is one: a section left broken would otherwise say
+        // so every interval forever. Keyed on the file an operator has to
+        // edit to fix it, which no sheep name can collide with.
+        if let Some(why) = stale {
+            results.push((dogs_file.clone(), Err(stale_section(&why))));
+        }
 
         // A deploy directory that is gone answers as an empty list, which is
         // also what a shepherd with no targets yet answers, so the loop went
@@ -455,8 +491,29 @@ async fn run_with<D: Daemon, O: Write, E: Write>(
             };
         }
 
-        sleep(config.interval).await;
+        sleep(config.current().interval).await;
     }
+}
+
+/// The complaint a section that could not be re-read is reported as.
+///
+/// It says what the dog did about it, because the same mistake at startup
+/// stops the dog dead: a line naming only the mistake would read as a dog
+/// that had stopped, and an operator would go looking for one.
+///
+/// [`Error::Config`]'s own wording is unwrapped rather than nested,
+/// because this is itself a `Config` and two "bad deploy configuration"
+/// prefixes on one line read as a fault in the dog rather than one in the
+/// file.
+fn stale_section(why: &Error) -> Error {
+    let what = match why {
+        Error::Config(what) => what.clone(),
+        other => other.to_string(),
+    };
+    Error::Config(format!(
+        "{what}. The dog is still polling on the section it last read, so it is not yet \
+         running what this file now says"
+    ))
 }
 
 #[cfg(test)]
@@ -886,10 +943,13 @@ mod tests {
             run(
                 &counter,
                 home.path(),
-                &DogConfig {
-                    interval: Duration::from_secs(150),
-                    ..fixtures::dog_config()
-                },
+                Reader::primed(
+                    None,
+                    DogConfig {
+                        interval: Duration::from_secs(150),
+                        ..fixtures::dog_config()
+                    },
+                ),
             ),
         )
         .await;
@@ -913,10 +973,13 @@ mod tests {
             run(
                 &counter,
                 home.path(),
-                &DogConfig {
-                    interval: Duration::from_secs(600),
-                    ..fixtures::dog_config()
-                },
+                Reader::primed(
+                    None,
+                    DogConfig {
+                        interval: Duration::from_secs(600),
+                        ..fixtures::dog_config()
+                    },
+                ),
             ),
         )
         .await;
@@ -1064,10 +1127,13 @@ mod tests {
             run_with(
                 &Ready::new(),
                 home.path(),
-                &DogConfig {
-                    interval: Duration::from_secs(600),
-                    ..fixtures::dog_config()
-                },
+                Reader::primed(
+                    None,
+                    DogConfig {
+                        interval: Duration::from_secs(600),
+                        ..fixtures::dog_config()
+                    },
+                ),
                 &mut out,
                 &mut err,
             ),
@@ -1097,10 +1163,13 @@ mod tests {
             run_with(
                 &Ready::new(),
                 home.path(),
-                &DogConfig {
-                    interval: Duration::from_secs(150),
-                    ..fixtures::dog_config()
-                },
+                Reader::primed(
+                    None,
+                    DogConfig {
+                        interval: Duration::from_secs(150),
+                        ..fixtures::dog_config()
+                    },
+                ),
                 &mut out,
                 &mut err,
             ),
@@ -1111,6 +1180,88 @@ mod tests {
         assert_eq!(complained.lines().count(), 1, "{complained}");
         assert!(complained.starts_with("broken: "), "{complained}");
         assert!(out.is_empty(), "nothing deployed");
+    }
+
+    /// The name a test's shepherd has adopted this dog under. Any name
+    /// would do; [`fixtures::Sections`] answers whatever it is asked.
+    const ADOPTED: &str = "deploy";
+
+    /// A reader that will really ask for its section, starting from the
+    /// fixture config so that a test's own sections are the only values it
+    /// could be running on afterwards.
+    fn reading() -> Reader {
+        Reader::primed(Some(ADOPTED.to_owned()), fixtures::dog_config())
+    }
+
+    /// fails if a change to this dog's own section never reaches a running
+    /// dog. `shep lookout` writes the section and then tells the operator
+    /// the dog has been told, so a dog that goes on polling at the interval
+    /// it started with makes that sentence false with nothing anywhere
+    /// saying so - and the operator only finds out by timing the deploys.
+    ///
+    /// The second section is SHORTER than the first, so the count can only
+    /// come out right if the new value is what the loop slept on: at ten
+    /// minutes it is asked at t=0 and t=600, at one minute it is asked
+    /// again at t=660, and the tick after that falls outside the timeout.
+    /// A dog that re-read the section and kept using the old one asks
+    /// twice; one still on the fixture's thirty seconds asks twenty-four
+    /// times.
+    #[tokio::test(start_paused = true)]
+    async fn a_changed_interval_reaches_the_dog_without_a_restart() {
+        let home = fixtures::tempdir();
+        let daemon = fixtures::Sections::of(&["interval = \"600s\"", "interval = \"60s\""]);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(700),
+            run_with(&daemon, home.path(), reading(), &mut out, &mut err),
+        )
+        .await;
+
+        assert_eq!(daemon.asked(), 3, "t=0 at 600s, t=600 at 60s, t=660");
+    }
+
+    /// fails if a section that stops parsing mid-run takes the config the
+    /// dog was working on with it, or takes the dog down.
+    ///
+    /// Both would be defensible on their own and neither is what this dog
+    /// does: a tick here can be a whole deploy, and the section that parsed
+    /// a minute ago is one the operator asked for rather than a default. So
+    /// the refused section leaves the interval where it was - asked at
+    /// t=0, 60, 120 and 180, where the thirty-second default would have
+    /// asked six times and an exit would have asked twice.
+    ///
+    /// A request the shepherd refuses takes the same branch; this is the
+    /// half an operator can cause with a text editor.
+    #[tokio::test(start_paused = true)]
+    async fn a_section_that_stops_parsing_keeps_the_one_that_worked() {
+        let home = fixtures::tempdir();
+        let daemon = fixtures::Sections::of(&["interval = \"60s\"", "retention = 1"]);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(200),
+            run_with(&daemon, home.path(), reading(), &mut out, &mut err),
+        )
+        .await;
+
+        assert_eq!(daemon.asked(), 4, "still a minute apart");
+
+        // The empty home complains about having no targets on every tick
+        // too, and that row is muted the same way; this one is the row
+        // keyed on the file an operator has to edit.
+        let complained = String::from_utf8(err).expect("utf-8");
+        let about_the_section: Vec<&str> = complained
+            .lines()
+            .filter(|line| line.contains("dogs.toml"))
+            .collect();
+        assert_eq!(about_the_section.len(), 1, "said once, not per tick");
+        let line = about_the_section[0];
+        assert!(line.contains("keeps too few releases"), "{line}");
+        assert!(
+            line.contains("still polling on the section it last read"),
+            "{line}"
+        );
     }
 
     /// A [`Daemon`] whose `set_smit` records every `(sheep, text)` it was
