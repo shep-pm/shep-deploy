@@ -1211,7 +1211,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_changed_interval_reaches_the_dog_without_a_restart() {
         let home = fixtures::tempdir();
-        let daemon = fixtures::Sections::of(&["interval = \"600s\"", "interval = \"60s\""]);
+        let daemon = fixtures::Sections::of("interval = \"600s\"", &["interval = \"60s\""]);
         let (mut out, mut err) = (Vec::new(), Vec::new());
 
         let _ = tokio::time::timeout(
@@ -1238,7 +1238,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_section_that_stops_parsing_keeps_the_one_that_worked() {
         let home = fixtures::tempdir();
-        let daemon = fixtures::Sections::of(&["interval = \"60s\"", "retention = 1"]);
+        let daemon = fixtures::Sections::of("interval = \"60s\"", &["retention = 1"]);
         let (mut out, mut err) = (Vec::new(), Vec::new());
 
         let _ = tokio::time::timeout(

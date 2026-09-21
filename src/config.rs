@@ -663,7 +663,7 @@ mod tests {
     /// lands nowhere.
     #[tokio::test]
     async fn a_refresh_that_parses_replaces_the_whole_section() {
-        let daemon = crate::fixtures::Sections::of(&["interval = \"5m\"\nretention = 9"]);
+        let daemon = crate::fixtures::Sections::of("interval = \"5m\"\nretention = 9", &[]);
         let mut reader = reading();
 
         assert!(reader.refresh(&daemon).await.is_none(), "it parsed");
@@ -683,7 +683,7 @@ mod tests {
     /// the error comes back rather than being swallowed.
     #[tokio::test]
     async fn a_refresh_that_fails_keeps_the_last_section_that_parsed() {
-        let daemon = crate::fixtures::Sections::of(&["retention = 9", "retention = 1"]);
+        let daemon = crate::fixtures::Sections::of("retention = 9", &["retention = 1"]);
         let mut reader = reading();
 
         assert!(reader.refresh(&daemon).await.is_none(), "the first parsed");
@@ -724,7 +724,7 @@ mod tests {
     /// forever, to be told so.
     #[tokio::test]
     async fn an_unnamed_dog_asks_for_no_section_at_all() {
-        let daemon = crate::fixtures::Sections::of(&["retention = 9"]);
+        let daemon = crate::fixtures::Sections::of("retention = 9", &[]);
         let mut reader = Reader::primed(None, crate::fixtures::dog_config());
 
         assert!(reader.refresh(&daemon).await.is_none());

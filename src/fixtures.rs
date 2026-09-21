@@ -377,19 +377,23 @@ impl core::fmt::Debug for Sections {
 }
 
 impl Sections {
-    /// A shepherd handing out `sections` in order.
+    /// A shepherd handing out `first`, and then `rest`, in order.
     ///
-    /// # Panics
-    /// If `sections` is empty, which is a shepherd with no answer to give
-    /// and a test that cannot mean anything. Kept as a named panic rather
-    /// than designed out with a `(first, rest)` signature: the indexing
-    /// below would panic on the empty slice anyway, and it would do it
-    /// several frames away with nothing about the caller in the message.
-    #[track_caller]
-    pub fn of(sections: &[&str]) -> Self {
-        assert!(!sections.is_empty(), "a shepherd with nothing to answer");
+    /// Split in two so that a shepherd with nothing to answer cannot be
+    /// built. It took one slice and asserted the slice was not empty until
+    /// review pointed out that naming a panic is not the same as not
+    /// having one: with the first section required, the indexing in
+    /// [`Self::dog_config`] has no empty case left to meet, so this
+    /// constructor cannot fail at all rather than failing with a good
+    /// message.
+    ///
+    /// [`Self::dog_config`]: crate::daemon::Daemon::dog_config
+    pub fn of(first: &str, rest: &[&str]) -> Self {
         Self {
-            sections: sections.iter().map(|text| (*text).to_owned()).collect(),
+            sections: core::iter::once(first)
+                .chain(rest.iter().copied())
+                .map(str::to_owned)
+                .collect(),
             asked: Cell::new(0),
         }
     }
@@ -433,22 +437,12 @@ mod tests {
     /// output of every test that ever prints one.
     #[test]
     fn debug_does_not_print_the_sections() {
-        let daemon = Sections::of(&["retention = 9", "interval = \"hunter2-distinctive\""]);
+        let daemon = Sections::of("retention = 9", &["interval = \"hunter2-distinctive\""]);
 
         let shown = format!("{daemon:?}");
 
         assert!(!shown.contains("hunter2"), "{shown}");
         assert!(!shown.contains("retention"), "{shown}");
         assert_eq!(shown, "Sections { sections: <2 sections>, asked: 0 }");
-    }
-
-    /// fails if the constructor stops naming the empty slice. It would
-    /// panic anyway on the indexing in `dog_config`, several frames from
-    /// the test that wrote it and with nothing about the caller in the
-    /// message.
-    #[test]
-    #[should_panic(expected = "a shepherd with nothing to answer")]
-    fn a_shepherd_with_no_sections_is_refused_by_name() {
-        let _ = Sections::of(&[]);
     }
 }
