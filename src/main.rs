@@ -304,10 +304,16 @@ const DOG_NAME: &str = "SHEP_DOG_NAME";
 /// [`Error::Io`] if `$SHEP_HOME` cannot be resolved, [`Error::Connect`] if
 /// the shepherd's socket cannot be reached, [`Error::Refused`] if a
 /// successor daemon refuses this dog's handshake, and whatever
-/// [`config::read`] returns - a `[dog.<name>]` section that cannot be
-/// parsed stops the dog here rather than being ignored, because a dog
+/// [`config::Reader::open`] returns - a `[dog.<name>]` section that cannot
+/// be parsed stops the dog here rather than being ignored, because a dog
 /// running on defaults it was not asked for looks exactly like one
 /// honouring the config.
+///
+/// That is the STARTING read. The loop reads the section again every tick,
+/// so an operator who edits it does not have to restart the dog, and a
+/// later read that fails keeps the last section that parsed instead of
+/// ending a deploy that may be in flight. [`config::Reader::refresh`] says
+/// why the two answers differ.
 ///
 /// A target's own failure is NOT one of these. It is reported and the loop
 /// carries on to the next target; see [`poll::run`].
@@ -322,10 +328,10 @@ async fn poll_forever() -> Result<u8, Error> {
         None => ReconnectingClient::connect(&socket).await?,
     };
     let daemon = Live::dog(client);
-    let config = config::read(&daemon).await?;
+    let config = config::Reader::open(&daemon).await?;
 
     tokio::select! {
-        result = poll::run(&daemon, &home, &config) => result.map(|()| 0),
+        result = poll::run(&daemon, &home, config) => result.map(|()| 0),
         // Cancels `poll::run` the same way a stop does, and can land inside
         // a deploy for the same reason - see `Stop::arrives`. It costs
         // nothing here that carrying on would not cost anyway: past a

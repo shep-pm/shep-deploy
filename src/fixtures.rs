@@ -29,6 +29,7 @@
 //! this module, so it keeps its own copy. One copy across a target boundary is
 //! the cost of the boundary; six inside one target was not.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -36,6 +37,8 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use crate::config::DogConfig;
+use crate::daemon::Daemon;
+use crate::error::Error;
 use crate::state::{State, Verify, Watch};
 
 /// A full commit sha, as `git rev-parse` prints one.
@@ -333,4 +336,113 @@ pub(crate) use daemon_methods;
 #[track_caller]
 pub fn tempdir() -> TempDir {
     tempfile::tempdir().expect("tempdir")
+}
+
+/// A shepherd that answers [`Daemon::dog_config`](crate::daemon::Daemon)
+/// from a list of sections, in order, and counts the asks.
+///
+/// The last entry repeats once the list runs out, so a test writes only the
+/// changes it is about and nothing to pad a loop out with. Counting the
+/// asks is how a test counts ticks: the poll loop reads the section exactly
+/// once per tick, before anything else the tick does, so a home with no
+/// targets in it at all is enough to drive one and no repository has to be
+/// built.
+///
+/// Every other method is unimplemented. A test that wants a deploy to
+/// really run wants one of `crate::poll`'s own doubles instead.
+///
+/// `Debug` is hand-written to keep the sections out of it (IR-41). They
+/// are `[dog.<name>]` section bodies, and a real one routinely carries
+/// webhook credentials for other dogs, so a fixture that printed them
+/// would teach the shape even though these particular strings are written
+/// by tests. Prints a count instead, the same way `crate::build::BuildSpec`
+/// prints `env`.
+pub struct Sections {
+    /// The sections to hand out, in order.
+    sections: Vec<String>,
+    /// How many have been asked for.
+    asked: Cell<usize>,
+}
+
+impl core::fmt::Debug for Sections {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Sections")
+            .field(
+                "sections",
+                &format_args!("<{} sections>", self.sections.len()),
+            )
+            .field("asked", &self.asked.get())
+            .finish()
+    }
+}
+
+impl Sections {
+    /// A shepherd handing out `first`, and then `rest`, in order.
+    ///
+    /// Split in two so that a shepherd with nothing to answer cannot be
+    /// built. It took one slice and asserted the slice was not empty until
+    /// review pointed out that naming a panic is not the same as not
+    /// having one: with the first section required, the indexing in
+    /// [`Self::dog_config`] has no empty case left to meet, so this
+    /// constructor cannot fail at all rather than failing with a good
+    /// message.
+    ///
+    /// [`Self::dog_config`]: crate::daemon::Daemon::dog_config
+    pub fn of(first: &str, rest: &[&str]) -> Self {
+        Self {
+            sections: core::iter::once(first)
+                .chain(rest.iter().copied())
+                .map(str::to_owned)
+                .collect(),
+            asked: Cell::new(0),
+        }
+    }
+
+    /// How many times the section has been asked for.
+    pub fn asked(&self) -> usize {
+        self.asked.get()
+    }
+}
+
+impl Daemon for Sections {
+    async fn dog_config(&self, _name: &str) -> Result<String, Error> {
+        let asked = self.asked.get();
+        self.asked.set(asked + 1);
+        // Under a paused clock a loop that stopped sleeping never parks, so
+        // the runtime never advances time and a timeout around it hangs
+        // rather than firing. This turns that into a red test with a reason
+        // on it, exactly as `poll`'s `Counting` double does.
+        assert!(
+            asked < 200,
+            "the section was asked for far more often than the interval allows: the loop is \
+             not sleeping"
+        );
+        Ok(self.sections[asked.min(self.sections.len() - 1)].clone())
+    }
+
+    crate::fixtures::daemon_methods!(unimplemented;
+        list_flock, describe, start, delete, reload, restart, save_roll, set_smit,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// fails if a `Sections` printed with `{:?}` shows a section body. A
+    /// real `[dog.<name>]` section routinely carries webhook credentials
+    /// for other dogs, so the hand-written `Debug` prints a count; this
+    /// pins that exact shape, because a later `#[derive(Debug)]` here would
+    /// be silent and would put whatever a test wrote into the failure
+    /// output of every test that ever prints one.
+    #[test]
+    fn debug_does_not_print_the_sections() {
+        let daemon = Sections::of("retention = 9", &["interval = \"hunter2-distinctive\""]);
+
+        let shown = format!("{daemon:?}");
+
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(!shown.contains("retention"), "{shown}");
+        assert_eq!(shown, "Sections { sections: <2 sections>, asked: 0 }");
+    }
 }
