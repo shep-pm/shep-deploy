@@ -136,12 +136,18 @@ pub struct DogConfig {
 /// count and a list of variable NAMES are not credentials. `passthrough`
 /// is the one worth pausing on, and it names variables rather than
 /// carrying their values - the values stay in the dog's environment and
-/// never enter this file. The derive is here all the same, because a
-/// config type with nothing to mark still needs the impl for shep to have
-/// a schema to ask for at all. It is also why `Debug` is derived rather
-/// than hand-written to redact something (IR-41): there is nothing here to
-/// redact.
-#[derive(Debug, Deserialize, schemars::JsonSchema, shep_client::dogs::DogConfig)]
+/// never enter this file. The attribute is here all the same, because
+/// `dogs::probe` is bounded on the trait it implements, so a config type
+/// with nothing to mark still needs it for shep to have a schema to ask
+/// for at all. It is also why `Debug` is derived rather than hand-written
+/// to redact something (IR-41): there is nothing here to redact.
+///
+/// The attribute goes above the derives because it rewrites the fields it
+/// marks, and `JsonSchema` expanding first would render them unmarked. It
+/// refuses the wrong order only when a field really carries the mark, so
+/// here the order is convention the compiler has nothing to check.
+#[shep_client::dogs::dog_config]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 // `rename` sets the root schema's title, which the settings pane heads its
 // form with. `Section` alone would name this crate's Rust type at an
@@ -572,20 +578,6 @@ mod tests {
         assert!(err.to_string().contains("retention"), "{err}");
     }
 
-    /// fails if a `#[shep(secret)]` mark ever names a field the schema does
-    /// not have, which `#[serde(rename)]` on a marked field is what
-    /// produces. That combination is not a compile error and not a bad
-    /// schema: `probe` prints the complaint to stderr and exits 1, so shep
-    /// reads it as a dog whose schema is unreadable and adopts it anyway,
-    /// with the credential's field left unmarked. Nothing on the happy path
-    /// says so, which is why it is asserted here rather than left to the
-    /// first operator who opens the pane.
-    #[test]
-    fn the_section_renders_a_schema_with_every_mark_landing() {
-        shep_client::dogs::config_schema::<Section>()
-            .expect("every `#[shep(secret)]` field names a property of this type");
-    }
-
     /// fails if the schema stops describing the keys `parse` accepts.
     ///
     /// The two come from one struct and cannot drift by accident, but they
@@ -598,7 +590,7 @@ mod tests {
     /// own form, on a key the operator never typed.
     #[test]
     fn every_property_the_schema_publishes_is_a_key_the_parser_takes() {
-        let schema = shep_client::dogs::config_schema::<Section>().expect("renders");
+        let schema = shep_client::dogs::config_schema::<Section>();
         let schema = schema.as_value();
         let properties = schema
             .get("properties")
@@ -632,7 +624,7 @@ mod tests {
     /// cheerfully writes a section the dog will not boot on.
     #[test]
     fn the_schemas_retention_floor_is_the_one_the_parser_enforces() {
-        let schema = shep_client::dogs::config_schema::<Section>().expect("renders");
+        let schema = shep_client::dogs::config_schema::<Section>();
         let minimum = schema
             .as_value()
             .pointer("/properties/retention/minimum")
