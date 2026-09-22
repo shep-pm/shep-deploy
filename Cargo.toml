@@ -16,12 +16,15 @@ categories = ["command-line-utilities"]
 exclude = ["/docs/"]
 
 [dependencies]
-# 0.7.3 floor, and it buys one thing this crate needs: its `schema` feature
+# 0.10.0 floor, for `dogs::dog_config`: the attribute that replaced the
+# `DogConfig` derive in shep-pm/shep#594, and the bound `dogs::probe` takes
+# now. The older reason sits underneath it and still holds, since this crate
+# would floor at 0.7.3 without the newer one: shep-client's `schema` feature
 # forwards to `shep-core/schema`, which is where `UpDuration`'s `JsonSchema`
-# impl lives. 0.7.2's did not, so publishing `config::Section`'s schema at
-# all meant naming shep-core directly, as a dependency whose only job was to
-# turn that feature on. See shep-pm/shep#198.
-shep-client = "0.7.3"
+# impl lives, and 0.7.2's did not, so publishing `config::Section`'s schema
+# at all meant naming shep-core directly, as a dependency whose only job was
+# to turn that feature on. See shep-pm/shep#198.
+shep-client = "0.10.0"
 # The `JsonSchema` derive on `config::Section`. Still needed, and not the
 # same question the line above answers: shep-client does not re-export
 # schemars, so a dog derives against its own. Version-matched to the one

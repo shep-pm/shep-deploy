@@ -43,10 +43,13 @@ green against an installed 0.1.8 while CI, which installs the current release,
 failed.
 
 The floor moves with `shep-client`, too, and in both directions. The lockfile
-pins shep-client 0.7.3, which speaks protocol 8, so a shep older than 0.7.0
-fails every integration test at connect with `protocol mismatch (this client
-speaks 8)`. The other direction bit on 2026-09-04: the lockfile spoke 2, shep
-0.2.0 shipped speaking 3 within the hour, and CI, which installs the current
+pins shep-client 0.10.0, which speaks protocol 9, so a shep that does not
+accept 9 fails every integration test at connect with `protocol mismatch
+(this client speaks 9)`. `shep --version` prints both halves of that
+question, as `speaks protocol 9, accepts 8 and newer`.
+
+The other direction bit on 2026-09-04: the lockfile spoke 2, shep 0.2.0
+shipped speaking 3 within the hour, and CI, which installs the current
 release, failed all seven tests at connect while the local tier was green
 against a scratch 0.1.31. When that happens the fix is the dependency, not
 the tests: bump `shep-client` in Cargo.toml and `cargo update -p
@@ -109,7 +112,7 @@ SHEP_BIN="$(command -v shep)" cargo test --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
 
-399 unit tests, 7 integration and 3 probe as of 2026-09-08, ~24s, ~32s and instant. The number moves with every task; treat it as a shape, not a checksum.
+405 unit tests, 7 integration and 3 probe as of 2026-09-22, ~24s, ~32s and instant. The number moves with every task; treat it as a shape, not a checksum.
 
 ## Architecture
 
@@ -181,11 +184,22 @@ class rather than the instances.
   next reader; the reasoning belongs on `config::DogConfig`. The type-level
   doc is overridden with `#[schemars(description = ...)]` for the same
   reason, since schemars would otherwise publish the Rust doc verbatim.
-  `#[shep(secret)]` marks a credential, and this section has none; a mark
-  that names a field the schema lacks (what `#[serde(rename)]` produces) is
-  not a compile error, it makes `--schema` exit 1 at runtime.
-- **shep-client is floored at 0.7.3 for its `schema` feature, not for a
-  protocol number.** 0.7.2's `schema` did not forward to `shep-core/schema`,
+  `#[shep(secret)]` marks a credential, and this section has none. Since
+  shep-pm/shep#594 the mark rides the field rather than naming it, so it
+  reaches a renamed property and a nested one, and the old runtime failure
+  it could produce is gone: `dogs::config_schema` no longer returns a
+  `Result`.
+- **shep-client is floored at 0.10.0 for `dogs::dog_config`, and at 0.7.3
+  under that for its `schema` feature. Neither floor is a protocol
+  number.** 0.10.0 replaced the `DogConfig` derive with the `dog_config`
+  attribute (shep-pm/shep#594), and `dogs::probe` is bounded on the trait
+  the attribute implements, so a dog cannot answer `--schema` without it.
+  The attribute belongs ABOVE the derives, since it rewrites the fields it
+  marks and `JsonSchema` expanding first would render them unmarked. It
+  refuses the wrong order only when some field really carries the mark, so
+  this dog's section, which marks nothing, compiles either way and the
+  order is convention rather than something the compiler checks. Below
+  that, 0.7.2's `schema` did not forward to `shep-core/schema`,
   so `UpDuration` had no `JsonSchema` impl and this dog's section had no
   schema to publish; the workaround was a direct shep-core dependency whose
   only job was turning that feature on. shep-pm/shep#198 fixed the forward
