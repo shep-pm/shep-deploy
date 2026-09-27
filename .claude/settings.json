@@ -1,0 +1,10 @@
+{
+  "extraKnownMarketplaces": {
+    "rust-house-style": {
+      "source": { "source": "github", "repo": "shep-pm/rust-house-style" }
+    }
+  },
+  "enabledPlugins": {
+    "rust-house-style@rust-house-style": true
+  }
+}

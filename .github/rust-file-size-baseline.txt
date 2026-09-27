@@ -1,0 +1,16 @@
+# Rust files already over 1000 lines (IR-48), measured on main at 8202b19.
+# A listed file may shrink but never grow. Delete its entry once the file is
+# at 1000 lines or under. Regenerate the candidates with:
+#   git ls-files '*.rs' | xargs wc -l | awk '$1 > 1000 && $2 != "total"' | sort -rn
+# Format: <lines> <path>.
+
+# https://github.com/shep-pm/shep-deploy/issues/27
+3809 src/deploy.rs
+2648 src/optin.rs
+2614 src/build.rs
+1626 src/shared.rs
+1473 src/poll.rs
+1450 src/restore.rs
+1378 src/flockfile.rs
+1349 src/verify.rs
+1212 tests/integration.rs

@@ -87,9 +87,9 @@ reviews:
   path_instructions:
     - path: "src/**/*.rs"
       instructions: >-
-        This crate follows shep's written Rust style, docs/idiomatic-rust.md in
-        the shep repository, rules IR-1 through IR-46. That file is NOT in this
-        repository, so the load-bearing rules are restated here rather than
+        This crate follows the shep-pm/rust-house-style repository's written
+        Rust style, rules IR-1 through IR-48. Those rules are NOT in this
+        repository, so the load-bearing ones are restated here rather than
         cited: no panicking constructor; `core::error::Error`, never
         `std::error::Error`; every fallible public function carries a `# Errors`
         section; a `# Panics` section requires `#[track_caller]`; every new

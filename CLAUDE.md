@@ -300,7 +300,7 @@ class rather than the instances.
 
 ## Style
 
-Follows shep's `shep-idiomatic-rust` skill and `docs/idiomatic-rust.md`
-(IR-1..IR-46). `#![forbid(unsafe_code)]` at `main.rs:33`, which is why
-`build.rs` resolves users by shelling out to `id` rather than calling
-`getpwnam`.
+Invoke the `rust-house-style` skill before writing or reviewing Rust: the
+rules are shep-pm/rust-house-style, IR-1..IR-48. `#![forbid(unsafe_code)]`
+at `main.rs:33`, which is why `build.rs` resolves users by shelling out to
+`id` rather than calling `getpwnam`.
