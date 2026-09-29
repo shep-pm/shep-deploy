@@ -1,0 +1,6 @@
+# Gemini Code Assist reviews a pull request only when asked, with a
+# `/gemini review` comment, so each review is spent on purpose.
+code_review:
+  pull_request_opened:
+    code_review: false
+    summary: false
