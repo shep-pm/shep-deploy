@@ -2888,6 +2888,30 @@ mod tests {
         assert_eq!(written.failed, None, "a landed sha is no longer held");
     }
 
+    /// fails if a landing whose write is lost forgets the hold it was
+    /// lifting. `record` decides whether it has a write to make by comparing
+    /// memory with the hold the outcome implies, and a landed sha implies
+    /// none, so only a `failed` still in memory makes it retry the write.
+    /// A directory at the record's path is what makes the rename fail here.
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_landing_write_keeps_the_hold_in_memory_for_record_to_retry() {
+        let mut fixture = fixture_with_previous_release();
+        let head = commit_on_origin(&fixture, "second.txt");
+        fixture.state.failed = Some(head.clone());
+        let record = fixture.tree.state_file();
+        fs::remove_file(&record).expect("drop the record");
+        fs::create_dir(&record).expect("a directory where the record goes");
+
+        record_landing(&fixture.tree, &mut fixture.state, &head)
+            .expect_err("the record cannot be written");
+
+        assert_eq!(
+            fixture.state.failed.as_deref(),
+            Some(head.as_str()),
+            "the hold still stands on disk, so memory still says so"
+        );
+    }
+
     /// fails if a record that cannot be written after a verified deploy
     /// turns the deploy into a failure. The release is up and serving, so
     /// the outcome is `Deployed`; returning the write's error instead had
