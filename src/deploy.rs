@@ -125,6 +125,13 @@ pub(crate) const RELOAD_DEADLINE_SLACK: Duration = Duration::from_secs(5);
 /// instance against two really running gave a budget of 14s for a reload
 /// that took about 17, and a healthy release was rolled back.
 ///
+/// A probed `reuse_port` app is the one exception to "shep's own formula":
+/// each swap of it probes a second time once the drainee is reaped
+/// ([`probes_again_after_drain`]), with `listen_timeout` as that probe's
+/// deadline, and the reload deadline does not include it. Without the extra
+/// `listen_timeout` per instance the post-drain check could outlast the
+/// budget and roll back a healthy release.
+///
 /// The two timeouts are still read from the release's Flockfile, and that
 /// IS an inference, for the same reason
 /// [`refuse_ungated_verification`] documents about its own read: nothing
@@ -168,16 +175,30 @@ fn budget(app: &AppConfig, instances: u32) -> Duration {
     // milliseconds: a plain `+` here panicked, and a sum that did not would
     // have had this dog watching one reload for longer than the host will
     // exist, holding the tree's lock and the poll loop with it.
-    let per_instance = app
+    let mut per_instance = app
         .listen_timeout
         .as_duration()
         .saturating_add(app.graceful_timeout.as_duration())
         .saturating_add(RELOAD_DEADLINE_SLACK);
 
+    // The post-drain probe is one more `listen_timeout` on top, per swap.
+    if probes_again_after_drain(app) {
+        per_instance = per_instance.saturating_add(app.listen_timeout.as_duration());
+    }
+
     // A flock with nothing running still gets one instance's worth. Such a
     // reload replaces nothing and can never turn over, so what this buys is
     // a clean failure at a sensible moment rather than an instant one.
     verify::bounded(per_instance.saturating_mul(instances.max(1)))
+}
+
+/// Whether shep re-runs the readiness probe after a swap's old instance has
+/// drained: a probed app that sets `reuse_port`. The second probe gets the
+/// app's `listen_timeout` as its own deadline, after the drain, so it is
+/// outside the reload deadline [`budget`] copies from shep and has to be
+/// added to it, and it is what [`dwell_for`] watches for a demotion.
+fn probes_again_after_drain(app: &AppConfig) -> bool {
+    app.reuse_port && app.readiness_probe.is_some()
 }
 
 /// How long a verified flock is watched after its turnover.
@@ -192,7 +213,7 @@ fn budget(app: &AppConfig, instances: u32) -> Duration {
 /// a release deployed and have shep demote it a minute later. Read out of
 /// shep-daemon's `finish_swap` and `spawn_verify_task` on 2026-09-04.
 fn dwell_for(app: &AppConfig) -> Duration {
-    if app.reuse_port && app.readiness_probe.is_some() {
+    if probes_again_after_drain(app) {
         verify::bounded(
             app.listen_timeout
                 .as_duration()
@@ -2395,6 +2416,41 @@ mod tests {
         // reload that can replace nothing fails at a sensible moment
         // instead of instantly.
         assert_eq!(budget(&app, 0), budget(&app, 1));
+    }
+
+    /// fails if the window stops covering the post-drain probe of a probed
+    /// `reuse_port` app. Each swap of such an app probes a second time once
+    /// the drainee is reaped, with `listen_timeout` as the deadline, and that
+    /// probe comes after the drain rather than inside the readiness wait, so
+    /// the swap costs one more `listen_timeout` than the plain formula. Short
+    /// of it a healthy release is rolled back; every other app keeps the
+    /// plain window.
+    #[test]
+    fn the_window_covers_a_reuse_port_apps_post_drain_probe() {
+        let mut app: AppConfig = toml::from_str(
+            "name = 'web'\nscript = './run.sh'\n\
+             [readiness_probe]\nkind = 'http'\ntarget = 'http://127.0.0.1:1/'",
+        )
+        .expect("parses");
+        assert_eq!(budget(&app, 1), Duration::from_secs(16), "no reuse_port");
+
+        // Defaults: listen 3s, graceful 8s. 3 + 8 + 5 + 3 = 19 per instance.
+        app.reuse_port = true;
+        assert_eq!(budget(&app, 1), Duration::from_secs(19));
+        assert_eq!(budget(&app, 2), Duration::from_secs(38));
+
+        // It follows `listen_timeout`, not a constant.
+        app.listen_timeout = UpDuration::from_millis(10_000);
+        assert_eq!(budget(&app, 1), Duration::from_secs(33));
+
+        // Still held under what `verify` will wait at all.
+        app.listen_timeout = UpDuration::from_millis(u64::MAX);
+        assert_eq!(budget(&app, 3), verify::bounded(Duration::MAX));
+
+        // A `reuse_port` app with no probe is not re-probed.
+        app.listen_timeout = UpDuration::from_millis(3_000);
+        app.readiness_probe = None;
+        assert_eq!(budget(&app, 1), Duration::from_secs(16));
     }
 
     /// fails if the dwell stops following the app. A probed `reuse_port`
