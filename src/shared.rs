@@ -814,8 +814,13 @@ pub fn to_link(checkout: &Path) -> Result<FromCheckout, Error> {
 /// [`Error::Io`], naming the release-side path that failed, if a parent
 /// directory cannot be created or the symlink itself cannot be made.
 ///
-/// One collision is not an [`Error::Io`] at all. A release-side path that
-/// already exists gives [`Error::Config`] instead, because the cause is a
+/// A release-side symlink that already points at the very target this would
+/// make is accepted and left alone: a retry reuses a finished release, and
+/// the links the earlier attempt made are still in it.
+///
+/// One collision is not an [`Error::Io`] at all. Any other release-side path
+/// that already exists, a real file or a link aimed elsewhere, gives
+/// [`Error::Config`] instead, because the cause is a
 /// `.shepignore` that shares something the release builds for itself, which
 /// the operator fixes by editing that file rather than by looking at the
 /// filesystem. The message names the colliding path and the file to edit.
@@ -830,9 +835,15 @@ pub fn link_into(release: &Path, checkout: &Path, paths: &FromCheckout) -> Resul
             fs::create_dir_all(parent).map_err(Error::at(parent))?;
         }
 
-        symlink(&target, &link).map_err(|source| {
+        symlink(&target, &link).or_else(|source| {
             if source.kind() == io::ErrorKind::AlreadyExists {
-                return Error::Config(format!(
+                // A retry reuses a finished release, so the links the earlier
+                // attempt made are still there. One aimed at exactly the
+                // target we would make is that attempt's own, not a collision.
+                if fs::read_link(&link).is_ok_and(|existing| existing == target) {
+                    return Ok(());
+                }
+                return Err(Error::Config(format!(
                     "{} is already present in the release, so {} cannot be linked from the \
                      checkout. The usual cause is a build output that git ignores and \
                      `.shepignore` does not: this dog gives each sheep its own build cache and \
@@ -843,12 +854,12 @@ pub fn link_into(release: &Path, checkout: &Path, paths: &FromCheckout) -> Resul
                     link.display(),
                     relative.display(),
                     relative.display()
-                ));
+                )));
             }
-            Error::Io {
+            Err(Error::Io {
                 path: link.clone(),
                 source,
-            }
+            })
         })?;
     }
 
@@ -884,6 +895,9 @@ pub fn link_cache(release: &Path, cache_target: &Path) -> Result<(), Error> {
 
     symlink(cache_target, &link).map_err(Error::at(link))
 }
+
+#[cfg(test)]
+mod link_into_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1083,7 +1097,6 @@ mod tests {
     }
 
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
     /// [`fixtures::checkout`] under the name every test here calls it by.
@@ -1096,14 +1109,6 @@ mod tests {
     fn fixture_repo(entries: &[(&str, &str)]) -> TempDir {
         fixtures::checkout(entries)
     }
-
-    /// Guards `link_into_resolves_even_when_checkout_is_relative`, the one
-    /// test in this module that mutates the process's current directory.
-    /// `std::env::set_current_dir` is global, process-wide state that
-    /// Rust's default parallel test runner does nothing to serialise, so a
-    /// lock is the difference between "one test briefly changes cwd" and
-    /// "two threads race to change and restore cwd at once".
-    static CWD_GUARD: Mutex<()> = Mutex::new(());
 
     /// fails if enumeration stops using git's own answer. Parsing
     /// `.gitignore` by hand gets negations (`!server/src/configs/.gitkeep`),
@@ -1439,78 +1444,6 @@ mod tests {
         assert!(!linked.contains(&PathBuf::from("packages/dist")));
     }
 
-    /// fails if `link_into` stops actually linking back to the checkout, or
-    /// stops creating the parent directories a nested shared path needs.
-    /// `config/local.json` exercises both: the release has no `config/`
-    /// directory until `link_into` makes one, and the file it links to must
-    /// still be the checkout's own copy, not one dragged along.
-    #[test]
-    fn link_into_creates_symlinks_that_resolve_into_the_checkout() {
-        let repo = fixture_repo(&[
-            (".gitignore", "config/local.json\n"),
-            ("config/local.json", r#"{"real":true}"#),
-        ]);
-        let release = tempfile::tempdir().expect("release tempdir");
-
-        let paths = to_link(repo.path()).expect("computes");
-        link_into(release.path(), repo.path(), &paths).expect("links");
-
-        let linked_path = release.path().join("config").join("local.json");
-        assert!(linked_path.is_symlink());
-        let contents = fs::read_to_string(&linked_path).expect("read through symlink");
-        assert_eq!(contents, r#"{"real":true}"#);
-    }
-
-    /// fails if `link_into` goes back to embedding `checkout` literally as
-    /// the symlink's target text. A relative `checkout` used to produce a
-    /// symlink whose target the OS resolves against the symlink's own
-    /// directory inside the release, not against anything the caller
-    /// meant - `symlink()` itself never noticed, so the only way to catch
-    /// this is to actually read through the result. cwd is changed to the
-    /// checkout's own parent so `relative_checkout` is a genuinely relative
-    /// path the fix must canonicalise, not merely a path that happens to
-    /// already be absolute.
-    #[test]
-    fn link_into_resolves_even_when_checkout_is_relative() {
-        let repo = fixture_repo(&[
-            (".gitignore", "config/local.json\n"),
-            ("config/local.json", r#"{"real":true}"#),
-        ]);
-        let release = tempfile::tempdir().expect("release tempdir");
-        let paths = vec![PathBuf::from("config/local.json")];
-
-        let _guard = CWD_GUARD.lock().expect("cwd guard poisoned");
-        let original_cwd = std::env::current_dir().expect("read cwd");
-        std::env::set_current_dir(repo.path().parent().expect("repo has a parent"))
-            .expect("chdir into repo's parent");
-        let relative_checkout = PathBuf::from(repo.path().file_name().expect("repo has a name"));
-
-        let result = link_into(release.path(), &relative_checkout, &FromCheckout::of(paths));
-
-        std::env::set_current_dir(&original_cwd).expect("restore cwd");
-        result.expect("links despite a relative checkout");
-
-        let linked_path = release.path().join("config").join("local.json");
-        let contents = fs::read_to_string(&linked_path).expect("read through symlink");
-        assert_eq!(contents, r#"{"real":true}"#);
-    }
-
-    /// fails if `link_into` stops surfacing a checkout it cannot resolve as
-    /// an immediate error. Silently doing nothing, or creating a dangling
-    /// link anyway, is exactly the failure-that-looks-like-success shape
-    /// the canonicalisation fix exists to close off.
-    #[test]
-    fn link_into_fails_loudly_when_checkout_does_not_exist() {
-        let release = tempfile::tempdir().expect("release tempdir");
-        let missing_checkout = release.path().join("no-such-checkout");
-        let paths = vec![PathBuf::from("config/local.json")];
-
-        let err = link_into(release.path(), &missing_checkout, &FromCheckout::of(paths))
-            .expect_err("a checkout that does not exist cannot be canonicalised");
-        assert!(matches!(err, Error::Io { .. }));
-    }
-
-    /// fails if a `.shepignore` pattern using `*` stops being refused. An
     /// operator writing `*.log`, trusting the spec's "same idiom as
     /// .gitignore" line, must get a loud failure naming the pattern rather
     /// than a glob that silently matches nothing forever while the
