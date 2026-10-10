@@ -18,6 +18,17 @@ use crate::fixtures;
 /// "two threads race to change and restore cwd at once".
 static CWD_GUARD: Mutex<()> = Mutex::new(());
 
+/// Puts the process's current directory back when dropped, so a panic
+/// while it is somewhere else cannot leave every other test there.
+struct RestoreCwd(PathBuf);
+
+impl Drop for RestoreCwd {
+    fn drop(&mut self) {
+        // A failure here cannot be raised from a drop, possibly mid-unwind.
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
 /// fails if `link_into` stops actually linking back to the checkout, or
 /// stops creating the parent directories a nested shared path needs.
 /// `config/local.json` exercises both: the release has no `config/`
@@ -120,15 +131,15 @@ fn link_into_resolves_even_when_checkout_is_relative() {
     let paths = vec![PathBuf::from("config/local.json")];
 
     let _guard = CWD_GUARD.lock().expect("cwd guard poisoned");
-    let original_cwd = std::env::current_dir().expect("read cwd");
+    // Declared after the lock guard, so it drops first: cwd is back before
+    // another test can take the lock.
+    let _restore = RestoreCwd(std::env::current_dir().expect("read cwd"));
     std::env::set_current_dir(repo.path().parent().expect("repo has a parent"))
         .expect("chdir into repo's parent");
     let relative_checkout = PathBuf::from(repo.path().file_name().expect("repo has a name"));
 
-    let result = link_into(release.path(), &relative_checkout, &FromCheckout::of(paths));
-
-    std::env::set_current_dir(&original_cwd).expect("restore cwd");
-    result.expect("links despite a relative checkout");
+    link_into(release.path(), &relative_checkout, &FromCheckout::of(paths))
+        .expect("links despite a relative checkout");
 
     let linked_path = release.path().join("config").join("local.json");
     let contents = fs::read_to_string(&linked_path).expect("read through symlink");
