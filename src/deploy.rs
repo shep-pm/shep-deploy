@@ -446,10 +446,7 @@ async fn attempt<D: Daemon>(
         // sha into `failed` next to the same sha in `deployed`: a record
         // that said the release was serving and held at once.
         Landed::Verified => {
-            state.deployed = Some(head.to_owned());
-            // The operator's fields from disk, not this deploy's copy of
-            // them: see `write_record`.
-            if let Err(err) = write_record(tree, state) {
+            if let Err(err) = record_landing(tree, state, head) {
                 eprintln!("shep-deploy: {sheep}: deployed {head}, but could not record it: {err}");
             }
             Ok(Outcome::Deployed {
@@ -619,6 +616,30 @@ fn adopt_operator_fields(tree: &Tree, state: &mut State) {
         state.watch = on_disk.watch;
         state.verify = on_disk.verify;
     }
+}
+
+/// Records `head` as the deployed release, in memory and on disk.
+///
+/// Lifts the hold in the same write. A retry of a held commit that lands has
+/// `failed` naming the very sha going into `deployed`, and a record that says
+/// both is refused by [`State::write`], so the one write meant to record the
+/// deploy was the one that failed.
+///
+/// # Errors
+/// Whatever [`write_record`] returns.
+fn record_landing(tree: &Tree, state: &mut State, head: &str) -> Result<(), Error> {
+    state.deployed = Some(head.to_owned());
+    let held = state.failed.take();
+    // The operator's fields from disk, not this deploy's copy of them: see
+    // `write_record`.
+    let written = write_record(tree, state);
+    if written.is_err() {
+        // The hold is still on disk, so memory keeps saying so: `record`
+        // compares the two to decide whether it has a write to make, and
+        // would otherwise find nothing to do.
+        state.failed = held;
+    }
+    written
 }
 
 /// Writes `state` whole, under the record lock, with the operator's fields
@@ -2842,6 +2863,29 @@ mod tests {
             fixture.tree.release(&old).is_dir(),
             "the release the disk record names must survive"
         );
+    }
+
+    /// fails if the write that records a landing is refused when the sha it
+    /// lands was held. A retry of a held commit that succeeds has `failed`
+    /// naming the sha it is about to put in `deployed`, and `State::write`
+    /// refuses a record that says both, so the record of the deploy was lost
+    /// and an error printed over a deploy that had worked.
+    #[tokio::test(start_paused = true)]
+    async fn landing_a_held_sha_records_it_and_lifts_the_hold() {
+        let mut fixture = fixture_with_previous_release();
+        let head = commit_on_origin(&fixture, "second.txt");
+        fixture.state.failed = Some(head.clone());
+        fixture
+            .state
+            .write(&fixture.tree.state_file())
+            .expect("the hold is on disk");
+
+        record_landing(&fixture.tree, &mut fixture.state, &head)
+            .expect("the landing is recorded at the first attempt");
+
+        let written = State::read(&fixture.tree.state_file()).expect("reads");
+        assert_eq!(written.deployed.as_deref(), Some(head.as_str()));
+        assert_eq!(written.failed, None, "a landed sha is no longer held");
     }
 
     /// fails if a record that cannot be written after a verified deploy
