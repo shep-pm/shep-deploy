@@ -71,6 +71,7 @@ mod state;
 mod survey;
 mod swap;
 mod verify;
+mod window;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

@@ -817,7 +817,7 @@ mod tests {
 
     /// fails if the probed dwell stops at ten seconds when the caller asked
     /// for more. A `reuse_port` app's post-drain re-probe can demote it any
-    /// time up to its `listen_timeout`, which `deploy::dwell_for` passes in
+    /// time up to its `listen_timeout`, which `window::dwell_for` passes in
     /// here; a demotion fifteen seconds after the turnover has to be seen.
     #[tokio::test(start_paused = true)]
     async fn probed_watches_for_the_whole_dwell_it_was_given() {
