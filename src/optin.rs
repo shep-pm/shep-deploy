@@ -51,7 +51,6 @@ use tokio::time::{Instant, sleep};
 use crate::build;
 use crate::config::DogConfig;
 use crate::daemon::Daemon;
-use crate::deploy::RELOAD_DEADLINE_SLACK;
 use crate::error::Error;
 use crate::git;
 use crate::lock;
@@ -61,6 +60,7 @@ use crate::shared;
 use crate::state::{State, Verify, Watch};
 use crate::swap;
 use crate::verify::{self, DWELL, Generation, POLL, is_alive};
+use crate::window::RELOAD_DEADLINE_SLACK;
 
 /// Everything opt-in built, ready for a cutover to register and swap into
 /// place.
@@ -635,7 +635,7 @@ const SHEPHERD_QUIET: &str = "The shepherd stopped answering while the new insta
 /// instances together and drains nothing, where a reload replaces every
 /// instance one at a time and has to wait out each drain.
 fn cutover_budget(app: &AppConfig) -> Duration {
-    // Saturating and capped, for the reason `crate::deploy`'s `budget` gives:
+    // Saturating and capped, for the reason `crate::window`'s `budget` gives:
     // `listen_timeout` is the repository's number, not the operator's.
     verify::bounded(
         app.listen_timeout
