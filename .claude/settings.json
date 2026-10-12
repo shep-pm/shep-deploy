@@ -5,6 +5,7 @@
     }
   },
   "enabledPlugins": {
-    "rust-house-style@rust-house-style": true
+    "rust-house-style@rust-house-style": true,
+    "tui-screen-capture@rust-house-style": true
   }
 }
