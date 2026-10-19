@@ -12,14 +12,19 @@
 //! runs [`poll::run`], which deploys every `watch = "auto"` target whose
 //! branch has moved, once an interval, until the process is asked to stop.
 //!
-//! The two modes connect differently, in two ways. The poll loop connects
-//! through a client that survives a daemon handover, because it is the only
-//! mode that outlives one; a verb connects through a plain client and exits.
-//! And the poll loop announces a dog name, but only the one shep put in
-//! `SHEP_DOG_NAME` - no variable, no dog, no name. See [`poll_forever`] and
-//! [`adopted_as`].
+//! The loop starts only when `SHEP_DOG_NAME` is set. A bare run without it is
+//! a person at a terminal, and gets usage rather than a second loop beside the
+//! adopted dog. Whoever needs the loop outside shep sets `SHEP_DOG_NAME`
+//! themselves, which also names the handshake. shep sets it for a bare
+//! `shep deploy` typed at a terminal too, and that run polls like the dog.
 //!
-//! Run directly, it takes a verb:
+//! The two modes connect differently. The poll loop connects through a client
+//! that survives a daemon handover, because it is the only mode that outlives
+//! one, and announces the name shep put in `SHEP_DOG_NAME`; a verb connects
+//! through a plain client, announces nothing, and exits. See [`poll_forever`]
+//! and [`adopted_as`].
+//!
+//! Run directly, it takes a verb, or `help` for usage:
 //!
 //! ```text
 //! shep-deploy deploy <sheep>
@@ -147,8 +152,16 @@ fn main() -> ExitCode {
 
 /// The whole program past argument parsing, on the runtime `main` built.
 async fn run(args: &[&str]) -> ExitCode {
-    let outcome = match route(args) {
-        Route::Poll => poll_forever().await,
+    let dog = adopted_as(&|key| std::env::var(key).ok());
+    let outcome = match route(args, dog.is_some()) {
+        Route::Poll => match &dog {
+            Some(name) => poll_forever(name).await,
+            None => return usage(),
+        },
+        Route::Help => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
         // Its own connection, matching every sibling verb, rather than
         // reaching for a `daemon` that does not exist in this scope. It
         // returns an `ExitCode` directly, not a `Result<u8, Error>`, because
@@ -158,10 +171,7 @@ async fn run(args: &[&str]) -> ExitCode {
         Route::Deploy(sheep) => deploy_once(sheep).await,
         Route::Setup(sheep) => setup_once(sheep).await,
         Route::Watch { sheep, mode } => set_watch(sheep, mode),
-        Route::Usage => {
-            eprintln!("{USAGE}");
-            return ExitCode::from(2);
-        }
+        Route::Usage => return usage(),
     };
 
     match outcome {
@@ -173,15 +183,25 @@ async fn run(args: &[&str]) -> ExitCode {
     }
 }
 
+/// Prints [`USAGE`] to stderr and answers the usage exit code.
+fn usage() -> ExitCode {
+    eprintln!("{USAGE}");
+    ExitCode::from(2)
+}
+
 /// The environment entry shep puts an adopted dog's registered name in.
 ///
 /// Set by the daemon itself when it spawns the dog, alongside `SHEP_HOME`.
-/// Its absence is the signal that this process is NOT a supervised dog; see
-/// [`adopted_as`].
+/// Its absence is the signal that this process is NOT a supervised dog, and
+/// so does not poll; see [`adopted_as`].
 const DOG_NAME: &str = "SHEP_DOG_NAME";
 
-/// The supervised mode: connect as this dog, read its own config section,
-/// and poll until the process is asked to stop.
+/// The supervised mode: connect as `name`, the dog shep registered this
+/// process as, read its own config section, and poll until the process is
+/// asked to stop.
+///
+/// Only [`run`] reaches this, and only when shep started the process; a bare
+/// run by hand is routed to usage first.
 ///
 /// Answers 0 for a stop that was asked for, which is the only way out that
 /// is not an error. [`poll::run`] itself never returns.
@@ -222,16 +242,13 @@ const DOG_NAME: &str = "SHEP_DOG_NAME";
 ///
 /// A target's own failure is NOT one of these. It is reported and the loop
 /// carries on to the next target; see [`poll::run`].
-async fn poll_forever() -> Result<u8, Error> {
+async fn poll_forever(name: &str) -> Result<u8, Error> {
     let home = shep_home()?;
     // First, and before anything is awaited. See `Stop`.
     let mut stop = Stop::install();
 
     let socket = socket()?;
-    let client = match adopted_as(&|key| std::env::var(key).ok()) {
-        Some(name) => ReconnectingClient::connect_as_dog(&socket, &name).await?,
-        None => ReconnectingClient::connect(&socket).await?,
-    };
+    let client = ReconnectingClient::connect_as_dog(&socket, name).await?;
     let daemon = Live::dog(client);
     let config = config::Reader::open(&daemon).await?;
 
@@ -252,8 +269,10 @@ async fn poll_forever() -> Result<u8, Error> {
 
 /// The name shep registered this process under, or `None` when nothing did.
 ///
-/// This is the handshake identity and nothing else, which is why it has
-/// exactly one source. A name reaching the daemon is a claim about which dog
+/// This is the handshake identity, and also what [`run`] reads as "supervised":
+/// it polls only when this is `Some`. shep sets the variable for a bare
+/// `shep deploy` typed at a terminal as well as for the dog it starts, so the
+/// two are not told apart here. It has exactly one source. A name reaching the daemon is a claim about which dog
 /// to restart when a handshake is refused, so a guessed one - the binary's
 /// own stem, the config section's key, a default - gets some other dog
 /// restarted for this process's problem. No name at all is a complete and
@@ -620,10 +639,11 @@ mod tests {
     /// fails if a process nobody supervised claims to be a dog anyway.
     ///
     /// No `SHEP_DOG_NAME` means shep did not spawn this, so there is no dog
-    /// to be. The name must never be guessed here - from the binary's stem,
-    /// from the `[dog.<name>]` section, from a default - because it is what
-    /// the daemon restarts on a refused handshake, and a guess gets some
-    /// other dog restarted for a hand run's problem.
+    /// to be, and the bare command prints usage instead of polling. The name
+    /// must never be guessed here - from the binary's stem, from the
+    /// `[dog.<name>]` section, from a default - because it is what the daemon
+    /// restarts on a refused handshake, and a guess gets some other dog
+    /// restarted for a hand run's problem.
     #[test]
     fn a_hand_run_announces_no_name_at_all() {
         assert_eq!(adopted_as(&|_| None), None);
