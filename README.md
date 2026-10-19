@@ -360,7 +360,7 @@ is what this crate reads, so `verify = "probed"` now means what it says.
 
 One thing to size correctly. A `reuse_port` app's reload costs one more
 `listen_timeout` than it used to, for that second probe, and the budget in
-`deploy.rs` is `listen_timeout + graceful_timeout + slack` per instance. For
+`window.rs` is `listen_timeout + graceful_timeout + slack` per instance. For
 that one combination the budget can expire mid-check and roll back a release
 that was fine. A false rollback rather than a false success, which is the right
 direction to fail, but it wants a wider budget.

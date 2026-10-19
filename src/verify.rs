@@ -257,7 +257,7 @@ pub(crate) fn bounded(budget: Duration) -> Duration {
 /// already committed, and one whose post-drain re-probe fails is demoted to
 /// `Starting` under the same pid; the pid and the status are the only
 /// things that say so. `dwell` is [`DWELL`] for most apps and longer for one
-/// whose post-drain re-probe can take longer: see `deploy::land`.
+/// whose post-drain re-probe can take longer: see `deploy::reload::land`.
 ///
 /// `Alive` accepts `Starting` as well, because a sheep with no gate is
 /// exactly what it exists for, and then dwells: it sleeps [`DWELL`], then
@@ -315,7 +315,7 @@ pub async fn wait<D: Daemon>(
         // re-probe fails is DEMOTED to `Starting` under the same pid and
         // left there. So a probed release used to be recorded deployed on
         // a process that was already gone. The dwell watches for `dwell`,
-        // which the caller sizes to the app (see `deploy::land`): the same
+        // which the caller sizes to the app (see `deploy::reload::land`): the same
         // pids, every one of them `Online`, at every look. A pid that
         // changed or a status that fell is a verdict at once.
         let deadline = Instant::now() + dwell;

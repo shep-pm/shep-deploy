@@ -5,7 +5,6 @@
 # Format: <lines> <path>.
 
 # https://github.com/shep-pm/shep-deploy/issues/27
-3809 src/deploy.rs
 2648 src/optin.rs
 2614 src/build.rs
 1626 src/shared.rs
