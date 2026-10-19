@@ -32,7 +32,7 @@ use crate::swap;
 /// on the unverified release instead, as this once did, was a swap nothing
 /// had approved reported as an ordinary failure.
 ///
-/// # Residual, and it is the same one the module doc names for
+/// # Residual, and it is the same one the `deploy` module doc names for
 /// `current.tmp`
 ///
 /// Between the swap and the reload there is a window a handful of syscalls

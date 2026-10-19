@@ -109,10 +109,12 @@ pub enum Outcome {
 /// interrupted or rolled-back deploy leaves the record naming whatever is
 /// actually serving.
 ///
-/// A release directory that already exists is reused rather than rebuilt
-/// from a fresh worktree: it is the leftover of an earlier attempt at this
-/// same sha, `git worktree add` would refuse the path anyway, and the build
-/// below runs again over it regardless.
+/// A release directory is reused rather than checked out again only when it
+/// carries the completion marker, which is written after `git worktree add`
+/// returns: it is the leftover of a finished earlier attempt at this same
+/// sha. A directory without the marker is the remains of a checkout that died
+/// partway, so it is removed and checked out afresh - see
+/// [`prepare::stage_release`]. The build runs over the release either way.
 ///
 /// # Errors
 /// [`Error::AlreadyDeploying`] if another process holds the tree, and
