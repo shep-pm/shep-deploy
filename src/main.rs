@@ -52,6 +52,7 @@ mod config;
 mod daemon;
 mod deploy;
 mod error;
+mod exit;
 /// Test helpers shared by every module's own `mod tests`; see its own doc for
 /// why a binary crate needs this declared here.
 #[cfg(test)]
@@ -65,6 +66,7 @@ mod poll;
 mod restore;
 mod retention;
 mod roll;
+mod route;
 mod shared;
 mod smit;
 mod state;
@@ -83,108 +85,10 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 use crate::daemon::Live;
 use crate::deploy::Outcome;
 use crate::error::Error;
+use crate::exit::{code_for, code_for_outcome};
 use crate::paths::Tree;
+use crate::route::{Route, USAGE, route};
 use crate::state::{State, Watch};
-
-/// What a direct invocation accepts. Printed on anything else.
-const USAGE: &str = "\
-usage: shep-deploy <verb> [args]
-
-  deploy <sheep> [--watch auto|manual]   deploy one sheep, or set how it is watched
-  setup <sheep>                          take a sheep over
-  survey                                 report where every registered sheep stands
-  on-remove                              lifecycle hook; shep runs this itself
-
-Adopted as `deploy`, the same verbs run as `shep deploy <verb> [args]`, and
-`shep deploy <sheep>` deploys one sheep directly. A sheep whose name is one of
-the verbs above is reached with the verb spelled out: `shep deploy deploy survey`.";
-
-/// The exit code for a deploy that was rolled back.
-///
-/// shep's own taxonomy (`docs/specs/shep-v1.md` section 9) runs from 0 to 11
-/// and this is the next free number, claimed rather than invented: a
-/// rollback is a cause shep has no code for, and every cause this dog
-/// shares with shep uses shep's number for it. A script must be able to
-/// tell three outcomes apart, deployed, cleanly reverted, and broke, and
-/// two of those were the same code until Rin ruled otherwise.
-const ROLLED_BACK: u8 = 12;
-
-/// A cutover that landed and then could not tidy up: the sheep is live on the
-/// new release, and something after the swap failed.
-///
-/// Its own code rather than the generic 1, because a script has to tell three
-/// outcomes apart: it worked, it worked and needs tidying, it failed. The
-/// poll loop is why that matters. Unattended, a generic failure here reads as
-/// a deploy that did not land, and it would retry one that did.
-const STRANDED: u8 = 13;
-
-/// What a parsed argv means to do.
-///
-/// Split out of `main` so the routing decision - which pattern wins when
-/// several could match - is testable on its own. A match that both decides
-/// and acts can only be exercised by actually running the binary.
-#[derive(Debug, PartialEq, Eq)]
-enum Route<'a> {
-    /// No argv at all: the supervised poll loop, per the dog contract.
-    Poll,
-    /// shep's on-remove lifecycle hook: put every sheep back.
-    OnRemove,
-    /// Report where every registered sheep stands.
-    Survey,
-    /// Deploy the named sheep.
-    Deploy(&'a str),
-    /// Take the named sheep over, up to and including the cutover.
-    Setup(&'a str),
-    /// Set the named sheep's watch mode.
-    Watch { sheep: &'a str, mode: &'a str },
-    /// Nothing above matched; print [`USAGE`] and exit on the usage code.
-    Usage,
-}
-
-/// Decides what an argv means, without acting on it.
-///
-/// Verb forms are matched before the passthrough arms, deliberately: shep's
-/// dog passthrough strips this dog's own name, so `shep deploy koji` and
-/// `shep-deploy koji` both arrive as `["koji"]`, indistinguishable from a
-/// sheep whose name really is a verb. Checking verbs first means a sheep
-/// named `survey` needs the explicit form, `shep deploy deploy survey`,
-/// which is the escape hatch [`USAGE`] documents rather than a silent trap.
-fn route<'a>(args: &[&'a str]) -> Route<'a> {
-    let route = match args {
-        [] => Route::Poll,
-        ["on-remove"] => Route::OnRemove,
-        ["survey"] => Route::Survey,
-        // A verb whose sheep is missing, before the bare-name arm below can
-        // read the verb itself as a sheep. `shep-deploy setup` used to mean
-        // "deploy the sheep called setup", which is a different command
-        // against a sheep that almost never exists.
-        //
-        // A sheep genuinely named `setup` or `deploy` is reached the same way
-        // one named `survey` already is, by spelling the verb out:
-        // `shep deploy setup`. That is the escape hatch USAGE documents.
-        ["setup" | "deploy"] => Route::Usage,
-        ["setup", sheep] => Route::Setup(sheep),
-        ["deploy", sheep] => Route::Deploy(sheep),
-        ["deploy", sheep, "--watch", mode] => Route::Watch { sheep, mode },
-        // Reached only through `shep deploy <sheep>`: the passthrough
-        // shipped in shep 0.1.1 and strips the dog's own name, so the
-        // flagship command arrives as a bare sheep name with no verb.
-        // Last, so a verb always wins.
-        [sheep] => Route::Deploy(sheep),
-        [sheep, "--watch", mode] => Route::Watch { sheep, mode },
-        _ => Route::Usage,
-    };
-
-    // Every name that reaches a `Tree` comes through here, so this is the one
-    // place it has to be a name rather than a path. `Tree::for_sheep` joins it
-    // onto `$SHEP_HOME/deploy`, and an absolute name replaces that root
-    // outright rather than traversing out of it.
-    match route {
-        Route::Setup(sheep) | Route::Deploy(sheep) if !paths::is_sheep_name(sheep) => Route::Usage,
-        Route::Watch { sheep, .. } if !paths::is_sheep_name(sheep) => Route::Usage,
-        named => named,
-    }
-}
 
 /// How long the runtime waits for blocking work after the main future ends.
 ///
@@ -484,38 +388,6 @@ fn listen(kind: SignalKind) -> Option<Signal> {
     }
 }
 
-/// The exit code for a run that finished, reporting what it finished as.
-const fn code_for_outcome(outcome: &Outcome) -> u8 {
-    match outcome {
-        Outcome::UpToDate | Outcome::Deployed { .. } => 0,
-        Outcome::RolledBack { .. } => ROLLED_BACK,
-    }
-}
-
-/// The exit code for a run that failed.
-///
-/// The first two arms are this dog's own numbers, for outcomes shep has no
-/// code for. Every arm after them is shep's own number for the same cause, so
-/// an operator reading a dog's status does not have to learn a second
-/// vocabulary. Anything with no more specific cause is 1, which is shep's
-/// rule as well.
-fn code_for(err: &Error) -> u8 {
-    match err {
-        Error::RolledBack { .. } => ROLLED_BACK,
-        Error::Stranded { .. } => STRANDED,
-        // The same number as any other configuration refusal: it is one,
-        // from outside. What its own variant buys is inside - see the
-        // variant's doc, and `crate::poll::worth_saying`.
-        Error::Config(_) | Error::NotCutOver { .. } => 4,
-        // A refused handshake takes the same number as a socket that could
-        // not be reached, because it is the same thing from an operator's
-        // side: this dog and the shepherd are not talking. The message says
-        // which of the two it was, and that is where the difference belongs.
-        Error::Connect(_) | Error::Refused { .. } => 5,
-        _ => 1,
-    }
-}
-
 /// One deploy of `sheep`, reporting what it did.
 ///
 /// # Errors
@@ -731,106 +603,6 @@ const fn named(watch: Watch) -> &'static str {
 mod tests {
     use super::*;
 
-    /// fails if a rolled-back deploy stops being distinguishable from a
-    /// hard failure by exit status alone. A script running
-    /// `shep deploy web && notify` has three outcomes to tell apart:
-    /// deployed, rejected and cleanly reverted, and broke. Collapsing the
-    /// middle one into either neighbour is what makes "reports a success it
-    /// did not achieve" possible, which is the species of every serious
-    /// finding in the engine plan.
-    #[test]
-    fn a_rollback_has_its_own_code_distinct_from_failure_and_success() {
-        let rolled_back = Error::RolledBack {
-            to: "old-sha".to_owned(),
-            source: Box::new(Error::Build { status: Some(1) }),
-        };
-        assert_eq!(code_for(&rolled_back), ROLLED_BACK);
-        assert_ne!(ROLLED_BACK, 0);
-        assert_ne!(
-            code_for(&rolled_back),
-            code_for(&Error::Build { status: Some(1) })
-        );
-    }
-
-    /// fails if a cutover that landed and then could not tidy up is reported
-    /// as an ordinary failure. The sheep IS live on the new release; only the
-    /// cleanup after the swap did not finish. The poll loop is why the
-    /// distinction has to survive into the exit status: unattended, a generic
-    /// failure here reads as a deploy that never landed, and it would redeploy
-    /// one that did.
-    #[test]
-    fn a_stranded_cutover_is_neither_a_success_nor_an_ordinary_failure() {
-        let stranded = Error::Stranded {
-            sheep: "web".to_owned(),
-            sha: "abc1234".to_owned(),
-            ids: vec![3],
-        };
-        assert_eq!(code_for(&stranded), STRANDED);
-        assert_ne!(STRANDED, 0);
-        assert_ne!(
-            code_for(&stranded),
-            code_for(&Error::Build { status: Some(1) })
-        );
-        assert_ne!(code_for(&stranded), ROLLED_BACK);
-    }
-
-    /// fails if this dog stops joining shep's own exit-code taxonomy and
-    /// starts inventing numbers. These four are shep's, from
-    /// docs/specs/shep-v1.md section 9, and an operator who has learned that
-    /// 5 means "no daemon answered" should not have to learn a second
-    /// meaning for it because a dog chose differently.
-    #[test]
-    fn the_shared_causes_use_sheps_own_numbers() {
-        assert_eq!(code_for(&Error::Config("bad".to_owned())), 4);
-        assert_eq!(code_for(&Error::Protocol("odd".to_owned())), 1);
-        assert_eq!(
-            code_for(&Error::Git {
-                command: "git fetch".to_owned(),
-                status: Some(128),
-                stderr: String::new(),
-            }),
-            1
-        );
-        assert_eq!(code_for(&Error::Build { status: Some(3) }), 1);
-        assert_eq!(
-            code_for(&Error::Connect(shep_client::ConnectError::HandshakeClosed)),
-            5
-        );
-        // A tree the cutover never landed on is a configuration problem
-        // like any other from outside, whatever the loop makes of it
-        // inside: giving it a variant of its own must not give it a number
-        // of its own.
-        assert_eq!(
-            code_for(&Error::NotCutOver {
-                sheep: "web".to_owned(),
-                tree: PathBuf::from("/srv/shep/deploy/web"),
-            }),
-            4
-        );
-    }
-
-    /// fails if a rollback that happened on the ORDINARY path stops being
-    /// reported. `Outcome::RolledBack` is the common trigger, a verify that
-    /// timed out, and `Error::RolledBack` is the rarer one where something
-    /// failed after the reload. Both mean the requested deploy did not
-    /// happen, so both take the same code; only this one is reached through
-    /// `Ok`.
-    #[test]
-    fn the_ok_rollback_path_reports_the_same_code() {
-        let outcome = Outcome::RolledBack {
-            to: "old-sha".to_owned(),
-            why: "it did not come up".to_owned(),
-        };
-        assert_eq!(code_for_outcome(&outcome), ROLLED_BACK);
-        assert_eq!(code_for_outcome(&Outcome::UpToDate), 0);
-        assert_eq!(
-            code_for_outcome(&Outcome::Deployed {
-                sha: "new".to_owned()
-            }),
-            0
-        );
-    }
-
     /// fails if a supervised dog stops announcing the name shep gave it.
     ///
     /// That name is the whole of the bug this function exists for. Without
@@ -870,37 +642,6 @@ mod tests {
         assert_eq!(adopted_as(&env), None);
     }
 
-    /// fails if a refused handshake stops being an error at all, or starts
-    /// taking a number that means something else. It is 5 for the same
-    /// reason a dead socket is: this dog and the shepherd are not talking.
-    #[test]
-    fn a_refused_handshake_exits_on_the_no_daemon_code() {
-        let refused = Error::Refused {
-            daemon_version: Some("0.4.0".to_owned()),
-            message: "protocol mismatch".to_owned(),
-        };
-        assert_eq!(code_for(&refused), 5);
-        assert_eq!(
-            code_for(&refused),
-            code_for(&Error::Connect(shep_client::ConnectError::HandshakeClosed))
-        );
-    }
-
-    /// fails if a bare sheep name stops routing to a deploy, or if it
-    /// starts shadowing a verb. `shep deploy koji` is the flagship command
-    /// and arrives here as `["koji"]`, with no verb, because the
-    /// passthrough strips the dog's own name.
-    #[test]
-    fn a_bare_name_is_a_deploy_and_a_verb_still_wins() {
-        assert_eq!(route(&["koji"]), Route::Deploy("koji"));
-        assert_eq!(route(&["deploy", "koji"]), Route::Deploy("koji"));
-        assert_eq!(route(&["survey"]), Route::Survey);
-        assert_eq!(route(&["setup", "koji"]), Route::Setup("koji"));
-        // The escape hatch for a sheep whose name is a verb.
-        assert_eq!(route(&["deploy", "survey"]), Route::Deploy("survey"));
-        assert_eq!(route(&[]), Route::Poll);
-    }
-
     /// fails if the stop handlers stop being installed eagerly. An
     /// `async fn` that calls `signal()` registers on its first poll, not on
     /// creation, and `select!` polls in a randomised order - so lazily
@@ -915,55 +656,5 @@ mod tests {
         let stop = Stop::install();
         assert!(stop.term.is_some(), "SIGTERM");
         assert!(stop.interrupt.is_some(), "SIGINT");
-    }
-
-    /// fails if `on-remove` stops routing to its own hook, or starts being
-    /// swallowed by the bare-name catch-all - a sheep really could be named
-    /// `on-remove`, and it gets the same escape hatch every other verb
-    /// does.
-    #[test]
-    fn on_remove_routes_to_its_own_hook() {
-        assert_eq!(route(&["on-remove"]), Route::OnRemove);
-        assert_eq!(route(&["deploy", "on-remove"]), Route::Deploy("on-remove"));
-    }
-
-    /// fails if a verb with its sheep missing is read as a sheep named after
-    /// the verb.
-    ///
-    /// `shep-deploy setup` fell through the two-element arms to the bare-name
-    /// catch-all and became `Deploy("setup")`: a different command, aimed at a
-    /// sheep that almost certainly does not exist. Usage is what an operator
-    /// who forgot the argument needs, and it is what every other verb already
-    /// does.
-    #[test]
-    fn a_verb_without_its_sheep_is_a_usage_error() {
-        assert_eq!(route(&["setup"]), Route::Usage);
-        assert_eq!(route(&["deploy"]), Route::Usage);
-
-        // And the escape hatch still reaches a sheep really called that, the
-        // same one a sheep named `survey` or `on-remove` uses.
-        assert_eq!(route(&["deploy", "setup"]), Route::Deploy("setup"));
-        assert_eq!(route(&["deploy", "deploy"]), Route::Deploy("deploy"));
-    }
-
-    /// fails if a sheep name that is really a path reaches a `Tree`.
-    ///
-    /// `Tree::for_sheep` joins the name onto `$SHEP_HOME/deploy`, and
-    /// `PathBuf::join` REPLACES the path when given an absolute one. So an
-    /// absolute name does not traverse out of the tree, it discards the tree
-    /// and roots itself wherever it points, taking everything that later
-    /// prunes and removes inside it along.
-    #[test]
-    fn a_sheep_name_that_is_a_path_is_refused() {
-        for name in ["/tmp/anywhere", "../sibling", "a/b", "", ".", ".."] {
-            assert_eq!(route(&[name]), Route::Usage, "bare: {name}");
-            assert_eq!(route(&["deploy", name]), Route::Usage, "deploy: {name}");
-            assert_eq!(route(&["setup", name]), Route::Usage, "setup: {name}");
-            assert_eq!(
-                route(&[name, "--watch", "auto"]),
-                Route::Usage,
-                "watch: {name}"
-            );
-        }
     }
 }

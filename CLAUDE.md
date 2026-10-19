@@ -116,9 +116,10 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
 ## Architecture
 
-Binary crate, no library target. Twenty modules under `src/`, the big three
+Binary crate, no library target. Twenty-four modules under `src/`, the big three
 being `deploy/` (the state machine, a directory), `optin.rs` (first cutover) and `poll.rs`
-(the dog's loop).
+(the dog's loop). `route.rs` holds `Route`, `route` and `USAGE`, and `exit.rs`
+the exit-code mapping; both left `main.rs` to keep it under 800 lines.
 
 `#[cfg(test)] mod fixtures` is declared from `main.rs`, which is the only way a
 binary crate with no lib target can share test helpers. Use
@@ -302,5 +303,5 @@ class rather than the instances.
 
 Invoke the `rust-house-style` skill before writing or reviewing Rust: the
 rules are shep-pm/rust-house-style, IR-1..IR-48. `#![forbid(unsafe_code)]`
-at `main.rs:33`, which is why `build.rs` resolves users by shelling out to
+at `main.rs:40`, which is why `build.rs` resolves users by shelling out to
 `id` rather than calling `getpwnam`.
