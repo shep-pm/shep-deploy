@@ -17,8 +17,8 @@ usage: shep-deploy <verb> [args]
   on-remove                              lifecycle hook; shep runs this itself
   help                                   print this
 
-With no arguments the poll loop starts only when shep starts the dog; run by
-hand, the bare command prints this and exits.
+With no arguments the poll loop starts only when SHEP_DOG_NAME is set, as shep
+does when it starts the dog; without it, the bare command prints this and exits.
 
 Adopted as `deploy`, the same verbs run as `shep deploy <verb> [args]`, and
 `shep deploy <sheep>` deploys one sheep directly. A sheep whose name is one of
@@ -61,8 +61,10 @@ pub enum Route<'a> {
 /// which is the escape hatch [`USAGE`] documents rather than a silent trap.
 /// `help` is one of those verbs.
 ///
-/// `supervised` is whether shep started this process. Only then does an empty
-/// argv mean the poll loop; a person who typed the bare command gets usage.
+/// `supervised` is whether `SHEP_DOG_NAME` is set. Only then does an empty argv
+/// mean the poll loop; a person who typed the bare command gets usage. shep sets
+/// the variable when it starts the dog and also when a person types a bare
+/// `shep deploy`, and the two cannot be told apart from inside this process.
 pub fn route<'a>(args: &[&'a str], supervised: bool) -> Route<'a> {
     let route = match args {
         [] if supervised => Route::Poll,

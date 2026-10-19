@@ -12,10 +12,11 @@
 //! runs [`poll::run`], which deploys every `watch = "auto"` target whose
 //! branch has moved, once an interval, until the process is asked to stop.
 //!
-//! The loop starts only in that mode. A bare run without `SHEP_DOG_NAME` is a
-//! person at a terminal, and gets usage rather than a second loop beside the
+//! The loop starts only when `SHEP_DOG_NAME` is set. A bare run without it is
+//! a person at a terminal, and gets usage rather than a second loop beside the
 //! adopted dog. Whoever needs the loop outside shep sets `SHEP_DOG_NAME`
-//! themselves, which also names the handshake.
+//! themselves, which also names the handshake. shep sets it for a bare
+//! `shep deploy` typed at a terminal too, and that run polls like the dog.
 //!
 //! The two modes connect differently. The poll loop connects through a client
 //! that survives a daemon handover, because it is the only mode that outlives
@@ -268,9 +269,10 @@ async fn poll_forever(name: &str) -> Result<u8, Error> {
 
 /// The name shep registered this process under, or `None` when nothing did.
 ///
-/// This is the handshake identity, and also what tells a supervised dog from
-/// a person at a terminal: [`run`] polls only when it is `Some`. It has
-/// exactly one source. A name reaching the daemon is a claim about which dog
+/// This is the handshake identity, and also what [`run`] reads as "supervised":
+/// it polls only when this is `Some`. shep sets the variable for a bare
+/// `shep deploy` typed at a terminal as well as for the dog it starts, so the
+/// two are not told apart here. It has exactly one source. A name reaching the daemon is a claim about which dog
 /// to restart when a handshake is refused, so a guessed one - the binary's
 /// own stem, the config section's key, a default - gets some other dog
 /// restarted for this process's problem. No name at all is a complete and
