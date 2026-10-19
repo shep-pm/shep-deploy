@@ -650,7 +650,7 @@ fn cutover_budget(app: &AppConfig) -> Duration {
 /// tidiness: every fallible step after the shepherd accepts the `Start`
 /// happens here, so [`cut_over`]'s match is exhaustive over what has to be
 /// cleaned up instead of over what went wrong, and a step added here later
-/// has nowhere to escape to. Same structure as `crate::deploy`'s `land`,
+/// has nowhere to escape to. Same structure as `crate::deploy::reload::land`,
 /// for the same reason.
 ///
 /// # This check is `Verify::Alive`, and it is weaker than the deploy path's
