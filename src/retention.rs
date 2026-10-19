@@ -149,7 +149,7 @@ pub fn prune(tree: &Tree, keep: usize, recorded: &[&str]) -> Result<Vec<String>,
 /// Removes every completion marker whose release is no longer on disk.
 ///
 /// Best effort throughout: a marker is a zero-byte file whose only reader
-/// is `deploy::checkout_release`, and one that cannot be removed costs a
+/// is `deploy::prepare::checkout_release`, and one that cannot be removed costs a
 /// stale entry, which that reader already guards against by also requiring
 /// the directory.
 fn sweep_markers(tree: &Tree, releases: &Path) {

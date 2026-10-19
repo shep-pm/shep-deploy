@@ -53,7 +53,7 @@ pub(crate) const RELOAD_DEADLINE_SLACK: Duration = Duration::from_secs(5);
 ///
 /// The two timeouts are still read from the release's Flockfile, and that
 /// IS an inference, for the same reason
-/// `deploy::refuse_ungated_verification` documents about its own read: nothing
+/// `deploy::prepare::refuse_ungated_verification` documents about its own read: nothing
 /// re-registers a sheep, and `describe` reports status, pid and uptime but
 /// never config, so there is no live source to read them from. The exposure
 /// is narrower than the instance count's, because changing either one means

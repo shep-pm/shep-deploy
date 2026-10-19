@@ -13,7 +13,7 @@
 //! ```
 //!
 //! `shep-deploy` is a binary crate with no library, so this file cannot call
-//! `crate::deploy::deploy` the way the unit tests in `src/deploy.rs` do -
+//! `crate::deploy::deploy` the way the unit tests in `src/deploy/` do -
 //! everything here goes through the two real binaries, `shep` and
 //! `shep-deploy` itself, exactly as an operator would run them.
 //!

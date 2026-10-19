@@ -117,7 +117,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ## Architecture
 
 Binary crate, no library target. Twenty-four modules under `src/`, the big three
-being `deploy.rs` (the state machine), `optin.rs` (first cutover) and `poll.rs`
+being `deploy/` (the state machine, a directory), `optin.rs` (first cutover) and `poll.rs`
 (the dog's loop). `route.rs` holds `Route`, `route` and `USAGE`, and `exit.rs`
 the exit-code mapping; both left `main.rs` to keep it under 800 lines.
 
@@ -125,7 +125,7 @@ the exit-code mapping; both left `main.rs` to keep it under 800 lines.
 binary crate with no lib target can share test helpers. Use
 `fixtures::run_git`, `fixtures::head_of`, `fixtures::fixture_release`,
 `fixtures::TEST_BUDGET`. Qualified rather than glob-imported on purpose:
-`shared.rs` has a production `run_git` and `deploy.rs` a production `head_of`,
+`shared.rs` has a production `run_git` and `deploy/prepare.rs` a production `head_of`,
 both in scope in their own test modules.
 
 `tests/integration.rs` is a separate compilation target and keeps its own copy
@@ -167,7 +167,7 @@ class rather than the instances.
 
 ## Gotchas
 
-- **`deploy.toml` is hand-edited by operators.** `deploy.rs` tells them to type
+- **`deploy.toml` is hand-edited by operators.** `deploy/prepare.rs` tells them to type
   `verify = "alive"` into it. It denies unknown fields for that reason; keep it
   that way.
 - **`Error::Config` is built at dozens of sites across ten modules.** It is
