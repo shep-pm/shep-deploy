@@ -120,16 +120,19 @@ shep-deploy deploy <sheep> --watch auto|manual
 shep-deploy setup <sheep>
 shep-deploy survey
 shep-deploy on-remove
+shep-deploy help
 ```
 
 `--watch` changes the setting and returns without deploying. `survey` reports
 where every registered sheep stands and starts, registers and writes nothing.
+`help`, `-h` and `--help` print usage on stdout. A sheep named `help` is reached
+with `shep deploy deploy help`.
 
 ## Running as a dog
 
-Adopted as a dog, `shep-deploy` takes no arguments and polls instead. Every 30
-seconds by default, it deploys any `watch = "auto"` target whose branch has
-moved. Configure it in `$SHEP_HOME/dogs.toml`:
+Adopted as a dog, `shep-deploy` takes no arguments and polls instead, but only
+when shep starts it. Every 30 seconds by default, it deploys any
+`watch = "auto"` target whose branch has moved. Configure it in `$SHEP_HOME/dogs.toml`:
 
 ```toml
 [deploy]
@@ -237,6 +240,10 @@ is behind and shep starts it again.
 Run by hand, `shep-deploy deploy web` announces no name at all. It is not a
 dog, and a command claiming to be one would have shep restart the real dog when
 the command's own handshake was refused.
+
+A bare `shep-deploy` run by hand prints usage and exits `2` rather than polling,
+because a second loop beside the adopted dog would deploy the same targets
+twice. Setting `SHEP_DOG_NAME` yourself starts the loop and names its handshake.
 
 ## A commit that fails is held
 

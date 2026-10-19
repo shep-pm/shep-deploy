@@ -100,3 +100,56 @@ fn an_ordinary_argument_is_not_a_probe() {
         "nothing is printed to stdout, so shep cannot read a usage message as an answer"
     );
 }
+
+/// Runs the built binary by hand: the given arguments, no `SHEP_DOG_NAME`, and
+/// a `$SHEP_HOME` that holds no shepherd.
+///
+/// A build that still polls, or connects, reaches for the socket under that
+/// home and exits 5, so the failure is fast instead of a hang.
+fn by_hand(args: &[&str]) -> Output {
+    let home = tempfile::tempdir().expect("a temporary $SHEP_HOME");
+    Command::new(env!("CARGO_BIN_EXE_shep-deploy"))
+        .args(args)
+        .env("SHEP_HOME", home.path())
+        .env_remove("SHEP_DOG_NAME")
+        .output()
+        .expect("the test binary's own sibling is on disk")
+}
+
+/// fails if a bare `shep-deploy` typed by hand starts the poll loop.
+///
+/// Only shep starting the dog sets `SHEP_DOG_NAME`. Without it the bare
+/// command is a person asking what this is, and a second loop beside the
+/// adopted dog deploys the same targets twice.
+#[test]
+fn a_bare_run_by_hand_prints_usage_and_does_not_poll() {
+    let output = by_hand(&[]);
+
+    assert_eq!(output.status.code(), Some(2), "{:?}", output.status);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("usage: shep-deploy"),
+        "usage goes to stderr: {:?}",
+        output.stderr
+    );
+    assert!(output.stdout.is_empty(), "nothing is printed to stdout");
+}
+
+/// fails if help stops printing usage on stdout and exiting 0, in any of its
+/// three spellings.
+///
+/// `--help` used to fall through to a deploy of a sheep named `--help` and
+/// fail on a missing `deploy.toml`.
+#[test]
+fn help_prints_usage_on_stdout_and_exits_zero() {
+    for arg in ["-h", "--help", "help"] {
+        let output = by_hand(&[arg]);
+
+        assert!(output.status.success(), "{arg}: {:?}", output.status);
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("usage: shep-deploy"),
+            "{arg}: usage goes to stdout: {:?}",
+            output.stdout
+        );
+        assert!(output.stderr.is_empty(), "{arg}: nothing on stderr");
+    }
+}

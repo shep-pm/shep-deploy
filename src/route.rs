@@ -7,7 +7,7 @@
 
 use crate::paths;
 
-/// What a direct invocation accepts. Printed on anything else.
+/// What a direct invocation accepts. Printed on anything else, and on `help`.
 pub const USAGE: &str = "\
 usage: shep-deploy <verb> [args]
 
@@ -15,10 +15,15 @@ usage: shep-deploy <verb> [args]
   setup <sheep>                          take a sheep over
   survey                                 report where every registered sheep stands
   on-remove                              lifecycle hook; shep runs this itself
+  help                                   print this
+
+With no arguments the poll loop starts only when shep starts the dog; run by
+hand, the bare command prints this and exits.
 
 Adopted as `deploy`, the same verbs run as `shep deploy <verb> [args]`, and
 `shep deploy <sheep>` deploys one sheep directly. A sheep whose name is one of
-the verbs above is reached with the verb spelled out: `shep deploy deploy survey`.";
+the verbs above is reached with the verb spelled out: `shep deploy deploy survey`,
+`shep deploy deploy help`.";
 
 /// What a parsed argv means to do.
 ///
@@ -27,8 +32,11 @@ the verbs above is reached with the verb spelled out: `shep deploy deploy survey
 /// and acts can only be exercised by actually running the binary.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route<'a> {
-    /// No argv at all: the supervised poll loop, per the dog contract.
+    /// No argv, and shep started this process: the poll loop, per the dog
+    /// contract.
     Poll,
+    /// `-h`, `--help` or `help`: print [`USAGE`] on stdout and exit 0.
+    Help,
     /// shep's on-remove lifecycle hook: put every sheep back.
     OnRemove,
     /// Report where every registered sheep stands.
@@ -51,9 +59,15 @@ pub enum Route<'a> {
 /// sheep whose name really is a verb. Checking verbs first means a sheep
 /// named `survey` needs the explicit form, `shep deploy deploy survey`,
 /// which is the escape hatch [`USAGE`] documents rather than a silent trap.
-pub fn route<'a>(args: &[&'a str]) -> Route<'a> {
+/// `help` is one of those verbs.
+///
+/// `supervised` is whether shep started this process. Only then does an empty
+/// argv mean the poll loop; a person who typed the bare command gets usage.
+pub fn route<'a>(args: &[&'a str], supervised: bool) -> Route<'a> {
     let route = match args {
-        [] => Route::Poll,
+        [] if supervised => Route::Poll,
+        [] => Route::Usage,
+        ["-h" | "--help" | "help"] => Route::Help,
         ["on-remove"] => Route::OnRemove,
         ["survey"] => Route::Survey,
         // A verb whose sheep is missing, before the bare-name arm below can
@@ -98,13 +112,45 @@ mod tests {
     /// passthrough strips the dog's own name.
     #[test]
     fn a_bare_name_is_a_deploy_and_a_verb_still_wins() {
-        assert_eq!(route(&["koji"]), Route::Deploy("koji"));
-        assert_eq!(route(&["deploy", "koji"]), Route::Deploy("koji"));
-        assert_eq!(route(&["survey"]), Route::Survey);
-        assert_eq!(route(&["setup", "koji"]), Route::Setup("koji"));
+        assert_eq!(route(&["koji"], false), Route::Deploy("koji"));
+        assert_eq!(route(&["deploy", "koji"], false), Route::Deploy("koji"));
+        assert_eq!(route(&["survey"], false), Route::Survey);
+        assert_eq!(route(&["setup", "koji"], false), Route::Setup("koji"));
         // The escape hatch for a sheep whose name is a verb.
-        assert_eq!(route(&["deploy", "survey"]), Route::Deploy("survey"));
-        assert_eq!(route(&[]), Route::Poll);
+        assert_eq!(route(&["deploy", "survey"], false), Route::Deploy("survey"));
+        assert_eq!(route(&[], true), Route::Poll);
+    }
+
+    /// fails if a bare run by hand starts the poll loop again, or if shep
+    /// starting the dog stops doing so. The loop is the dog contract; a person
+    /// typing the bare command wants usage, and a second loop beside the
+    /// adopted one is a deploy racing itself.
+    #[test]
+    fn a_bare_run_polls_only_when_shep_started_it() {
+        assert_eq!(route(&[], true), Route::Poll);
+        assert_eq!(route(&[], false), Route::Usage);
+    }
+
+    /// fails if any spelling of help stops answering help, or starts depending
+    /// on who launched the process.
+    #[test]
+    fn help_in_each_spelling_routes_to_help() {
+        for supervised in [true, false] {
+            for arg in ["-h", "--help", "help"] {
+                assert_eq!(
+                    route(&[arg], supervised),
+                    Route::Help,
+                    "{arg}, supervised: {supervised}"
+                );
+            }
+        }
+    }
+
+    /// fails if a sheep named `help` stops being reachable. It gets the same
+    /// escape hatch every other verb does.
+    #[test]
+    fn a_sheep_named_help_is_reached_with_the_verb_spelled_out() {
+        assert_eq!(route(&["deploy", "help"], false), Route::Deploy("help"));
     }
 
     /// fails if `on-remove` stops routing to its own hook, or starts being
@@ -113,8 +159,11 @@ mod tests {
     /// does.
     #[test]
     fn on_remove_routes_to_its_own_hook() {
-        assert_eq!(route(&["on-remove"]), Route::OnRemove);
-        assert_eq!(route(&["deploy", "on-remove"]), Route::Deploy("on-remove"));
+        assert_eq!(route(&["on-remove"], false), Route::OnRemove);
+        assert_eq!(
+            route(&["deploy", "on-remove"], false),
+            Route::Deploy("on-remove")
+        );
     }
 
     /// fails if a verb with its sheep missing is read as a sheep named after
@@ -127,13 +176,13 @@ mod tests {
     /// does.
     #[test]
     fn a_verb_without_its_sheep_is_a_usage_error() {
-        assert_eq!(route(&["setup"]), Route::Usage);
-        assert_eq!(route(&["deploy"]), Route::Usage);
+        assert_eq!(route(&["setup"], false), Route::Usage);
+        assert_eq!(route(&["deploy"], false), Route::Usage);
 
         // And the escape hatch still reaches a sheep really called that, the
         // same one a sheep named `survey` or `on-remove` uses.
-        assert_eq!(route(&["deploy", "setup"]), Route::Deploy("setup"));
-        assert_eq!(route(&["deploy", "deploy"]), Route::Deploy("deploy"));
+        assert_eq!(route(&["deploy", "setup"], false), Route::Deploy("setup"));
+        assert_eq!(route(&["deploy", "deploy"], false), Route::Deploy("deploy"));
     }
 
     /// fails if a sheep name that is really a path reaches a `Tree`.
@@ -146,11 +195,19 @@ mod tests {
     #[test]
     fn a_sheep_name_that_is_a_path_is_refused() {
         for name in ["/tmp/anywhere", "../sibling", "a/b", "", ".", ".."] {
-            assert_eq!(route(&[name]), Route::Usage, "bare: {name}");
-            assert_eq!(route(&["deploy", name]), Route::Usage, "deploy: {name}");
-            assert_eq!(route(&["setup", name]), Route::Usage, "setup: {name}");
+            assert_eq!(route(&[name], false), Route::Usage, "bare: {name}");
             assert_eq!(
-                route(&[name, "--watch", "auto"]),
+                route(&["deploy", name], false),
+                Route::Usage,
+                "deploy: {name}"
+            );
+            assert_eq!(
+                route(&["setup", name], false),
+                Route::Usage,
+                "setup: {name}"
+            );
+            assert_eq!(
+                route(&[name, "--watch", "auto"], false),
                 Route::Usage,
                 "watch: {name}"
             );
