@@ -15,7 +15,6 @@ use crate::verify::Generation;
 /// Registers the sheep against `current`, waits for the newcomer to start
 /// and stay up, and deletes the instances it replaced.
 ///
-/// # Errors
 /// A cutover that lands with nothing stranded promotes the record's `watch`
 /// from the `manual` [`super::prepare()`] wrote to `auto`, which is what makes the
 /// target the poll loop's. A stranded one does not: instances it could not
@@ -57,7 +56,6 @@ use crate::verify::Generation;
 /// [`State::write`] failing is the mild one, and it is passed through. The
 /// release is serving and only the record is missing, which the next
 /// `shep-deploy deploy` writes.
-///
 pub async fn cut_over<D: Daemon>(daemon: &D, prepared: Prepared) -> Result<String, Error> {
     let (hold, tree, mut state, sha, app, previous_config) = prepared.into_parts();
     // Held to the end of this function, and named so it is not dropped here.
