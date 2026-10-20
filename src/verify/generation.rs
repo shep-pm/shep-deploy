@@ -10,9 +10,9 @@ use crate::error::Error;
 
 /// The pids serving one sheep at a moment in time.
 ///
-/// Captured before a reload so that [`super::wait`] can tell the replacement from
-/// the process that was already there. See the module doc for why this
-/// exists at all, and why it is pids.
+/// Captured before a reload so that [`super::wait`] can tell the replacement
+/// from the process that was already there. See the `verify` module doc for
+/// why this exists at all, and why it is pids.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Generation {
     /// The pids that had a process.

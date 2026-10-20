@@ -379,7 +379,7 @@ mod tests {
     /// Accepting that as alive threw the signal away and recorded the thing
     /// shep had just refused to claim. Caught against a real shepherd by the
     /// integration tier, which is the only place it could be caught: no fake
-    /// in this module knew `Starting` had acquired a meaning.
+    /// in `verify` knew `Starting` had acquired a meaning.
     #[tokio::test(start_paused = true)]
     async fn alive_rejects_a_replacement_shep_gave_up_on() {
         // Starting forever, which is exactly what an abandoned reload leaves.

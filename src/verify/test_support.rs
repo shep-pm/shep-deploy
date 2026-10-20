@@ -42,7 +42,7 @@ pub(super) fn serving_all(pids: &[u32]) -> Generation {
 /// Whole listings rather than statuses: what `wait` judges is the shape
 /// of the flock - which pids are in it, not only what state one of them
 /// is in - so a fake that could only vary the status could not express
-/// the failure this module exists to catch.
+/// the failure `verify` exists to catch.
 pub(super) struct Listings {
     sequence: Vec<Vec<ProcessInfo>>,
     next: Cell<usize>,

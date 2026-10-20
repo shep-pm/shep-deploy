@@ -467,7 +467,7 @@ mod tests {
     /// at half strength verified, and both modes believed it.
     ///
     /// Pinned at the turnover rather than the dwell because `Verify::Probed`
-    /// returns as soon as the turnover lands and never dwells at all.
+    /// fails on a short flock before any dwell begins.
     #[tokio::test(start_paused = true)]
     async fn a_turnover_that_lost_a_replica_is_not_a_turnover() {
         // Two before, one after, and that one is new and healthy.
