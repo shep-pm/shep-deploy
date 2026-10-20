@@ -66,7 +66,7 @@ async fn resolve_id(release: &Path, user: &str, flag: &str, kind: &str) -> Resul
 /// only caller is a warning, and a deploy that cannot work out its own uid
 /// should still deploy. What it loses is the warning, which is the right
 /// thing to lose.
-async fn effective_uid() -> Option<u32> {
+pub(super) async fn effective_uid() -> Option<u32> {
     let output = Command::new("id").arg("-u").output().await.ok()?;
     if !output.status.success() {
         return None;
