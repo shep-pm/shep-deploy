@@ -183,14 +183,46 @@ pub(crate) fn refuse_ungated_verification(
     app: &AppConfig,
     mode: Verify,
 ) -> Result<(), Error> {
+    refuse_ungated(
+        sheep,
+        app,
+        mode,
+        "change the verify line in deploy.toml to \"alive\"",
+    )
+}
+
+/// As [`refuse_ungated_verification`], for `setup`, where no `deploy.toml`
+/// exists yet and the way to `alive` is the flag that writes it.
+///
+/// # Errors
+/// [`Error::Config`] naming the sheep and every way out.
+pub(crate) fn refuse_ungated_at_setup(
+    sheep: &str,
+    app: &AppConfig,
+    mode: Verify,
+) -> Result<(), Error> {
+    refuse_ungated(
+        sheep,
+        app,
+        mode,
+        &format!("run `shep-deploy setup {sheep} --verify alive`"),
+    )
+}
+
+fn refuse_ungated(
+    sheep: &str,
+    app: &AppConfig,
+    mode: Verify,
+    accept_alive: &str,
+) -> Result<(), Error> {
     if mode == Verify::Probed && app.readiness_probe.is_none() && !app.wait_ready {
         return Err(Error::Config(format!(
             "{sheep} has verify = \"probed\" but neither a readiness_probe nor wait_ready, so \
              there is nothing for a deploy to wait on: shep reports a sheep with no readiness \
              gate Online as soon as it has not died, which would verify every release, including \
              a broken one. Add a [readiness_probe] to its Flockfile, or set wait_ready if the app \
-             announces itself on the channel, or change the verify line in deploy.toml to \
-             \"alive\" to accept the weaker check deliberately."
+             announces itself on the channel, or {accept_alive} to accept the weaker check \
+             deliberately."
         )));
     }
     Ok(())

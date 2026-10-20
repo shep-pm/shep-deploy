@@ -7,7 +7,7 @@ use shep_client::shep_core::config::AppConfig;
 use crate::build;
 use crate::config::DogConfig;
 use crate::daemon::Daemon;
-use crate::deploy::refuse_ungated_verification;
+use crate::deploy::refuse_ungated_at_setup;
 use crate::error::Error;
 use crate::git;
 use crate::lock;
@@ -333,15 +333,8 @@ pub async fn prepare_with<D: Daemon>(
         let (tree, checkout, sha) = (tree.clone(), state.checkout.clone(), sha.clone());
         shared::off_thread(move || crate::deploy::stage_release(&tree, &checkout, &sha)).await?
     };
-    // Before the build, so a refusal costs no build; the text is the deploy's
-    // own, with the way out this command offers added.
-    refuse_ungated_verification(sheep, &app, verify).map_err(|err| match err {
-        Error::Config(why) => Error::Config(format!(
-            "{why} Or take {sheep} over without a gate: `shep-deploy setup {sheep} --verify \
-             alive`."
-        )),
-        other => other,
-    })?;
+    // Before the build, so a refusal costs no build.
+    refuse_ungated_at_setup(sheep, &app, verify)?;
     build::run(
         sheep,
         &release,
@@ -764,6 +757,10 @@ mod tests {
         assert!(
             err.to_string().contains("--verify alive"),
             "it names the way out: {err}"
+        );
+        assert!(
+            !err.to_string().contains("deploy.toml"),
+            "no record exists to edit: {err}"
         );
         let tree = Tree::for_sheep(home.path(), "bpm");
         assert!(!marker.exists(), "the build ran");
