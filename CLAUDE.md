@@ -158,7 +158,7 @@ exist and each has a precise edge:
   build can READ. It does not cover the project's own `.env`: gitignored files
   are symlinked into every release by design, so a build reads whatever the app
   reads.
-- **The Flockfile read** (`flockfile.rs`) runs in the dog's own process, at its
+- **The Flockfile read** (`flockfile/read.rs`) runs in the dog's own process, at its
   own uid, BEFORE any build drops to `user`. A committed `Flockfile.toml` that
   is a symlink is therefore refused unread (`O_NOFOLLOW`), and a parse error
   names the line number and never quotes the line: a link at
@@ -254,7 +254,7 @@ class rather than the instances.
 - **A committed Flockfile is refused for more than `user`/`group`.** `exec`
   probes, `out_file`/`err_file`, non-loopback probe targets, and `watch`,
   because the daemon acts on all of them at its own uid (read out of
-  shep-daemon on 2026-09-04; `flockfile::refuse_repo_privilege` says why per
+  shep-daemon on 2026-09-04; `flockfile::refuse::refuse_repo_privilege` says why per
   field). Presence is checked before shape: serde builds a probe from a
   TOML array too, and a walk that read only tables let one through.
 - **`Online` is a one-time verdict in shep.** A crash after it respawns under
