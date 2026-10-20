@@ -35,7 +35,8 @@ pub enum Staged {
         /// The sha now staged.
         sha: String,
     },
-    /// The head is already the staged sha, so nothing was built.
+    /// The head is already the staged sha and its release is built, so
+    /// nothing was built.
     AlreadyStaged {
         /// The sha that is staged.
         sha: String,
@@ -103,7 +104,13 @@ pub async fn stage(tree: &Tree, state: &mut State, config: &DogConfig) -> Result
     if state.deployed.as_deref() == Some(head.as_str()) {
         return Ok(Staged::AlreadyLive { sha: head });
     }
-    if state.staged.as_deref() == Some(head.as_str()) {
+    // Only while the release is still there to promote: `promote` names this
+    // verb as the way back from a release that is gone or unfinished, and
+    // answering "already staged" would leave no way to build it again.
+    if state.staged.as_deref() == Some(head.as_str())
+        && tree.release(&head).is_dir()
+        && tree.completion(&head).is_file()
+    {
         return Ok(Staged::AlreadyStaged { sha: head });
     }
 
@@ -617,6 +624,42 @@ mod tests {
         assert!(!marker.exists(), "nothing was built");
     }
 
+    /// fails if staging cannot rebuild a staged release that is gone or
+    /// unfinished. Promote names `--stage` as the way out of both, so an
+    /// "already staged" answer while the head has not moved leaves the
+    /// operator with no way to get a release back.
+    #[tokio::test]
+    async fn staging_again_rebuilds_a_staged_release_that_is_gone_or_unfinished() {
+        let mut fixture = fixture_with_previous_release();
+        let second = stage_a_build(&mut fixture, "touch built.marker").await;
+        let release = fixture.tree.release(&second);
+
+        fs::remove_file(fixture.tree.completion(&second)).expect("marker");
+        let again = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
+            .await
+            .expect("stages again");
+        assert_eq!(
+            again,
+            Staged::Built {
+                sha: second.clone()
+            }
+        );
+        assert!(fixture.tree.completion(&second).is_file());
+
+        fs::remove_dir_all(&release).expect("release");
+        let again = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
+            .await
+            .expect("stages again");
+        assert_eq!(
+            again,
+            Staged::Built {
+                sha: second.clone()
+            }
+        );
+        assert!(release.join("built.marker").exists(), "it was built again");
+        assert_eq!(fixture.state.staged.as_deref(), Some(second.as_str()));
+    }
+
     /// fails if a newer head leaves the older sha as the staged one. The
     /// operator would then land a release the branch has moved past.
     #[tokio::test]
@@ -721,6 +764,10 @@ mod tests {
         }
         .write(&fixture.tree.state_file())
         .expect("another stage's record");
+        // What that stage left: a finished release, unbuilt here.
+        fs::create_dir_all(fixture.tree.release(&second)).expect("release");
+        fs::create_dir_all(fixture.tree.completions()).expect("markers");
+        fs::write(fixture.tree.completion(&second), b"").expect("marker");
 
         let staged = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
             .await
@@ -732,7 +779,10 @@ mod tests {
                 sha: second.clone()
             }
         );
-        assert!(!fixture.tree.release(&second).exists(), "nothing was built");
+        assert!(
+            !fixture.tree.release(&second).join("built.marker").exists(),
+            "nothing was built"
+        );
         assert_eq!(fixture.state.staged.as_deref(), Some(second.as_str()));
     }
 

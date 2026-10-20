@@ -201,11 +201,12 @@ fn checkout_release(tree: &Tree, sha: &str) -> Result<(), Error> {
 
     if release.exists() {
         fs::remove_dir_all(&release).map_err(Error::at(&release))?;
-        // Removing the directory is not enough on its own: git still has the
-        // path registered and refuses the next add with "missing but already
-        // registered worktree". Verified 2026-08-28.
-        git::worktree_prune(&git_dir)?;
     }
+    // Removing the directory is not enough on its own: git still has the
+    // path registered and refuses the next add with "missing but already
+    // registered worktree". Verified 2026-08-28. Also when the directory was
+    // already gone, which is what a release removed by hand leaves.
+    git::worktree_prune(&git_dir)?;
 
     git::worktree_add(&git_dir, &release, sha)?;
 

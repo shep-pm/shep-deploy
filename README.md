@@ -251,8 +251,9 @@ serving its last head. `--stage` fetches, builds the branch head and records it
 in `deploy.toml` as `staged`, then returns: it never swaps `current`, reloads
 the sheep, or changes `deployed` or `failed`. It is refused on a `watch = auto`
 target, because the next tick would deploy that head anyway; set `--watch
-manual` first. Staging the head that is already deployed or already staged does
-nothing. Retention spares the staged release, and a deploy that lands clears
+manual` first. Staging the head that is already deployed, or already staged with
+its release still built, does nothing; a staged release that is gone is built
+again. Retention spares the staged release, and a deploy that lands clears
 `staged`. While a sha is staged, a shep-deploy from before the field refuses to
 read the record. `--promote` lands what was
 staged: it runs the release hook, swaps `current`, reloads the sheep, verifies
