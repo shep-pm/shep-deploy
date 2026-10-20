@@ -65,6 +65,7 @@ mod exit;
 mod fixtures;
 mod flockfile;
 mod git;
+mod hook;
 mod linkcheck;
 mod lock;
 mod optin;

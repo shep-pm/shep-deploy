@@ -48,7 +48,7 @@ const DEFAULT_RETENTION: usize = 5;
 /// than a late failure on a remote that was never going to answer.
 const DEFAULT_GIT_TIMEOUT: UpDuration = UpDuration::from_millis(300_000);
 
-/// How long a build may run before it is abandoned.
+/// How long a build, or a release hook, may run before it is abandoned.
 ///
 /// An hour, which is far longer than any build this is meant to bound and is
 /// deliberate. The purpose is to turn a build that will NEVER finish into an
@@ -103,7 +103,7 @@ pub struct DogConfig {
     pub retention: usize,
     /// How long any single git subprocess may run before it is abandoned.
     pub git_timeout: Duration,
-    /// How long a build may run before it is abandoned.
+    /// How long a build, or a release hook, may run before it is abandoned.
     pub build_timeout: Duration,
     /// Environment variables copied from this process into a build, by name.
     ///
@@ -182,10 +182,10 @@ pub struct Section {
     /// clone of a large repository legitimately runs minutes. At least one
     /// second.
     git_timeout: UpDuration,
-    /// How long a build may run before it is abandoned, for example
-    /// `"1h"`. It exists to turn a build that will never finish into an
-    /// ordinary per-target failure, not to put a schedule on honest work,
-    /// so it is set far longer than any build it is meant to bound. At
+    /// How long a build, or a release hook, may run before it is abandoned,
+    /// for example `"1h"`. It exists to turn a build that will never finish
+    /// into an ordinary per-target failure, not to put a schedule on honest
+    /// work, so it is set far longer than any build it is meant to bound. At
     /// least one second.
     build_timeout: UpDuration,
     /// Environment variables to copy from this dog's own environment into

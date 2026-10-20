@@ -5,6 +5,37 @@ All notable changes to this crate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.14] - 2026-10-20
+
+### Added
+
+- Name a linked path the build wrote through into the checkout
+
+### Fixed
+
+- Say a changed linked path may be the running app's own write
+
+
+## [0.3.13] - 2026-10-20
+
+### Added
+
+- Add the release hook, its operator-only refusal and its runner
+- Run the release hook between the build and the swap
+
+### Fixed
+
+- Hand the release to the app user when no build ran
+- Pin the .git pointer around a hook that follows a build
+
+
+## [0.3.12] - 2026-10-20
+
+### Added
+
+- Name each linked path that looks like build output
+
+
 ## [0.3.11] - 2026-10-20
 
 ### Changed
