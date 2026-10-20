@@ -84,7 +84,12 @@ fn write_target(home: &Path, sheep: &str, watch: Watch, sha: Option<&str>) {
 /// The returned [`TempDir`] is the origin, and dropping it deletes the
 /// repository the deploy fetches from, so tests hold it.
 fn write_target_ready(home: &Path, sheep: &str, watch: Watch) -> TempDir {
-    let origin = fixtures::checkout(&[("Flockfile.toml", &flockfile(sheep))]);
+    write_target_with_flockfile(home, sheep, watch, &flockfile(sheep))
+}
+
+/// [`write_target_ready`], with the live release's Flockfile given.
+fn write_target_with_flockfile(home: &Path, sheep: &str, watch: Watch, flockfile: &str) -> TempDir {
+    let origin = fixtures::checkout(&[("Flockfile.toml", flockfile)]);
 
     let tree = Tree::for_sheep(home, sheep);
     fs::create_dir_all(tree.git()).expect("create the git dir");
@@ -479,6 +484,46 @@ async fn a_deploy_is_written_to_the_log_it_belongs_in() {
         format!("fine deployed {head}\n")
     );
     assert!(err.is_empty(), "nothing failed");
+}
+
+/// fails if a push the loop leaves alone is not said, or is said again on
+/// every tick it stays unchanged. `second.txt` is outside the declared
+/// paths, and the branch does not move between ticks.
+#[tokio::test(start_paused = true)]
+async fn a_skip_is_said_once() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let declared = format!(
+        "{}\n[dog.deploy.reload]\npaths = [\"cmd/web\"]\n",
+        flockfile("quiet")
+    );
+    let origin = write_target_with_flockfile(home.path(), "quiet", Watch::Auto, &declared);
+    let head = fixtures::head_of(origin.path());
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+
+    // Three ticks' worth, as the interval test above.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(305),
+        run_with(
+            &Ready::new(),
+            home.path(),
+            Reader::primed(
+                None,
+                DogConfig {
+                    interval: Duration::from_secs(150),
+                    ..fixtures::dog_config()
+                },
+            ),
+            &mut out,
+            &mut err,
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        String::from_utf8(out).expect("utf-8"),
+        format!("quiet skipped {head}, nothing under its reload paths changed\n")
+    );
+    assert!(err.is_empty(), "a skip is not a complaint");
 }
 
 /// fails if a failure never reaches the error log, or reaches it once

@@ -66,7 +66,7 @@ use refuse::{refuse_duplicate_apps, refuse_repo_privilege};
 #[derive(Debug)]
 pub struct Merged {
     /// The committed document with the override merged over it.
-    doc: Value,
+    pub(crate) doc: Value,
     /// The release both were read from, for messages.
     release: PathBuf,
 }
