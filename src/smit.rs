@@ -4,6 +4,7 @@
 //! ```text
 //! ▲ main@a1b2c3      watched
 //! ⏸ main@a1b2c3      manual
+//! ⏸ main@a1b2c3 +d4e5f6  manual, with d4e5f6 staged
 //! ```
 //!
 //! The two marks differ so `shep flock` answers "which of these is actually
@@ -40,24 +41,31 @@ use crate::state::{State, Watch};
 /// column that has to compete with nine others.
 const ABBREVIATED: usize = 6;
 
+/// `get`, not a slice: a hand-edited deploy.toml carrying a short sha must
+/// degrade to a shorter smit, never take the dog down on its next poll.
+fn abbreviate(sha: &str) -> &str {
+    sha.get(..ABBREVIATED).unwrap_or(sha)
+}
+
 /// The smit for one target.
 ///
 /// `none` rather than an empty sha for a target between opt-in and its
 /// first verified deploy: `main@` reads as deployed at nothing, where
 /// `main@none` reads as not deployed yet.
+///
+/// A staged sha follows the deployed one as ` +d4e5f6`.
 #[must_use]
 pub fn text(state: &State) -> String {
     let mark = match state.watch {
         Watch::Auto => '▲',
         Watch::Manual => '⏸',
     };
-    let sha = state.deployed.as_deref().map_or("none", |sha| {
-        // `get`, not a slice: a hand-edited deploy.toml carrying a short
-        // sha must degrade to a shorter smit, never take the dog down on
-        // its next poll.
-        sha.get(..ABBREVIATED).unwrap_or(sha)
-    });
-    format!("{mark} {}@{sha}", state.branch)
+    let sha = state.deployed.as_deref().map_or("none", abbreviate);
+    let staged = state
+        .staged
+        .as_deref()
+        .map_or_else(String::new, |sha| format!(" +{}", abbreviate(sha)));
+    format!("{mark} {}@{sha}{staged}", state.branch)
 }
 
 /// Shorten `text` to [`Smit::MAX_CHARS`] and drop any control character, so
@@ -190,6 +198,29 @@ mod tests {
     fn a_long_branch_name_is_shortened_to_fit() {
         let mut state = target(Watch::Auto, Some("a1b2c3d4e5f6"));
         state.branch = "x".repeat(100);
+        let shortened = fit(text(&state));
+        assert_eq!(shortened.chars().count(), Smit::MAX_CHARS);
+        assert!(shortened.parse::<Smit>().is_ok(), "{shortened}");
+    }
+
+    /// fails if a staged sha is not shown, or is shown before the deployed
+    /// one. The deployed sha is what is serving, and the staged one is what
+    /// is waiting, so it reads second.
+    #[test]
+    fn a_staged_sha_is_shown_after_the_deployed_one() {
+        let mut state = target(Watch::Manual, Some("a1b2c3d4e5f6"));
+        state.staged = Some("d4e5f6a7b8c9".to_owned());
+        assert_eq!(text(&state), "⏸ main@a1b2c3 +d4e5f6");
+    }
+
+    /// fails if a staged sha can make the smit longer than the shepherd
+    /// accepts. The branch is the variable part, so a long one has to lose
+    /// its own tail, and the smit that is published must still parse.
+    #[test]
+    fn a_staged_sha_cannot_push_the_smit_past_the_shepherds_limit() {
+        let mut state = target(Watch::Manual, Some("a1b2c3d4e5f6"));
+        state.branch = "x".repeat(100);
+        state.staged = Some("d4e5f6a7b8c9".to_owned());
         let shortened = fit(text(&state));
         assert_eq!(shortened.chars().count(), Smit::MAX_CHARS);
         assert!(shortened.parse::<Smit>().is_ok(), "{shortened}");

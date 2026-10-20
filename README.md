@@ -256,7 +256,9 @@ nothing. Retention spares the staged release, and a deploy that lands clears
 read the record. `--verify` on
 `setup` records how the sheep's deploys are verified, `probed` when it is
 left out. `survey` reports
-where every registered sheep stands and starts, registers and writes nothing.
+where every registered sheep stands and starts, registers and writes nothing;
+a manual target with a staged sha reads `main@a1b2c3, deploys only when asked,
+staged d4e5f6`.
 `help`, `-h` and `--help` print usage on stdout. A sheep named `help` is reached
 with `shep deploy deploy help`.
 
@@ -345,6 +347,7 @@ and sha it is on without a second command:
 ```text
 ▲ main@a1b2c3      watched
 ⏸ main@f6e5d4      manual
+⏸ main@f6e5d4 +a1b2c3  manual, with a1b2c3 staged
 ```
 
 Republished every tick rather than on change: shep holds a smit in memory only
