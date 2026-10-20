@@ -46,9 +46,12 @@ pub enum Staged {
 /// reports a failure to do so rather than returning it: the stage itself is
 /// already decided.
 ///
+/// `state` is replaced by the record as it is on disk once the tree is held.
+///
 /// # Errors
 /// [`Error::AlreadyDeploying`] if another process holds the tree, and
-/// [`Error::Io`] if the lock file cannot be created. [`Error::NotCutOver`] if
+/// [`Error::Io`] if the lock file cannot be created. [`Error::Io`] or
+/// [`Error::Config`] if `deploy.toml` cannot be read or fails validation. [`Error::NotCutOver`] if
 /// the record names no released sha, as for a deploy. [`Error::Config`] if
 /// the target is `watch = auto`: the next poll tick would deploy the same
 /// head, so a stage there promises something it cannot keep.
@@ -62,6 +65,11 @@ pub enum Staged {
 pub async fn stage(tree: &Tree, state: &mut State, config: &DogConfig) -> Result<Staged, Error> {
     let sheep = tree.sheep();
     let _staging = lock::hold(tree)?;
+
+    // The caller read `state` before the lock, and a deploy or another stage
+    // may have written the record since. Answering from the older copy would
+    // rebuild a head that is already staged or call a landed one new.
+    *state = State::read(&tree.state_file())?;
 
     if state.deployed.is_none() {
         return Err(Error::NotCutOver {
@@ -293,6 +301,10 @@ mod tests {
         let mut fixture = fixture_with_previous_release();
         let previous = fixture.state.deployed.clone().expect("a previous release");
         fixture.state.watch = Watch::Auto;
+        fixture
+            .state
+            .write(&fixture.tree.state_file())
+            .expect("write deploy.toml");
         commit_on_origin(&fixture, "second.txt");
 
         let err = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
@@ -322,5 +334,34 @@ mod tests {
 
         assert!(matches!(err, Error::NotCutOver { .. }), "{err:?}");
         assert_eq!(fixture.state.staged, None);
+    }
+
+    /// fails if a stage answers from the record its caller read before the
+    /// lock. A deploy or another stage may have written it in between; here
+    /// the disk already names the head as staged, and the stale copy does
+    /// not, so building again is the symptom.
+    #[tokio::test]
+    async fn a_stage_answers_from_the_record_on_disk_not_the_callers_copy() {
+        let mut fixture = fixture_with_previous_release();
+        let second = commit_building(&fixture, "touch built.marker", "second.txt");
+        State {
+            staged: Some(second.clone()),
+            ..fixture.state.clone()
+        }
+        .write(&fixture.tree.state_file())
+        .expect("another stage's record");
+
+        let staged = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
+            .await
+            .expect("answers");
+
+        assert_eq!(
+            staged,
+            Staged::AlreadyStaged {
+                sha: second.clone()
+            }
+        );
+        assert!(!fixture.tree.release(&second).exists(), "nothing was built");
+        assert_eq!(fixture.state.staged.as_deref(), Some(second.as_str()));
     }
 }
