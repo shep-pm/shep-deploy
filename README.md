@@ -230,6 +230,7 @@ invisible to it.
 shep-deploy deploy <sheep>
 shep-deploy deploy <sheep> --watch auto|manual
 shep-deploy deploy <sheep> --branch <name>
+shep-deploy deploy <sheep> --branch refs/pull/1/head
 shep-deploy deploy <sheep> --stage
 shep-deploy deploy <sheep> --promote
 shep-deploy setup <sheep>
@@ -242,14 +243,18 @@ shep-deploy help
 `--watch` changes the setting and returns without deploying. `--branch` does
 the same for the branch a target tracks, which `setup` read from the checkout
 once; it clears a held sha and refuses a target `setup` never finished. A name
-the remote lacks is reported by the next tick. `--stage` fetches, builds the
-branch head and records it in `deploy.toml` as `staged`, then returns: it never
-swaps `current`, reloads the sheep, or changes `deployed` or `failed`. It is
-refused on a `watch = auto` target, because the next tick would deploy that
-head anyway; set `--watch manual` first. Staging the head that is already
-deployed or already staged does nothing. Retention spares the staged release,
-and a deploy that lands clears `staged`. While a sha is staged, a shep-deploy
-from before the field refuses to read the record. `--promote` lands what was
+the remote lacks is reported by the next tick. `--branch` also takes a full ref
+beginning `refs/`, such as `refs/pull/1/head`, which the target then follows on
+every push like a branch. Only that ref is fetched, not every pull ref the
+remote has. A closed pull request's ref stays on GitHub, so the target keeps
+serving its last head. `--stage` fetches, builds the branch head and records it
+in `deploy.toml` as `staged`, then returns: it never swaps `current`, reloads
+the sheep, or changes `deployed` or `failed`. It is refused on a `watch = auto`
+target, because the next tick would deploy that head anyway; set `--watch
+manual` first. Staging the head that is already deployed or already staged does
+nothing. Retention spares the staged release, and a deploy that lands clears
+`staged`. While a sha is staged, a shep-deploy from before the field refuses to
+read the record. `--promote` lands what was
 staged: it runs the release hook, swaps `current`, reloads the sheep, verifies
 it and runs the after hook, with the rollback a deploy has, and builds and
 fetches nothing. It lands the staged sha even if the branch has moved since,

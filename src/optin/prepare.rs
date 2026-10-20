@@ -316,8 +316,13 @@ pub async fn prepare_with<D: Daemon>(
     std::fs::create_dir_all(tree.releases()).map_err(Error::at(tree.releases()))?;
     git::init_bare(&tree.git())?;
     // Off the runtime's thread, like every git call: see `shared::off_thread`.
-    let (git_dir, remote, budget) = (tree.git(), state.remote.clone(), config.git_timeout);
-    shared::off_thread(move || git::fetch(&git_dir, &remote, budget)).await?;
+    let (git_dir, remote, tracked, budget) = (
+        tree.git(),
+        state.remote.clone(),
+        state.branch.clone(),
+        config.git_timeout,
+    );
+    shared::off_thread(move || git::fetch(&git_dir, &remote, &tracked, budget)).await?;
     let sha = git::remote_head(&tree.git(), &state.branch)?;
 
     let release = tree.release(&sha);

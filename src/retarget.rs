@@ -5,7 +5,8 @@ use crate::lock;
 use crate::paths::Tree;
 use crate::state::State;
 
-/// Points the target at `branch` and lifts the hold on its last failed sha,
+/// Points the target at `branch`, a branch name or a full ref such as
+/// `refs/pull/1/head`, and lifts the hold on its last failed sha,
 /// without deploying.
 ///
 /// Takes no [`crate::daemon::Daemon`] and does not contact the remote, so a
@@ -23,7 +24,8 @@ use crate::state::State;
 ///
 /// # Errors
 /// [`Error::Config`] if the record names no released sha, or if `branch` is
-/// empty, begins with `-` or carries a control character - see
+/// empty, begins with `-`, carries a control character or is a `refs/` value
+/// git would refuse - see
 /// [`State::validate`]. [`Error::Io`] or [`Error::Config`] if `deploy.toml`
 /// cannot be read or written.
 ///
@@ -109,6 +111,20 @@ mod tests {
         assert_eq!(written.deployed.as_deref(), Some(fixtures::SHA));
         assert_eq!(written.watch, Watch::Auto);
         assert_eq!(written.verify, Verify::Alive);
+    }
+
+    /// fails if a full ref, which is how a pull request head is followed, is
+    /// refused or rewritten on its way into the record.
+    #[test]
+    fn a_full_ref_is_written_as_given() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let tree = deployed_tree(home.path());
+
+        let (_, after) = set_branch(&tree, "refs/pull/1/head").expect("sets");
+
+        let written = State::read(&tree.state_file()).expect("reads");
+        assert_eq!(written, after);
+        assert_eq!(written.branch, "refs/pull/1/head");
     }
 
     /// fails if a name git would read as an option, or no name at all, is

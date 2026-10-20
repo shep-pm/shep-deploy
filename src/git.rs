@@ -44,6 +44,10 @@
 //! repository updates `refs/heads/*` in place on the second run exactly as
 //! a named remote's default refspec would, with no `git remote add` step
 //! and nothing stored in `git_dir`'s config.
+//!
+//! A tracked full ref outside `refs/heads/`, such as `refs/pull/1/head`, is
+//! the one thing the mirror cannot bring, so [`fetch`] adds a refspec for
+//! that ref alone and [`remote_head`] resolves it through [`refname`].
 
 use std::io;
 use std::path::Path;
@@ -147,7 +151,14 @@ pub fn current_branch(checkout: &Path) -> Result<String, Error> {
 
 /// Fetches every branch `remote` has into `git_dir`, mirroring them onto
 /// `git_dir`'s own `refs/heads/*` and dropping any that `remote` no longer
-/// has.
+/// has, plus `tracked` when that is a ref outside `refs/heads/`.
+///
+/// `tracked` is `State::branch`: a branch name, or a full ref such as
+/// `refs/pull/1/head`. The latter is not under `refs/heads/`, so the mirror
+/// never brings it, and it is fetched by one more refspec of its own,
+/// `+<ref>:<ref>`. Only that one ref: a forge holds a ref per pull request,
+/// thousands of them, and this runs on every tick. A `tracked` ref the
+/// remote lacks fails the fetch with git's own `couldn't find remote ref`.
 ///
 /// `remote` is a URL, not a configured remote's short name - see the module
 /// doc for why `git_dir` never gets a `git remote add` of its own and this
@@ -182,33 +193,45 @@ pub fn current_branch(checkout: &Path) -> Result<String, Error> {
 /// # Errors
 /// [`Error::Git`] if `remote` cannot be reached or refuses the fetch.
 /// [`Error::Io`] if `git` itself cannot be launched.
-pub fn fetch(git_dir: &Path, remote: &str, budget: Duration) -> Result<(), Error> {
-    run_git_within(
-        git_dir,
-        &[
-            // `ext::<command>` is a git transport that runs the command. git
-            // refuses it by default, and this pins that whatever the host's
-            // own git config says (a `GIT_ALLOW_PROTOCOL` in this process's
-            // environment is consulted ahead of config and is the
-            // operator's to set), so a `remote` can only ever be a place to
-            // fetch from. Measured 2026-09-03: refused with and without
-            // this on a stock git; the line is for the host that is not.
-            "-c",
-            "protocol.ext.allow=never",
-            "fetch",
-            "--prune",
-            "--",
-            remote,
-            "+refs/heads/*:refs/heads/*",
-        ],
-        budget,
-    )
-    .map(|_| ())
+pub fn fetch(git_dir: &Path, remote: &str, tracked: &str, budget: Duration) -> Result<(), Error> {
+    let tracked_ref = refname(tracked);
+    let tracked_refspec = format!("+{tracked_ref}:{tracked_ref}");
+    let mut args = vec![
+        // `ext::<command>` is a git transport that runs the command. git
+        // refuses it by default, and this pins that whatever the host's
+        // own git config says (a `GIT_ALLOW_PROTOCOL` in this process's
+        // environment is consulted ahead of config and is the
+        // operator's to set), so a `remote` can only ever be a place to
+        // fetch from. Measured 2026-09-03: refused with and without
+        // this on a stock git; the line is for the host that is not.
+        "-c",
+        "protocol.ext.allow=never",
+        "fetch",
+        "--prune",
+        "--",
+        remote,
+        "+refs/heads/*:refs/heads/*",
+    ];
+    if !tracked_ref.starts_with("refs/heads/") {
+        args.push(&tracked_refspec);
+    }
+    run_git_within(git_dir, &args, budget).map(|_| ())
+}
+
+/// The full ref `tracked` names: a value beginning `refs/` as given, any
+/// other as the branch `refs/heads/<tracked>`.
+#[must_use]
+pub fn refname(tracked: &str) -> String {
+    if tracked.starts_with("refs/") {
+        tracked.to_owned()
+    } else {
+        format!("refs/heads/{tracked}")
+    }
 }
 
 /// The commit `branch` points at in `git_dir`, after a [`fetch`].
 ///
-/// Resolves `refs/heads/<branch>` specifically, rather than the bare name -
+/// Resolves [`refname`] of `branch`, peeled to a commit, specifically, rather than the bare name -
 /// see the module doc for why `git_dir`'s mirrored branches live directly
 /// under `refs/heads/` rather than behind a `refs/remotes/<name>/`
 /// indirection. `--verify` is what turns "no such branch" into a clean,
@@ -220,8 +243,10 @@ pub fn fetch(git_dir: &Path, remote: &str, budget: Duration) -> Result<(), Error
 /// because [`fetch`] has not run yet, or the remote has no such branch.
 /// [`Error::Io`] if `git` itself cannot be launched.
 pub fn remote_head(git_dir: &Path, branch: &str) -> Result<String, Error> {
-    let refname = format!("refs/heads/{branch}");
-    run_git(git_dir, &["rev-parse", "--verify", &refname]).map(|stdout| stdout.trim().to_owned())
+    // `^{commit}` peels an annotated tag to the commit it tags; a branch or a
+    // pull ref already names one and is unchanged.
+    let commit = format!("{}^{{commit}}", refname(branch));
+    run_git(git_dir, &["rev-parse", "--verify", &commit]).map(|stdout| stdout.trim().to_owned())
 }
 
 /// Whether any file under `paths` differs between the commits `from` and `to`.
@@ -397,6 +422,7 @@ mod tests {
         fetch(
             git_dir.path(),
             origin.path().to_str().expect("utf-8 path"),
+            "main",
             fixtures::TEST_BUDGET,
         )
         .expect("fetches");
@@ -428,14 +454,14 @@ mod tests {
         let git_dir = bare_git_dir();
         let url = origin.path().to_str().expect("utf-8 path");
 
-        fetch(git_dir.path(), url, fixtures::TEST_BUDGET).expect("first fetch");
+        fetch(git_dir.path(), url, "main", fixtures::TEST_BUDGET).expect("first fetch");
         let first = remote_head(git_dir.path(), "main").expect("resolves after first fetch");
 
         fs::write(origin.path().join("second.txt"), "y").expect("write second commit's file");
         fixtures::run_git(origin.path(), &["add", "."]);
         fixtures::run_git(origin.path(), &["commit", "-q", "-m", "second"]);
 
-        fetch(git_dir.path(), url, fixtures::TEST_BUDGET).expect("second fetch");
+        fetch(git_dir.path(), url, "main", fixtures::TEST_BUDGET).expect("second fetch");
         let second = remote_head(git_dir.path(), "main").expect("resolves after second fetch");
 
         assert_ne!(first, second);
@@ -456,15 +482,141 @@ mod tests {
         let git_dir = bare_git_dir();
         let url = origin.path().to_str().expect("utf-8 path");
 
-        fetch(git_dir.path(), url, fixtures::TEST_BUDGET).expect("first fetch sees feature");
+        fetch(git_dir.path(), url, "main", fixtures::TEST_BUDGET)
+            .expect("first fetch sees feature");
         remote_head(git_dir.path(), "feature").expect("feature resolves before deletion");
 
         fixtures::run_git(origin.path(), &["branch", "-D", "feature"]);
-        fetch(git_dir.path(), url, fixtures::TEST_BUDGET).expect("second fetch prunes feature");
+        fetch(git_dir.path(), url, "main", fixtures::TEST_BUDGET)
+            .expect("second fetch prunes feature");
 
         let err =
             remote_head(git_dir.path(), "feature").expect_err("a deleted branch must not resolve");
         assert!(matches!(err, Error::Git { .. }));
+    }
+
+    /// Points `refname` in `origin` at its current `HEAD`, the way a forge
+    /// publishes a pull request's head outside `refs/heads/`.
+    fn publish_ref(origin: &TempDir, refname: &str) {
+        fixtures::run_git(origin.path(), &["update-ref", refname, "HEAD"]);
+    }
+
+    /// fails if a tracked pull ref is not fetched, or if fetching it pulls
+    /// every other pull ref the remote has: a forge holds thousands, and the
+    /// poll loop fetches on every tick.
+    #[test]
+    fn a_pull_ref_is_fetched_without_every_other_pull_ref() {
+        let origin = fixture_repo_with_commits(1);
+        publish_ref(&origin, "refs/pull/1/head");
+        publish_ref(&origin, "refs/pull/2/head");
+        let git_dir = bare_git_dir();
+        let url = origin.path().to_str().expect("utf-8 path");
+
+        fetch(
+            git_dir.path(),
+            url,
+            "refs/pull/1/head",
+            fixtures::TEST_BUDGET,
+        )
+        .expect("fetches");
+
+        assert_eq!(
+            remote_head(git_dir.path(), "refs/pull/1/head").expect("the tracked ref lands"),
+            fixtures::head_of(origin.path())
+        );
+        let err = remote_head(git_dir.path(), "refs/pull/2/head")
+            .expect_err("a ref nobody tracks must not land");
+        assert!(matches!(err, Error::Git { .. }), "{err}");
+    }
+
+    /// fails if a tracked ref stays at the commit it first had after the
+    /// remote rewrites it, which is what a force-pushed pull request is.
+    #[test]
+    fn a_pull_ref_follows_a_force_push() {
+        let origin = fixture_repo_with_commits(2);
+        fixtures::run_git(origin.path(), &["update-ref", "refs/pull/1/head", "HEAD~1"]);
+        let git_dir = bare_git_dir();
+        let url = origin.path().to_str().expect("utf-8 path");
+        fetch(
+            git_dir.path(),
+            url,
+            "refs/pull/1/head",
+            fixtures::TEST_BUDGET,
+        )
+        .expect("first");
+        let first = remote_head(git_dir.path(), "refs/pull/1/head").expect("resolves");
+
+        // Sideways, not forward: HEAD~1's sibling, so only a forced refspec
+        // moves it.
+        fixtures::run_git(origin.path(), &["checkout", "-q", "-b", "other", "HEAD~1"]);
+        fixtures::commit(origin.path(), &[("other.txt", "y")], "rewritten");
+        fixtures::run_git(origin.path(), &["update-ref", "refs/pull/1/head", "HEAD"]);
+        fetch(
+            git_dir.path(),
+            url,
+            "refs/pull/1/head",
+            fixtures::TEST_BUDGET,
+        )
+        .expect("second");
+
+        let second = remote_head(git_dir.path(), "refs/pull/1/head").expect("resolves");
+        assert_ne!(first, second);
+        assert_eq!(second, fixtures::head_of(origin.path()));
+    }
+
+    /// fails if a tracked annotated tag resolves to the tag object rather
+    /// than the commit, which a release directory named by sha and a
+    /// worktree checkout both need.
+    #[test]
+    fn a_tag_ref_resolves_to_the_commit_it_tags() {
+        let origin = fixture_repo_with_commits(1);
+        fixtures::run_git(origin.path(), &["tag", "-a", "-m", "v1", "v1"]);
+        let git_dir = bare_git_dir();
+        let url = origin.path().to_str().expect("utf-8 path");
+        fetch(git_dir.path(), url, "refs/tags/v1", fixtures::TEST_BUDGET).expect("fetches");
+
+        assert_eq!(
+            remote_head(git_dir.path(), "refs/tags/v1").expect("resolves"),
+            fixtures::head_of(origin.path()),
+            "an annotated tag must peel to its commit, not name the tag object"
+        );
+    }
+
+    /// fails if a bare branch name stops resolving under `refs/heads/`.
+    #[test]
+    fn a_branch_name_still_resolves_under_refs_heads() {
+        assert_eq!(refname("main"), "refs/heads/main");
+        assert_eq!(refname("feature/x"), "refs/heads/feature/x");
+    }
+
+    /// fails if a value beginning `refs/` is prefixed again.
+    #[test]
+    fn a_full_ref_resolves_as_given() {
+        assert_eq!(refname("refs/pull/1/head"), "refs/pull/1/head");
+        assert_eq!(refname("refs/tags/v1"), "refs/tags/v1");
+    }
+
+    /// fails if a tracked ref the remote lacks is swallowed, or reworded:
+    /// the fetch fails with git's own message, so an operator sees what git
+    /// said about the ref they typed.
+    #[test]
+    fn a_ref_the_remote_lacks_fails_the_fetch_with_gits_own_message() {
+        let origin = fixture_repo_with_commits(1);
+        let git_dir = bare_git_dir();
+        let url = origin.path().to_str().expect("utf-8 path");
+
+        let err = fetch(
+            git_dir.path(),
+            url,
+            "refs/pull/9/head",
+            fixtures::TEST_BUDGET,
+        )
+        .expect_err("the remote has no such ref");
+
+        assert!(
+            matches!(&err, Error::Git { stderr, .. } if stderr.contains("couldn't find remote ref refs/pull/9/head")),
+            "{err}"
+        );
     }
 
     /// fails if a `remote` beginning with `-` is read as an option.
@@ -480,8 +632,8 @@ mod tests {
         let marker = git_dir.path().join("injected");
         let remote = format!("--upload-pack=touch {}", marker.display());
 
-        let err =
-            fetch(git_dir.path(), &remote, fixtures::TEST_BUDGET).expect_err("no such repository");
+        let err = fetch(git_dir.path(), &remote, "main", fixtures::TEST_BUDGET)
+            .expect_err("no such repository");
 
         assert!(matches!(err, Error::Git { .. }), "{err}");
         assert!(
@@ -502,7 +654,8 @@ mod tests {
         let marker = git_dir.path().join("ext-ran");
         let remote = format!("ext::sh -c 'touch {}'", marker.display());
 
-        let err = fetch(git_dir.path(), &remote, fixtures::TEST_BUDGET).expect_err("refused");
+        let err =
+            fetch(git_dir.path(), &remote, "main", fixtures::TEST_BUDGET).expect_err("refused");
 
         // The transport named in git's own refusal is the positive signal;
         // a missing marker alone is also what a mis-parsed command gives.
@@ -543,6 +696,7 @@ mod tests {
         fetch(
             git_dir.path(),
             origin.path().to_str().expect("utf-8 path"),
+            "main",
             fixtures::TEST_BUDGET,
         )
         .expect("fetches");

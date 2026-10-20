@@ -92,8 +92,13 @@ pub async fn stage(tree: &Tree, state: &mut State, config: &DogConfig) -> Result
         )));
     }
 
-    let (git_dir, remote, budget) = (tree.git(), state.remote.clone(), config.git_timeout);
-    shared::off_thread(move || git::fetch(&git_dir, &remote, budget)).await?;
+    let (git_dir, remote, tracked, budget) = (
+        tree.git(),
+        state.remote.clone(),
+        state.branch.clone(),
+        config.git_timeout,
+    );
+    shared::off_thread(move || git::fetch(&git_dir, &remote, &tracked, budget)).await?;
     let head = head_of(tree, &state.branch)?;
     if state.deployed.as_deref() == Some(head.as_str()) {
         return Ok(Staged::AlreadyLive { sha: head });
@@ -399,7 +404,7 @@ mod tests {
         let second = stage_a_build(&mut fixture, "true").await;
         let third = commit_on_origin(&fixture, "third.txt");
         let remote = fixture.state.remote.clone();
-        git::fetch(&fixture.tree.git(), &remote, fixtures::TEST_BUDGET).expect("fetch");
+        git::fetch(&fixture.tree.git(), &remote, "main", fixtures::TEST_BUDGET).expect("fetch");
         assert_eq!(
             git::remote_head(&fixture.tree.git(), "main").expect("head"),
             third,
