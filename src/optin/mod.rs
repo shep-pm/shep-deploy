@@ -2,11 +2,11 @@
 //! deploy target, then cutting the sheep over to it.
 //!
 //! Two halves, and the line between them is the only thing in this crate
-//! with no rollback. [`prepare()`] builds the tree and the first release, and
+//! with no rollback. [`prepare_with()`] builds the tree and the first release, and
 //! [`cut_over`] registers the sheep against `current` and removes the
 //! instances it replaced.
 //!
-//! **Nothing [`prepare()`] does touches the flock.** A failure anywhere in it
+//! **Nothing [`prepare_with()`] does touches the flock.** A failure anywhere in it
 //! leaves the sheep running exactly as it was, from the operator's own
 //! checkout, with nothing about the flock changed. What it leaves behind on
 //! a failure is a directory, and the operator's fix is to run the command
@@ -23,7 +23,7 @@
 //! shepherd's muster roll, and the roll is poisoned the instant a `Start` is
 //! accepted: `FlockRegistry` is name-keyed, so from that moment the roll's
 //! entry for this sheep is the DOG's own config, not the operator's.
-//! [`prepare()`] captures all three before it ever sends one, and the refusal
+//! [`prepare_with()`] captures all three before it ever sends one, and the refusal
 //! at its own top is what stops a re-run after an abandoned cutover from
 //! capturing the deploy tree as the thing to restore to.
 //!
@@ -49,4 +49,4 @@ mod test_support;
 mod undo;
 
 pub use cutover::cut_over;
-pub use prepare::prepare;
+pub use prepare::prepare_with;

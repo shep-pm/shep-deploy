@@ -16,7 +16,7 @@ use crate::{flockfile, git, shared};
 /// the operator's shared files, and the two Flockfiles read once.
 ///
 /// One function because two callers, [`super::attempt`] and
-/// [`crate::optin::prepare`], had the same seven lines, and because all of
+/// [`crate::optin::prepare_with`], had the same seven lines, and because all of
 /// it is blocking work (git, symlinks, file reads) that both run through
 /// [`shared::off_thread`]. Answers the app to register and the build to
 /// run.
@@ -178,10 +178,42 @@ pub(super) fn head_of(tree: &Tree, branch: &str) -> Result<String, Error> {
 ///
 /// # Errors
 /// [`Error::Config`] naming the sheep and every way out.
-pub(super) fn refuse_ungated_verification(
+pub(crate) fn refuse_ungated_verification(
     sheep: &str,
     app: &AppConfig,
     mode: Verify,
+) -> Result<(), Error> {
+    refuse_ungated(
+        sheep,
+        app,
+        mode,
+        "change the verify line in deploy.toml to \"alive\"",
+    )
+}
+
+/// As [`refuse_ungated_verification`], for `setup`, where no `deploy.toml`
+/// exists yet and the way to `alive` is the flag that writes it.
+///
+/// # Errors
+/// [`Error::Config`] naming the sheep and every way out.
+pub(crate) fn refuse_ungated_at_setup(
+    sheep: &str,
+    app: &AppConfig,
+    mode: Verify,
+) -> Result<(), Error> {
+    refuse_ungated(
+        sheep,
+        app,
+        mode,
+        &format!("run `shep-deploy setup {sheep} --verify alive`"),
+    )
+}
+
+fn refuse_ungated(
+    sheep: &str,
+    app: &AppConfig,
+    mode: Verify,
+    accept_alive: &str,
 ) -> Result<(), Error> {
     if mode == Verify::Probed && app.readiness_probe.is_none() && !app.wait_ready {
         return Err(Error::Config(format!(
@@ -189,8 +221,8 @@ pub(super) fn refuse_ungated_verification(
              there is nothing for a deploy to wait on: shep reports a sheep with no readiness \
              gate Online as soon as it has not died, which would verify every release, including \
              a broken one. Add a [readiness_probe] to its Flockfile, or set wait_ready if the app \
-             announces itself on the channel, or change the verify line in deploy.toml to \
-             \"alive\" to accept the weaker check deliberately."
+             announces itself on the channel, or {accept_alive} to accept the weaker check \
+             deliberately."
         )));
     }
     Ok(())

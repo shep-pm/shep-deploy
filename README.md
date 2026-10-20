@@ -120,12 +120,15 @@ invisible to it.
 shep-deploy deploy <sheep>
 shep-deploy deploy <sheep> --watch auto|manual
 shep-deploy setup <sheep>
+shep-deploy setup <sheep> --verify probed|alive
 shep-deploy survey
 shep-deploy on-remove
 shep-deploy help
 ```
 
-`--watch` changes the setting and returns without deploying. `survey` reports
+`--watch` changes the setting and returns without deploying. `--verify` on
+`setup` records how the sheep's deploys are verified, `probed` when it is
+left out. `survey` reports
 where every registered sheep stands and starts, registers and writes nothing.
 `help`, `-h` and `--help` print usage on stdout. A sheep named `help` is reached
 with `shep deploy deploy help`.
@@ -277,6 +280,14 @@ its `cwd` set to `current`. A Flockfile that names no `interpreter` keeps the
 one the sheep already ran under: `shep start` fills that in from `shep.toml`'s
 `[interpreters]`, and this dog cannot read that map.
 
+An app with neither a `readiness_probe` nor `wait_ready`, a bot with no port
+say, is refused before anything is built, because its first deploy would be
+refused for the same reason. Take it over with `shep-deploy setup <sheep>
+--verify alive`, which records `verify = "alive"` in its `deploy.toml`. A
+refused `setup` leaves a directory with the fetched repository and the staged
+release but no `deploy.toml` and no `current`, which is not a deploy target, so
+running it again is a retry.
+
 The first cutover is the one deploy that may have downtime. It runs two
 instances at once, so an app that does not bind with `SO_REUSEPORT` cannot take
 its own port while the original still holds it, and the new instance is then
@@ -320,7 +331,9 @@ unattended.
 `wait_ready`; without one, shep reports a process `Online` for not having died
 yet, so there is nothing to verify against and the deploy is refused.
 `verify = "alive"` is the deliberate downgrade: a new process, still running
-ten seconds later.
+ten seconds later. An app that cannot have a gate, one with no port, is taken
+over with `shep-deploy setup <sheep> --verify alive`; `setup` refuses it under
+`probed` before it builds anything.
 
 Both modes watch the flock after the turnover. `probed` requires the same
 processes, all `Online`, at every look for ten seconds; `alive` sleeps ten

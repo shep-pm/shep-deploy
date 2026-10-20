@@ -38,7 +38,7 @@
 //! stands and touches nothing; see [`survey::survey`]. `setup` takes a
 //! sheep over: it builds the deploy tree and its first release, then
 //! re-registers the sheep against `current` and removes the instances it
-//! replaced. See [`optin::prepare`] and [`optin::cut_over`] - and note that
+//! replaced. See [`optin::prepare_with`] and [`optin::cut_over`] - and note that
 //! it is the one deploy that may have downtime, and the one that is not
 //! verified against the app's readiness probe.
 
@@ -94,7 +94,7 @@ use crate::error::Error;
 use crate::exit::{code_for, code_for_outcome};
 use crate::paths::Tree;
 use crate::route::{Route, USAGE, route};
-use crate::state::{State, Watch};
+use crate::state::{State, Verify, Watch};
 
 /// How long the runtime waits for blocking work after the main future ends.
 ///
@@ -170,7 +170,11 @@ async fn run(args: &[&str]) -> ExitCode {
         Route::OnRemove => return on_remove().await,
         Route::Survey => survey_once().await,
         Route::Deploy(sheep) => deploy_once(sheep).await,
-        Route::Setup(sheep) => setup_once(sheep).await,
+        Route::Setup(sheep) => setup_once(sheep, Verify::default()).await,
+        Route::SetupVerify { sheep, mode } => match parse_verify(mode) {
+            Ok(verify) => setup_once(sheep, verify).await,
+            Err(err) => Err(err),
+        },
         Route::Watch { sheep, mode } => set_watch(sheep, mode),
         Route::Usage => return usage(),
     };
@@ -433,7 +437,7 @@ async fn deploy_once(sheep: &str) -> Result<u8, Error> {
 }
 
 /// Takes `sheep` over: builds its deploy tree and first release, then cuts
-/// it over to `current`.
+/// it over to `current`, recording `verify` as how its deploys are judged.
 ///
 /// Prints where the sheep now deploys from, because that path is the one
 /// thing an operator has no other way to learn - nothing in `shep flock`
@@ -442,15 +446,15 @@ async fn deploy_once(sheep: &str) -> Result<u8, Error> {
 /// # Errors
 /// [`Error::Io`] if `$SHEP_HOME` cannot be resolved, [`Error::Connect`] if
 /// the shepherd's socket cannot be reached, and whatever
-/// [`optin::prepare`] or [`optin::cut_over`] return. [`Error::Stranded`] is
+/// [`optin::prepare_with`] or [`optin::cut_over`] return. [`Error::Stranded`] is
 /// the one that is returned AFTER a success is printed: the cutover landed
 /// and the instances it replaced did not all go.
-async fn setup_once(sheep: &str) -> Result<u8, Error> {
+async fn setup_once(sheep: &str, verify: Verify) -> Result<u8, Error> {
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
 
     let config = config::read(&daemon).await?;
-    let prepared = optin::prepare(&daemon, &shep_home()?, sheep, &config).await?;
+    let prepared = optin::prepare_with(&daemon, &shep_home()?, sheep, &config, verify).await?;
     // Read before `cut_over` consumes `prepared`.
     let current = prepared.tree.current();
 
@@ -468,6 +472,20 @@ async fn setup_once(sheep: &str) -> Result<u8, Error> {
             Err(err)
         }
         Err(err) => Err(err),
+    }
+}
+
+/// The mode `setup --verify` was given.
+///
+/// # Errors
+/// [`Error::Config`] if `mode` is neither `probed` nor `alive`.
+fn parse_verify(mode: &str) -> Result<Verify, Error> {
+    match mode {
+        "probed" => Ok(Verify::Probed),
+        "alive" => Ok(Verify::Alive),
+        other => Err(Error::Config(format!(
+            "--verify takes probed or alive, not {other:?}"
+        ))),
     }
 }
 
@@ -677,5 +695,17 @@ mod tests {
         let stop = Stop::install();
         assert!(stop.term.is_some(), "SIGTERM");
         assert!(stop.interrupt.is_some(), "SIGINT");
+    }
+
+    /// fails if `--verify` accepts a mode it does not know, or the refusal
+    /// stops naming the flag. A typo silently becoming `probed` would send the
+    /// operator back to the refusal they are trying to get past.
+    #[test]
+    fn an_unknown_verify_mode_is_refused_by_name() {
+        assert_eq!(parse_verify("alive").expect("alive"), Verify::Alive);
+        assert_eq!(parse_verify("probed").expect("probed"), Verify::Probed);
+        let err = parse_verify("Alive").expect_err("case matters");
+        assert!(matches!(err, Error::Config(_)), "{err}");
+        assert!(err.to_string().contains("--verify"), "{err}");
     }
 }

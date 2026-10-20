@@ -71,7 +71,8 @@ use crate::paths::Tree;
 use crate::state::State;
 use crate::{git, lock, shared, swap};
 
-use prepare::{head_of, refuse_ungated_verification};
+use prepare::head_of;
+pub(crate) use prepare::{refuse_ungated_at_setup, refuse_ungated_verification};
 use record::{record, record_landing};
 use reload::{Landed, land, named};
 use rollback::{roll_back, undo_swap};
