@@ -128,6 +128,7 @@ fn checkout_release(tree: &Tree, sha: &str) -> Result<(), Error> {
 /// whole point of pruning: without it this would keep resolving a stale sha
 /// and the target would stall silently forever.
 pub(super) fn head_of(tree: &Tree, branch: &str) -> Result<String, Error> {
+    let sheep = tree.sheep();
     match git::remote_head(&tree.git(), branch) {
         Ok(sha) => Ok(sha),
         Err(Error::Git {
@@ -139,7 +140,8 @@ pub(super) fn head_of(tree: &Tree, branch: &str) -> Result<String, Error> {
             status,
             stderr: format!(
                 "the fetch succeeded but the remote has no branch named {branch:?} - it was \
-                 deleted or renamed upstream, or never existed - so there is nothing to deploy: \
+                 deleted or renamed upstream, or never existed - so there is nothing to deploy \
+                 (to follow another branch, run `shep-deploy deploy {sheep} --branch <name>`): \
                  {stderr}"
             ),
         }),
@@ -473,6 +475,10 @@ mod tests {
         // message a watched target hits unattended, and assertions that
         // stop early never see it.
         assert!(shown.contains("nothing to deploy"), "{shown}");
+        assert!(
+            shown.contains("shep-deploy deploy web --branch <name>"),
+            "{shown}"
+        );
         assert!(!shown.contains('\\'), "{shown}");
     }
 }

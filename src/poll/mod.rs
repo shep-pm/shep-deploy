@@ -93,8 +93,8 @@ const fn due(state: &State) -> bool {
 /// rolled back every interval for as long as nobody pushes.
 ///
 /// Targets are re-read from disk every tick rather than cached, so a target
-/// created, retargeted with `git checkout stable`, or switched to `manual`
-/// while the dog runs is picked up on the next pass without a restart.
+/// created, switched to `manual`, or moved with `--branch` (the branch is
+/// read from the checkout once, at setup) is picked up on the next pass.
 ///
 /// Two failures are reported as rows rather than passed over. A record that
 /// cannot be read is a target nothing can be done with, and

@@ -107,23 +107,24 @@ pub(super) async fn record(
     }
 }
 
-/// Takes `watch` and `verify` from the record on disk into `state`, so a
-/// deploy's own write of the record does not put back a setting the
+/// Takes `watch`, `verify` and `branch` from the record on disk into `state`,
+/// so a deploy's own write of the record does not put back a setting the
 /// operator changed while it ran.
 ///
-/// Those two fields are the operator's: `set_watch` writes one and a hand
-/// edit writes the other, and both are documented as things to change in
-/// the middle of an incident. A deploy holds this `State` from its first
-/// read to its last write, which can be a build's worth of time, and writing
-/// it whole put the operator's `manual` back to `auto` at the end of the
-/// very deploy they were trying to stop the next one of. Called before
-/// every whole-record write a deploy makes: the verified arm's, the
-/// rollback's, and `record`'s. A record that cannot be read leaves `state`
+/// Those fields are the operator's: `set_watch` and `set_branch` write one
+/// each and a hand edit writes `verify`, and `watch` is documented as
+/// something to change in the middle of an incident. A deploy holds this
+/// `State` from its first read to its last write, which can be a build's worth
+/// of time, and writing it whole put the operator's `manual` back to `auto` at
+/// the end of the very deploy they were trying to stop the next one of.
+/// Called before every whole-record write a deploy makes: the verified arm's,
+/// the rollback's, and `record`'s. A record that cannot be read leaves `state`
 /// as it is: there is nothing to adopt.
 fn adopt_operator_fields(tree: &Tree, state: &mut State) {
     if let Ok(on_disk) = State::read(&tree.state_file()) {
         state.watch = on_disk.watch;
         state.verify = on_disk.verify;
+        state.branch = on_disk.branch;
     }
 }
 

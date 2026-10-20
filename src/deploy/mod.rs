@@ -418,6 +418,8 @@ async fn attempt<D: Daemon>(
 
 #[cfg(test)]
 mod tests {
+    mod retarget;
+
     use std::fs;
 
     use crate::deploy::test_support::{
