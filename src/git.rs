@@ -231,7 +231,7 @@ pub fn refname(tracked: &str) -> String {
 
 /// The commit `branch` points at in `git_dir`, after a [`fetch`].
 ///
-/// Resolves [`refname`] of `branch` specifically, rather than the bare name -
+/// Resolves [`refname`] of `branch`, peeled to a commit, specifically, rather than the bare name -
 /// see the module doc for why `git_dir`'s mirrored branches live directly
 /// under `refs/heads/` rather than behind a `refs/remotes/<name>/`
 /// indirection. `--verify` is what turns "no such branch" into a clean,
@@ -243,8 +243,10 @@ pub fn refname(tracked: &str) -> String {
 /// because [`fetch`] has not run yet, or the remote has no such branch.
 /// [`Error::Io`] if `git` itself cannot be launched.
 pub fn remote_head(git_dir: &Path, branch: &str) -> Result<String, Error> {
-    let refname = refname(branch);
-    run_git(git_dir, &["rev-parse", "--verify", &refname]).map(|stdout| stdout.trim().to_owned())
+    // `^{commit}` peels an annotated tag to the commit it tags; a branch or a
+    // pull ref already names one and is unchanged.
+    let commit = format!("{}^{{commit}}", refname(branch));
+    run_git(git_dir, &["rev-parse", "--verify", &commit]).map(|stdout| stdout.trim().to_owned())
 }
 
 /// Whether any file under `paths` differs between the commits `from` and `to`.
@@ -560,6 +562,24 @@ mod tests {
         let second = remote_head(git_dir.path(), "refs/pull/1/head").expect("resolves");
         assert_ne!(first, second);
         assert_eq!(second, fixtures::head_of(origin.path()));
+    }
+
+    /// fails if a tracked annotated tag resolves to the tag object rather
+    /// than the commit, which a release directory named by sha and a
+    /// worktree checkout both need.
+    #[test]
+    fn a_tag_ref_resolves_to_the_commit_it_tags() {
+        let origin = fixture_repo_with_commits(1);
+        fixtures::run_git(origin.path(), &["tag", "-a", "-m", "v1", "v1"]);
+        let git_dir = bare_git_dir();
+        let url = origin.path().to_str().expect("utf-8 path");
+        fetch(git_dir.path(), url, "refs/tags/v1", fixtures::TEST_BUDGET).expect("fetches");
+
+        assert_eq!(
+            remote_head(git_dir.path(), "refs/tags/v1").expect("resolves"),
+            fixtures::head_of(origin.path()),
+            "an annotated tag must peel to its commit, not name the tag object"
+        );
     }
 
     /// fails if a bare branch name stops resolving under `refs/heads/`.

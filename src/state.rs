@@ -393,8 +393,16 @@ fn ref_refusal(tracked: &str) -> Option<&'static str> {
     if tracked.ends_with('/') {
         return Some("ends with `/`, which git refuses in a ref name");
     }
-    if tracked.ends_with(".lock") {
-        return Some("ends with `.lock`, which git refuses in a ref name");
+    if tracked.ends_with('.') {
+        return Some("ends with `.`, which git refuses in a ref name");
+    }
+    for component in tracked.split('/') {
+        if component.ends_with(".lock") {
+            return Some("has a path component ending `.lock`, which git refuses in a ref name");
+        }
+        if component.starts_with('.') {
+            return Some("has a path component beginning `.`, which git refuses in a ref name");
+        }
     }
     None
 }
@@ -584,6 +592,9 @@ verfiy = "alive"
             "refs/pull/@{1}/head",
             "refs/pull/1/",
             "refs/pull/1.lock",
+            "refs/pull/1.lock/head",
+            "refs/pull/.hidden/head",
+            "refs/pull/1/head.",
             "refs/pull//1/head",
         ] {
             let text = format!(
