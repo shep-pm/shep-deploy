@@ -88,6 +88,9 @@ pub(super) fn report(sheep: &str, outcome: &Result<Outcome, Error>) -> Option<Sa
     match outcome {
         Ok(Outcome::UpToDate) => None,
         Ok(Outcome::Deployed { sha }) => Some(Said::Note(format!("{sheep} deployed {sha}"))),
+        Ok(Outcome::Skipped { sha }) => Some(Said::Note(format!(
+            "{sheep} skipped {sha}, nothing under its reload paths changed"
+        ))),
         Ok(Outcome::RolledBack { to, why }) => Some(Said::Complaint(format!(
             "{sheep} rolled back to {to}: {why}"
         ))),

@@ -106,6 +106,36 @@ after the hook ran, the old release comes back against the migrated database.
 A held sha that you retry with `shep deploy <sheep>` runs the hook again, so
 write the command to be idempotent.
 
+## Deploying only what a push touches
+
+Several services can share one repository, each its own target. Every push to
+the branch then reloads all of them, so a change to one restarts the rest. A
+target that lists the paths it runs from is left alone by a push that changes
+none of them:
+
+```toml
+[dog.deploy.reload]
+paths = ["cmd/voting", "internal/voting", "pkg", "go.mod"]
+```
+
+- Entries are git pathspecs. A directory name matches everything under it, and
+  a glob such as `assets/*.png` works too.
+- `Flockfile.toml` always counts, so a push that edits the table deploys.
+- The paths come from the release that is live now, not from the new commit.
+  A push that changes the table is still judged by the old one, and it deploys
+  because `Flockfile.toml` changed.
+- No table, or `paths = []`, deploys every new sha, as before. An unknown key is
+  refused by name.
+- A skipped push costs a fetch and a diff: no checkout, build or reload, and
+  `deploy.toml` is not written. The log says `<sheep> skipped <sha>, nothing
+  under its reload paths changed`, once until the branch moves again.
+- The next push is compared with the last sha that was deployed, not with the
+  one skipped, so a skipped push's changes still count toward it.
+- If the dog cannot tell (the deployed sha is gone from its clone, the live
+  Flockfile is unreadable, git fails) it deploys and says why.
+- `shep-deploy deploy <sheep>` by hand never skips. It is you asking for a
+  deploy now.
+
 ## What one deploy does
 
 1. Fetch into a bare clone, and compare the branch head to the last deployed

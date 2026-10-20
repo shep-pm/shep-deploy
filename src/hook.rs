@@ -177,7 +177,7 @@ pub(crate) async fn run(spec: &HookSpec, ctx: &Context<'_>) -> Result<(), Error>
 const OPERATOR_TABLES: [&str; 2] = ["release", "after"];
 
 /// The table `name` under `[dog.deploy]` in `doc`, whatever its shape.
-fn deploy_table<'a>(doc: &'a Value, name: &str) -> Option<&'a Value> {
+pub(crate) fn deploy_table<'a>(doc: &'a Value, name: &str) -> Option<&'a Value> {
     doc.as_table()?
         .get("dog")?
         .as_table()?

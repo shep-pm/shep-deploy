@@ -29,7 +29,7 @@ const STRANDED: u8 = 13;
 /// The exit code for a run that finished, reporting what it finished as.
 pub const fn code_for_outcome(outcome: &Outcome) -> u8 {
     match outcome {
-        Outcome::UpToDate | Outcome::Deployed { .. } => 0,
+        Outcome::UpToDate | Outcome::Deployed { .. } | Outcome::Skipped { .. } => 0,
         Outcome::RolledBack { .. } => ROLLED_BACK,
     }
 }
@@ -178,6 +178,16 @@ mod tests {
             }),
             0
         );
+    }
+
+    /// fails if a push the dog chose not to deploy is reported as a failure.
+    /// Nothing went wrong: the target is exactly as it was.
+    #[test]
+    fn a_skipped_deploy_exits_zero() {
+        let outcome = Outcome::Skipped {
+            sha: "new".to_owned(),
+        };
+        assert_eq!(code_for_outcome(&outcome), 0);
     }
 
     /// fails if a refused handshake stops being an error at all, or starts

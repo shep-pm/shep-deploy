@@ -69,7 +69,7 @@ use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::paths::Tree;
 use crate::state::State;
-use crate::{git, hook, linkcheck, lock, shared, swap};
+use crate::{git, hook, linkcheck, lock, shared, skip, swap};
 
 use prepare::head_of;
 pub(crate) use prepare::{refuse_ungated_at_setup, refuse_ungated_verification};
@@ -97,6 +97,13 @@ pub enum Outcome {
         to: String,
         /// Why the new release was rejected.
         why: String,
+    },
+    /// The branch moved, but nothing under the target's `[dog.deploy.reload]`
+    /// paths changed, so nothing was built or reloaded and the record is as it
+    /// was. Only [`unattended`] answers this.
+    Skipped {
+        /// The head that was left alone.
+        sha: String,
     },
 }
 
@@ -205,6 +212,12 @@ pub async fn deploy<D: Daemon>(
 /// else - releases, shared linking, the atomic swap, probe verification,
 /// auto-rollback and retention - is the same code.
 ///
+/// A branch that moved without touching anything the live release's
+/// `[dog.deploy.reload]` paths name is [`Outcome::Skipped`]: nothing is
+/// checked out, built or reloaded, and the record is not written, so the next
+/// comparison is still against the last sha actually deployed. See
+/// [`crate::skip`]. A failure to decide deploys as if there were no table.
+///
 /// # Errors
 /// [`Error::Held`] if the branch head is the sha `state.failed` names, in
 /// which case nothing at all was attempted. Otherwise as [`deploy`].
@@ -290,6 +303,16 @@ async fn go<D: Daemon>(
             sheep: sheep.to_owned(),
             sha: head,
         });
+    }
+
+    // After the hold, so a sha that already failed is still said once rather
+    // than judged again, and only for the poll loop: a hand deploy means now.
+    // `started_at` is the live release, whose Flockfile names the paths.
+    if held == Held::Hold
+        && let Some(live) = &started_at
+        && skip::nothing_changed(tree, state, live, &head).await
+    {
+        return Ok(Outcome::Skipped { sha: head });
     }
 
     let outcome = attempt(daemon, tree, state, &head, started_at, config).await;
@@ -448,6 +471,7 @@ async fn attempt<D: Daemon>(
 mod tests {
     mod hooks;
     mod retarget;
+    mod skip;
 
     use std::fs;
 
