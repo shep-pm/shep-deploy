@@ -80,15 +80,19 @@ pub(super) async fn record(
     // one write this module swallows, a verified deploy whose record could
     // not be written: memory names the new sha and disk still names the old
     // one, and the old one is what the next run's rollback looks for.
-    let on_disk = State::read(&tree.state_file())
-        .ok()
-        .and_then(|recorded| recorded.deployed);
-    let spared: Vec<&str> = state
-        .deployed
-        .as_deref()
-        .into_iter()
-        .chain(on_disk.as_deref())
-        .collect();
+    let recorded = State::read(&tree.state_file()).ok();
+    // `staged` is spared like `deployed`: it is built, recorded, and waiting
+    // for a deploy that has not come yet, so it is not `current` and can be
+    // older than the newest `keep` by then.
+    let spared: Vec<&str> = [
+        state.deployed.as_deref(),
+        recorded.as_ref().and_then(|on_disk| on_disk.deployed.as_deref()),
+        state.staged.as_deref(),
+        recorded.as_ref().and_then(|on_disk| on_disk.staged.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     // `git worktree remove` per doomed release, off the runtime's thread
     // like every other git call.
     let pruned = {
@@ -130,6 +134,10 @@ fn adopt_operator_fields(tree: &Tree, state: &mut State) {
 
 /// Records `head` as the deployed release, in memory and on disk.
 ///
+/// Clears `staged` in the same write: whatever was staged has landed or has
+/// been passed over, and a stale one would be reported as built for a head
+/// the branch has moved past.
+///
 /// Lifts the hold in the same write. A retry of a held commit that lands has
 /// `failed` naming the very sha going into `deployed`, and a record that says
 /// both is refused by [`State::write`], so the one write meant to record the
@@ -140,6 +148,7 @@ fn adopt_operator_fields(tree: &Tree, state: &mut State) {
 pub(super) fn record_landing(tree: &Tree, state: &mut State, head: &str) -> Result<(), Error> {
     state.deployed = Some(head.to_owned());
     let held = state.failed.take();
+    let staged = state.staged.take();
     // The operator's fields from disk, not this deploy's copy of them: see
     // `write_record`.
     let written = write_record(tree, state);
@@ -148,6 +157,7 @@ pub(super) fn record_landing(tree: &Tree, state: &mut State, head: &str) -> Resu
         // compares the two to decide whether it has a write to make, and
         // would otherwise find nothing to do.
         state.failed = held;
+        state.staged = staged;
     }
     written
 }

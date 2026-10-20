@@ -106,6 +106,7 @@ pub fn state() -> State {
         origin_script: None,
         checkout: PathBuf::from("/srv/x"),
         origin: None,
+        staged: None,
     }
 }
 

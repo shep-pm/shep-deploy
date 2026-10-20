@@ -491,7 +491,7 @@ mod tests {
 
     use crate::deploy::test_support::{
         FLOCKFILE, Shepherd, commit_on_origin, fixture_before_any_release,
-        fixture_with_previous_release,
+        fixture_with_previous_release, test_config_keeping,
     };
     use crate::error::Error;
     use crate::state::State;
@@ -845,5 +845,74 @@ mod tests {
         assert!(matches!(err, Error::Raced { .. }), "{err:?}");
         assert_eq!(daemon.reload_count(), 0, "no reload may be sent at all");
         assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
+    }
+
+    /// fails if retention reclaims the release `--stage` built. It is not
+    /// `current` and not `deployed`, and it is older than the newest `keep`
+    /// as soon as a few commits land after it, so without its own mention in
+    /// the spared list the next deploy of the target throws away the build
+    /// the operator staged to avoid waiting for.
+    #[tokio::test(start_paused = true)]
+    async fn retention_spares_the_staged_release() {
+        let mut fixture = fixture_with_previous_release();
+        let staged = commit_on_origin(&fixture, "second.txt");
+        crate::git::fetch(
+            &fixture.tree.git(),
+            &fixture.state.remote,
+            fixtures::TEST_BUDGET,
+        )
+        .expect("fetch");
+        crate::git::worktree_add(
+            &fixture.tree.git(),
+            &fixture.tree.release(&staged),
+            &staged,
+        )
+        .expect("the staged release");
+        fixture.state.staged = Some(staged.clone());
+
+        for name in ["third.txt", "fourth.txt", "fifth.txt"] {
+            commit_on_origin(&fixture, name);
+            unattended(
+                &Shepherd::never_ready(),
+                &fixture.tree,
+                &mut fixture.state,
+                &test_config_keeping(2),
+            )
+            .await
+            .expect("rolls back");
+        }
+
+        assert!(
+            fixture.tree.release(&staged).exists(),
+            "the staged release outlives the newest two"
+        );
+    }
+
+    /// fails if a deploy that lands leaves a staged sha behind. The record
+    /// would then name a release the next stage reports as already built,
+    /// for a head the branch has long moved past.
+    #[tokio::test(start_paused = true)]
+    async fn a_landed_deploy_clears_the_staged_sha() {
+        let mut fixture = fixture_with_previous_release();
+        let second = commit_on_origin(&fixture, "second.txt");
+        fixture.state.staged = Some(second.clone());
+
+        let outcome = deploy(
+            &Shepherd::ready(),
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("completes");
+
+        assert_eq!(outcome, Outcome::Deployed { sha: second });
+        assert_eq!(fixture.state.staged, None);
+        assert_eq!(
+            State::read(&fixture.tree.state_file())
+                .expect("reads")
+                .staged,
+            None
+        );
     }
 }
