@@ -117,8 +117,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ## Architecture
 
 Binary crate, no library target. Twenty-four modules under `src/`, the big three
-being `deploy/` (the state machine, a directory), `optin.rs` (first cutover) and `poll.rs`
-(the dog's loop). `route.rs` holds `Route`, `route` and `USAGE`, and `exit.rs`
+being `deploy/` (the state machine, a directory), `optin/` (first cutover, a directory)
+and `poll.rs` (the dog's loop). `route.rs` holds `Route`, `route` and `USAGE`, and `exit.rs`
 the exit-code mapping; both left `main.rs` to keep it under 800 lines.
 
 `#[cfg(test)] mod fixtures` is declared from `main.rs`, which is the only way a
@@ -227,6 +227,8 @@ class rather than the instances.
   through `cut_over`. A test that calls `prepare` twice on one tree has to
   drop the first `Prepared` first, or the second is refused as
   `AlreadyDeploying`.
+  The hold field is private to `optin/prepare.rs`; `cut_over` takes it
+  through `Prepared::into_parts` and keeps it to its end.
 - **Never derive the markers directory from `Tree::completion("")`.** The
   result has a trailing separator and its `parent()` is the tree root; a sweep
   written that way removed `current`. `Tree::completions()` is the directory.
