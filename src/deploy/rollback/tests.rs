@@ -250,6 +250,7 @@ async fn a_rollback_reads_deploy_toml_when_current_is_already_the_new_release() 
     crate::git::fetch(
         &fixture.tree.git(),
         &fixture.state.remote,
+        "main",
         fixtures::TEST_BUDGET,
     )
     .expect("fetch");
@@ -347,6 +348,7 @@ async fn a_recorded_release_that_is_gone_is_not_a_rollback_target() {
     crate::git::fetch(
         &fixture.tree.git(),
         &fixture.state.remote,
+        "main",
         fixtures::TEST_BUDGET,
     )
     .expect("fetch");
@@ -434,6 +436,7 @@ async fn a_previous_release_under_another_path_is_not_a_rollback_target() {
     crate::git::fetch(
         &fixture.tree.git(),
         &fixture.state.remote,
+        "main",
         fixtures::TEST_BUDGET,
     )
     .expect("fetch");

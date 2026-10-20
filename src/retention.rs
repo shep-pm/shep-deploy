@@ -329,7 +329,7 @@ mod tests {
         fs::create_dir_all(tree.git()).expect("create git dir");
         fixtures::run_git(&tree.git(), &["init", "-q", "--bare"]);
         let remote = origin.path().to_str().expect("utf-8 path").to_owned();
-        git::fetch(&tree.git(), &remote, fixtures::TEST_BUDGET).expect("fetch");
+        git::fetch(&tree.git(), &remote, "main", fixtures::TEST_BUDGET).expect("fetch");
 
         let log = Command::new("git")
             .current_dir(tree.git())
@@ -485,6 +485,7 @@ mod tests {
         git::fetch(
             &tree.git(),
             origin.path().to_str().expect("utf-8"),
+            "main",
             fixtures::TEST_BUDGET,
         )
         .expect("fetch");

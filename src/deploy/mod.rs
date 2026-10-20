@@ -287,8 +287,13 @@ async fn go<D: Daemon>(
     // Off the runtime's thread: see `shared::off_thread` for what a fetch on
     // it used to stall. `run_git_within` bounds the wait; this keeps the
     // dog answering during it.
-    let (git_dir, remote, budget) = (tree.git(), state.remote.clone(), config.git_timeout);
-    shared::off_thread(move || git::fetch(&git_dir, &remote, budget)).await?;
+    let (git_dir, remote, tracked, budget) = (
+        tree.git(),
+        state.remote.clone(),
+        state.branch.clone(),
+        config.git_timeout,
+    );
+    shared::off_thread(move || git::fetch(&git_dir, &remote, &tracked, budget)).await?;
     let head = head_of(tree, &state.branch)?;
     if state.deployed.as_deref() == Some(head.as_str()) {
         return Ok(Outcome::UpToDate);
@@ -882,6 +887,7 @@ mod tests {
         crate::git::fetch(
             &fixture.tree.git(),
             &fixture.state.remote,
+            "main",
             fixtures::TEST_BUDGET,
         )
         .expect("fetch");

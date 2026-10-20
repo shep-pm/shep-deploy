@@ -84,8 +84,13 @@ pub async fn stage(tree: &Tree, state: &mut State, config: &DogConfig) -> Result
         )));
     }
 
-    let (git_dir, remote, budget) = (tree.git(), state.remote.clone(), config.git_timeout);
-    shared::off_thread(move || git::fetch(&git_dir, &remote, budget)).await?;
+    let (git_dir, remote, tracked, budget) = (
+        tree.git(),
+        state.remote.clone(),
+        state.branch.clone(),
+        config.git_timeout,
+    );
+    shared::off_thread(move || git::fetch(&git_dir, &remote, &tracked, budget)).await?;
     let head = head_of(tree, &state.branch)?;
     if state.deployed.as_deref() == Some(head.as_str()) {
         return Ok(Staged::AlreadyLive { sha: head });
