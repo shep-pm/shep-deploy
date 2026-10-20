@@ -102,6 +102,11 @@ fn read(release: &Path, path: &Path) -> Option<Record> {
 /// its own modified time only, which changes when an entry is added or removed
 /// directly inside it. A write nested deeper, or into an existing file in it,
 /// is not seen.
+///
+/// The record cannot say who wrote. The running release shares the same
+/// links, so a file the app itself writes while the build runs, a database
+/// or a log, reads as changed as well. The warning says so, and leaves the
+/// decision to the operator.
 #[derive(Debug)]
 pub(crate) struct Snapshot {
     sheep: String,
@@ -126,8 +131,9 @@ impl Snapshot {
     }
 
     /// One line per recorded path whose record is not what it was, saying the
-    /// build wrote through the link into the checkout and how to stop linking
-    /// it. Empty when nothing changed.
+    /// path changed while the build ran, that the build may have written
+    /// through the link into the checkout, and how to stop linking it. Empty
+    /// when nothing changed.
     ///
     /// A path that cannot be read now, or that is no longer a link, is silent.
     #[must_use]
@@ -142,9 +148,11 @@ impl Snapshot {
             .filter(|(path, before)| read(&release, path).is_some_and(|now| now != *before))
             .map(|(path, _)| {
                 format!(
-                    "shep-deploy: {sheep}: warning: the build wrote through `{}` into the \
-                     checkout, where it is linked from into every release. Add it to \
-                     `.shepignore` in the checkout to stop linking it.",
+                    "shep-deploy: {sheep}: warning: `{}` changed while the build ran. If the \
+                     build wrote through the link into the checkout, where it is linked from \
+                     into every release, add it to `.shepignore` in the checkout to stop \
+                     linking it. If the running app writes it, this is expected and the \
+                     path should stay linked.",
                     printable(path.display()),
                 )
             })
@@ -268,7 +276,11 @@ mod tests {
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].starts_with("shep-deploy: web:"), "{found:?}");
         assert!(found[0].contains("`koji`"), "{found:?}");
-        assert!(found[0].contains("wrote through"), "{found:?}");
+        assert!(
+            found[0].contains("changed while the build ran"),
+            "{found:?}"
+        );
+        assert!(found[0].contains("the running app"), "{found:?}");
         assert!(found[0].contains(".shepignore"), "{found:?}");
         assert_eq!(
             fs::read_to_string(checkout.join("koji")).expect("read"),
