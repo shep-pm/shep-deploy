@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "shep-deploy"
-version = "0.3.15"
+version = "0.3.16"
 dependencies = [
  "nix",
  "rustix",
