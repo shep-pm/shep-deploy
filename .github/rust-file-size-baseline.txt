@@ -5,5 +5,4 @@
 # Format: <lines> <path>.
 
 # https://github.com/shep-pm/shep-deploy/issues/27
-1450 src/restore.rs
 1212 tests/integration.rs
