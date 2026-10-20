@@ -118,7 +118,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
 Binary crate, no library target. Twenty-four modules under `src/`, the big three
 being `deploy/` (the state machine, a directory), `optin/` (first cutover, a directory)
-and `poll.rs` (the dog's loop). `route.rs` holds `Route`, `route` and `USAGE`, and `exit.rs`
+and `poll/` (the dog's loop, with `report.rs` for what it says). `route.rs` holds `Route`, `route` and `USAGE`, and `exit.rs`
 the exit-code mapping; both left `main.rs` to keep it under 800 lines.
 
 `#[cfg(test)] mod fixtures` is declared from `main.rs`, which is the only way a
