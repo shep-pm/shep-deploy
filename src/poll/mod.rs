@@ -145,26 +145,16 @@ async fn tick<D: Daemon>(daemon: &D, shep_home: &Path, config: &DogConfig) -> Ti
                 continue;
             }
         };
-        // Above the `due` check on purpose: a manual target's smit is
-        // exactly how an operator sees that it is paused, so skipping it
-        // would hide the state the smit exists to show.
-        //
-        // Republished every tick rather than on change, because the daemon
-        // holds smits in memory and drops them whenever this dog stops. A
-        // publish-on-change dog would show nothing after a daemon restart
-        // until its next deploy, which for a healthy target could be weeks.
-        //
-        // A failure does not stop the deploy: this is cosmetic, and a daemon
-        // that refuses it is one this dog can still deploy through. It is a
-        // row of its own rather than a bare `eprintln!`, so it reaches the
-        // stream the caller chose and, more to the point, the mute: a daemon
-        // that refuses every smit would otherwise say so once per target per
-        // tick, forever.
-        // Keyed with a `/`, which no sheep name can carry, so the row and the
-        // target never share a mute entry.
-        if let Err(err) = smit::publish(daemon, &name, &state).await {
-            results.push((format!("{name}/smit"), Err(err)));
-        }
+        // Above the `due` check; `smit::publish` says why. A failure does not
+        // stop the deploy, and is a row of its own.
+        let painted = smit::text(&state);
+        let refused = match smit::publish(daemon, &name, &state).await {
+            Ok(()) => false,
+            Err(err) => {
+                results.push((format!("{name}/smit"), Err(err)));
+                true
+            }
+        };
         if !due(&state) {
             continue;
         }
@@ -181,6 +171,13 @@ async fn tick<D: Daemon>(daemon: &D, shep_home: &Path, config: &DogConfig) -> Ti
                 what: panic_message(payload.as_ref()),
             }),
         };
+        // One `/smit` row per target per tick: a second identical refusal
+        // would count twice against the mute.
+        if let Err(err) = smit::repaint(daemon, &name, &painted, &state).await
+            && !refused
+        {
+            results.push((format!("{name}/smit"), Err(err)));
+        }
         results.push((name, outcome));
     }
     Tick { targets, results }

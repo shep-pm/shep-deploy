@@ -83,16 +83,46 @@ fn fit(text: String) -> String {
 
 /// Publish `sheep`'s smit, built from `state`, to the shepherd.
 ///
-/// Called every tick regardless of whether the text changed - see
-/// `poll::tick`'s own doc for why - so a caller publishing on a real
-/// interval should expect this to be cheap and to run often.
+/// Called every tick for every target, and above the `due` check on
+/// purpose: a manual target's smit is exactly how an operator sees that it
+/// is paused, so skipping it would hide the state the smit exists to show.
+///
+/// Republished every tick rather than on change, because the daemon holds
+/// smits in memory and drops them whenever this dog stops. A
+/// publish-on-change dog would show nothing after a daemon restart until
+/// its next deploy, which for a healthy target could be weeks.
 ///
 /// # Errors
-/// As [`Daemon::set_smit`]. The caller is expected to log and otherwise
-/// ignore a failure here: a smit is cosmetic, and a daemon that refuses one
-/// is a daemon this dog can still deploy through.
+/// As [`Daemon::set_smit`]. The caller is expected to report a failure and
+/// otherwise ignore it: a smit is cosmetic, and a daemon that refuses one
+/// is a daemon this dog can still deploy through. The caller reports it as
+/// a row of its own, keyed with a `/` that no sheep name can carry, so it
+/// reaches the mute: a daemon that refuses every smit would otherwise say
+/// so once per target per tick, forever.
 pub async fn publish<D: Daemon>(daemon: &D, sheep: &str, state: &State) -> Result<(), Error> {
     daemon.set_smit(sheep, &fit(text(state))).await
+}
+
+/// Publish `sheep`'s smit again, but only if `state` renders differently
+/// from `painted`, the [`text`] last painted for it.
+///
+/// For a loop that has just changed the state it painted from, so `shep
+/// flock` is true as soon as the loop knows, not a tick later. It sends
+/// nothing when nothing changed, so a target that did not deploy costs no
+/// request.
+///
+/// # Errors
+/// As [`publish`].
+pub async fn repaint<D: Daemon>(
+    daemon: &D,
+    sheep: &str,
+    painted: &str,
+    state: &State,
+) -> Result<(), Error> {
+    if text(state) == painted {
+        return Ok(());
+    }
+    publish(daemon, sheep, state).await
 }
 
 #[cfg(test)]
@@ -218,6 +248,35 @@ mod tests {
         assert_eq!(
             daemon.0.into_inner(),
             vec![("web".to_owned(), "▲ main@a1b2c3".to_owned())]
+        );
+    }
+
+    /// fails if a repaint sends a request when the text has not moved. The
+    /// loop calls it for every target after every deploy attempt, and most
+    /// of those change nothing.
+    #[tokio::test]
+    async fn a_repaint_with_nothing_new_sends_nothing() {
+        let daemon = Recording(std::cell::RefCell::new(Vec::new()));
+        let state = target(Watch::Auto, Some("a1b2c3d4e5f6"));
+        repaint(&daemon, "web", &text(&state), &state)
+            .await
+            .expect("repaints");
+        assert_eq!(daemon.0.into_inner(), vec![]);
+    }
+
+    /// fails if a sha that moved after the first paint is not painted, which
+    /// leaves `shep flock` on the old sha until the next tick.
+    #[tokio::test]
+    async fn a_moved_sha_is_repainted_with_the_new_text() {
+        let daemon = Recording(std::cell::RefCell::new(Vec::new()));
+        let before = text(&target(Watch::Auto, Some("a1b2c3d4e5f6")));
+        let now = target(Watch::Auto, Some("f6e5d4c3b2a1"));
+        repaint(&daemon, "web", &before, &now)
+            .await
+            .expect("repaints");
+        assert_eq!(
+            daemon.0.into_inner(),
+            vec![("web".to_owned(), "▲ main@f6e5d4".to_owned())]
         );
     }
 }

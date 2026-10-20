@@ -226,6 +226,11 @@ published on change would show nothing at all after a daemon restart until its
 next deploy. A refused smit is logged and otherwise ignored, since it is
 cosmetic and never worth failing a deploy over.
 
+A deploy in the dog's own tick repaints the smit as soon as it lands. A smit
+belongs to the connection that painted it, so a `deploy`, `setup` or `--watch`
+run by hand cannot leave one: the dog paints the new state on its next tick,
+which starts `interval` after the current one finishes.
+
 ## How it holds its connection
 
 Adopted, the dog announces itself by the name shep gave it, taken from

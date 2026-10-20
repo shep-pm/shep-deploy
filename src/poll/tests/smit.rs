@@ -83,6 +83,30 @@ impl Daemon for RefusingSmits {
     );
 }
 
+/// A [`Daemon`] that accepts the first `set_smit` and refuses every one
+/// after it, so the paint before a deploy lands and the repaint after it
+/// is refused.
+struct RefusingRepaints(SmitRecording);
+
+impl Daemon for RefusingRepaints {
+    async fn describe(&self, sheep: &str) -> Result<Vec<ProcessInfo>, Error> {
+        self.0.describe(sheep).await
+    }
+    async fn reload(&self, sheep: &str) -> Result<(), Error> {
+        self.0.reload(sheep).await
+    }
+    async fn set_smit(&self, sheep: &str, text: &str) -> Result<(), Error> {
+        if self.0.smits().is_empty() {
+            return self.0.set_smit(sheep, text).await;
+        }
+        RefusingSmits(Ready::new()).set_smit(sheep, text).await
+    }
+
+    crate::fixtures::daemon_methods!(unimplemented;
+        dog_config, list_flock, start, delete, restart, save_roll,
+    );
+}
+
 /// fails if the smit stops being republished every tick. The daemon
 /// holds smits in memory and drops them when the dog stops, so a dog
 /// that published once and then only on change would show nothing at
@@ -205,4 +229,86 @@ async fn a_too_long_branch_name_does_not_stop_the_tick() {
     // fails - what this test pins is that the smit publish ahead of it
     // did not take the whole tick down too.
     assert!(results[0].1.is_err(), "the fetch is what fails here");
+}
+
+/// fails if `shep flock` keeps the old sha after a deploy until the next
+/// tick. The first paint is from the record the tick read, so only a
+/// paint after the deploy can carry the sha it landed.
+#[tokio::test(start_paused = true)]
+async fn a_deploy_repaints_the_smit_in_the_tick_that_made_it() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let origin = write_target_ready(home.path(), "fine", Watch::Auto);
+    let head = fixtures::head_of(origin.path());
+    let daemon = SmitRecording::default();
+
+    let results = tick(&daemon, home.path(), &fixtures::dog_config())
+        .await
+        .results;
+
+    assert!(
+        matches!(results[0].1, Ok(Outcome::Deployed { .. })),
+        "the deploy landed: {results:?}"
+    );
+    let last = daemon.smits().pop().expect("a smit was painted");
+    assert_eq!(last, ("fine".to_owned(), format!("▲ main@{}", &head[..6])));
+}
+
+/// fails if one tick reports a refusing daemon twice for one target. The
+/// first paint and the repaint are refused for the same reason, and two
+/// identical rows in a tick count twice against the mute, so the
+/// "repeated N times" figure runs high.
+#[tokio::test(start_paused = true)]
+async fn a_refusal_of_both_paints_is_one_row() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let _origin = write_target_ready(home.path(), "fine", Watch::Auto);
+
+    let results = tick(
+        &RefusingSmits(Ready::new()),
+        home.path(),
+        &fixtures::dog_config(),
+    )
+    .await
+    .results;
+
+    let smit_rows = results
+        .iter()
+        .filter(|(key, outcome)| key == "fine/smit" && outcome.is_err())
+        .count();
+    assert_eq!(smit_rows, 1, "{results:?}");
+    assert!(
+        results
+            .iter()
+            .any(|(key, outcome)| key == "fine" && matches!(outcome, Ok(Outcome::Deployed { .. }))),
+        "the deploy still ran: {results:?}"
+    );
+}
+
+/// fails if a refused repaint is lost or takes the tick down. The first
+/// paint is accepted here, so the only `{name}/smit` row can be the
+/// repaint's, and the deploy's own row stays.
+#[tokio::test(start_paused = true)]
+async fn a_refused_repaint_is_a_row_and_does_not_stop_the_tick() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let _origin = write_target_ready(home.path(), "fine", Watch::Auto);
+
+    let results = tick(
+        &RefusingRepaints(SmitRecording::default()),
+        home.path(),
+        &fixtures::dog_config(),
+    )
+    .await
+    .results;
+
+    assert!(
+        results
+            .iter()
+            .any(|(key, outcome)| key == "fine/smit" && outcome.is_err()),
+        "the refused repaint is a row: {results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|(key, outcome)| key == "fine" && matches!(outcome, Ok(Outcome::Deployed { .. }))),
+        "the deploy still ran: {results:?}"
+    );
 }
