@@ -232,6 +232,7 @@ shep-deploy deploy <sheep> --watch auto|manual
 shep-deploy deploy <sheep> --branch <name>
 shep-deploy deploy <sheep> --branch refs/pull/1/head
 shep-deploy deploy <sheep> --stage
+shep-deploy deploy <sheep> --promote
 shep-deploy setup <sheep>
 shep-deploy setup <sheep> --verify probed|alive
 shep-deploy survey
@@ -250,10 +251,18 @@ serving its last head. `--stage` fetches, builds the branch head and records it
 in `deploy.toml` as `staged`, then returns: it never swaps `current`, reloads
 the sheep, or changes `deployed` or `failed`. It is refused on a `watch = auto`
 target, because the next tick would deploy that head anyway; set `--watch
-manual` first. Staging the head that is already deployed or already staged does
-nothing. Retention spares the staged release, and a deploy that lands clears
+manual` first. Staging the head that is already deployed, or already staged with
+its release still built, does nothing; a staged release that is gone is built
+again. Retention spares the staged release, and a deploy that lands clears
 `staged`. While a sha is staged, a shep-deploy from before the field refuses to
-read the record. `--verify` on
+read the record. `--promote` lands what was
+staged: it runs the release hook, swaps `current`, reloads the sheep, verifies
+it and runs the after hook, with the rollback a deploy has, and builds and
+fetches nothing. It lands the staged sha even if the branch has moved since,
+and it is refused when nothing is staged or the staged release is gone, with
+`--stage` as the way out. A promote that does not come up is rolled back and
+leaves `staged` set, so it can be run again. It ignores a held sha, as a
+deploy asked for by name does. `--verify` on
 `setup` records how the sheep's deploys are verified, `probed` when it is
 left out. `survey` reports
 where every registered sheep stands and starts, registers and writes nothing.
