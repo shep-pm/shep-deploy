@@ -224,6 +224,22 @@ pub fn remote_head(git_dir: &Path, branch: &str) -> Result<String, Error> {
     run_git(git_dir, &["rev-parse", "--verify", &refname]).map(|stdout| stdout.trim().to_owned())
 }
 
+/// Whether any file under `paths` differs between the commits `from` and `to`.
+///
+/// `paths` are git pathspecs, so a directory name matches its contents. `--`
+/// comes before them, so one is only ever read as a path. An empty `paths`
+/// compares the whole tree.
+///
+/// # Errors
+/// [`Error::Git`] if `from` or `to` does not resolve in `git_dir`, which is
+/// the answer for a commit the clone no longer holds rather than "unchanged".
+/// [`Error::Io`] if `git` itself cannot be launched.
+pub fn changed(git_dir: &Path, from: &str, to: &str, paths: &[String]) -> Result<bool, Error> {
+    let mut args = vec!["diff", "--name-only", from, to, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    run_git(git_dir, &args).map(|stdout| !stdout.trim().is_empty())
+}
+
 /// Adds a worktree at `at`, checked out to `sha`.
 ///
 /// `sha` is a commit, not a branch, so the new worktree is always detached -
@@ -573,6 +589,26 @@ mod tests {
         std::fs::write(at.join("build-output.txt"), "x").expect("writes");
         worktree_remove(repo.path(), &at).expect("removes a dirty tree");
         assert!(!at.exists());
+    }
+
+    /// fails if `changed` stops looking at the paths it was given, or reads
+    /// an unknown `from` as "nothing changed".
+    #[test]
+    fn changed_is_false_for_equal_trees_and_true_for_a_touched_path() {
+        let repo = fixtures::checkout(&[("cmd/a/main.go", "1"), ("cmd/b/main.go", "1")]);
+        let first = fixtures::head_of(repo.path());
+        fixtures::commit(repo.path(), &[("cmd/b/main.go", "2")], "touch b");
+        let second = fixtures::head_of(repo.path());
+        let a = vec!["cmd/a".to_owned()];
+        let b = vec!["cmd/b".to_owned()];
+
+        assert!(!changed(repo.path(), &first, &first, &b).expect("equal trees"));
+        assert!(!changed(repo.path(), &first, &second, &a).expect("a is untouched"));
+        assert!(changed(repo.path(), &first, &second, &b).expect("b is touched"));
+
+        let missing = "0".repeat(40);
+        let err = changed(repo.path(), &missing, &second, &b).expect_err("no such commit");
+        assert!(matches!(err, Error::Git { .. }), "{err}");
     }
 
     /// fails if `worktree_prune` stops clearing bookkeeping for a worktree

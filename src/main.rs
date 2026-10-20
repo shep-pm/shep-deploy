@@ -78,6 +78,7 @@ mod retention;
 mod roll;
 mod route;
 mod shared;
+mod skip;
 mod smit;
 mod stage;
 mod state;
@@ -440,6 +441,9 @@ async fn deploy_once(sheep: &str) -> Result<u8, Error> {
     match &outcome {
         Outcome::UpToDate => println!("{sheep} is up to date at {}", deployed(&state)),
         Outcome::Deployed { sha } => println!("{sheep} deployed {sha}"),
+        Outcome::Skipped { sha } => {
+            println!("{sheep} skipped {sha}, nothing under its reload paths changed");
+        }
         Outcome::RolledBack { to, why } => println!("{sheep} rolled back to {to}: {why}"),
     }
 
