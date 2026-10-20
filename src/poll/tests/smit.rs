@@ -147,7 +147,7 @@ async fn a_refused_smit_does_not_stop_the_tick() {
     // `TempDir` drops (and deletes) the origin the instant this line
     // ends, which fails the fetch for a reason that has nothing to do
     // with the smit refusal this test exists to pin - see every other
-    // `write_target_ready` caller in this file for the pattern.
+    // `write_target_ready` caller in `tests.rs` for the pattern.
     let _origin = write_target_ready(home.path(), "fine", Watch::Auto);
     let results = tick(
         &RefusingSmits(Ready::new()),

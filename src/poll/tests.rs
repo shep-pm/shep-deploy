@@ -444,7 +444,7 @@ async fn the_first_tick_happens_at_once() {
 }
 
 /// fails if a deploy the loop made never reaches the log. The whole
-/// output block could be deleted and every test above still passes:
+/// output block could be deleted and the tests in `report.rs` still pass:
 /// `report` and `worth_saying` are pure, and nothing else pins that
 /// their verdict is what actually gets written, or that it goes to
 /// stdout where an operator looks for what shipped.
