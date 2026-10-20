@@ -215,8 +215,8 @@ Everything lives under `$SHEP_HOME/deploy/<sheep>/`:
 git/                 one bare clone, shared by every release
 releases/<sha>/      a worktree per release
 current -> releases/<sha>
-deploy.toml          remote, branch, deployed sha, held sha, verify mode, watch mode,
-                     and the app as it was before adoption (owner-only: it holds env)
+deploy.toml          remote, branch, deployed sha, held sha, staged sha, verify mode,
+                     watch mode, and the app as it was before adoption (owner-only: it holds env)
 ```
 
 The sheep's `cwd` is `current`, permanently. Set it explicitly when you
@@ -230,6 +230,7 @@ invisible to it.
 shep-deploy deploy <sheep>
 shep-deploy deploy <sheep> --watch auto|manual
 shep-deploy deploy <sheep> --branch <name>
+shep-deploy deploy <sheep> --stage
 shep-deploy setup <sheep>
 shep-deploy setup <sheep> --verify probed|alive
 shep-deploy survey
@@ -240,7 +241,14 @@ shep-deploy help
 `--watch` changes the setting and returns without deploying. `--branch` does
 the same for the branch a target tracks, which `setup` read from the checkout
 once; it clears a held sha and refuses a target `setup` never finished. A name
-the remote lacks is reported by the next tick. `--verify` on
+the remote lacks is reported by the next tick. `--stage` fetches, builds the
+branch head and records it in `deploy.toml` as `staged`, then returns: it never
+swaps `current`, reloads the sheep, or changes `deployed` or `failed`. It is
+refused on a `watch = auto` target, because the next tick would deploy that
+head anyway; set `--watch manual` first. Staging the head that is already
+deployed or already staged does nothing. Retention spares the staged release,
+and a deploy that lands clears `staged`. While a sha is staged, a shep-deploy
+from before the field refuses to read the record. `--verify` on
 `setup` records how the sheep's deploys are verified, `probed` when it is
 left out. `survey` reports
 where every registered sheep stands and starts, registers and writes nothing.

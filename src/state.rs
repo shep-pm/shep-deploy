@@ -133,6 +133,14 @@ pub struct State {
     /// record an operator opens still starts with the lines they edit.
     #[serde(default)]
     pub origin: Option<AppConfig>,
+    /// The sha built by `deploy <sheep> --stage` and not yet landed, or
+    /// `None` when nothing is staged.
+    ///
+    /// Left out of the file while `None`, so a record that has never been
+    /// staged still reads in a shep-deploy from before the field, which
+    /// refuses unknown fields. Cleared when a deploy lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged: Option<String>,
 }
 
 impl State {
@@ -170,7 +178,7 @@ impl State {
     /// `remote`, `branch` or `checkout`; a `remote` or `branch` beginning
     /// with `-` or carrying a character that would rewrite a log line; a
     /// relative `checkout`; a
-    /// `deployed` or `failed` that is not a full commit sha; `deployed` and
+    /// `deployed`, `failed` or `staged` that is not a full commit sha; `deployed` and
     /// `failed` naming the same sha; or exactly one of `origin_cwd` and
     /// `origin_script` set.
     pub(crate) fn validate(&self, path: &Path) -> Result<(), Error> {
@@ -206,7 +214,11 @@ impl State {
             ));
         }
 
-        for (field, value) in [("deployed", &self.deployed), ("failed", &self.failed)] {
+        for (field, value) in [
+            ("deployed", &self.deployed),
+            ("failed", &self.failed),
+            ("staged", &self.staged),
+        ] {
             if let Some(sha) = value
                 && !is_sha(sha)
             {
@@ -418,7 +430,7 @@ verfiy = "alive"
             origin_cwd: Some(PathBuf::from("/srv/reactmap")),
             origin_script: Some("bun .".into()),
             checkout: PathBuf::from("/srv/reactmap"),
-            origin: None,
+            ..fixtures::state()
         };
         let text = toml::to_string(&original).expect("serialises");
         let back: State = toml::from_str(&text).expect("parses");
@@ -698,6 +710,41 @@ verfiy = "alive"
         "#;
         let state: State = toml::from_str(text).expect("parses");
         assert_eq!(state.verify, Verify::Probed);
+    }
+
+    /// fails if a staged sha is lost between a write and a read, or if a
+    /// record with nothing staged grows a `staged` line. The second is what
+    /// keeps an older shep-deploy, which refuses unknown fields, able to
+    /// read every record that has never been staged.
+    #[test]
+    fn a_staged_sha_round_trips_and_an_empty_one_is_not_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("deploy.toml");
+
+        let staged = State {
+            staged: Some(fixtures::OTHER_SHA.to_owned()),
+            ..fixtures::state()
+        };
+        staged.write(&path).expect("writes");
+        assert_eq!(State::read(&path).expect("reads"), staged);
+
+        fixtures::state().write(&path).expect("writes");
+        let text = fs::read_to_string(&path).expect("record");
+        assert!(!text.contains("staged"), "{text}");
+    }
+
+    /// fails if a hand-edited `staged` that names no commit is accepted. It
+    /// is joined onto `releases/` and handed to the next deploy as the
+    /// release to land, so the refusal has to name the field.
+    #[test]
+    fn a_staged_value_that_is_not_a_sha_is_refused_by_field() {
+        let base = "remote = \"https://example.com/x\"\nbranch = \"main\"\ncheckout = \"/srv/x\"\n";
+        for staged in ["\"\"", "\"main\"", "\"abc123\"", "\"..\""] {
+            let text = format!("{base}staged = {staged}");
+            let err = read_text(&text).expect_err(&format!("must refuse: {text}"));
+            assert!(matches!(err, Error::Config(_)), "{text}: {err}");
+            assert!(err.to_string().contains("`staged`"), "{text}: {err}");
+        }
     }
 
     /// A minimal, valid `State` for the write tests below, where the exact

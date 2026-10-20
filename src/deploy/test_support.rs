@@ -37,19 +37,19 @@ pub(super) fn test_config_keeping(retention: usize) -> crate::config::DogConfig 
 /// The probe's own target is never executed by anything in this file -
 /// no test here runs a real shepherd - so `true` is honest rather than
 /// lazy: what these tests need is an app that HAS a probe.
-pub(super) const FLOCKFILE: &str = "[[app]]\nname = 'web'\nscript = './run.sh'\n\n\
+pub(crate) const FLOCKFILE: &str = "[[app]]\nname = 'web'\nscript = './run.sh'\n\n\
                          [app.readiness_probe]\nkind = 'http'\ntarget = 'http://127.0.0.1:1/health'\n";
 
 /// A deploy target with a bare clone, an origin repo, and one release
 /// already live.
-pub(super) struct Fixture {
+pub(crate) struct Fixture {
     /// The `$SHEP_HOME` the tree is rooted in. Held to keep it alive
     /// for the test's duration, and read by the one test that needs a
     /// second spelling of the same directory.
-    pub(super) home: TempDir,
-    pub(super) origin: TempDir,
-    pub(super) tree: Tree,
-    pub(super) state: State,
+    pub(crate) home: TempDir,
+    pub(crate) origin: TempDir,
+    pub(crate) tree: Tree,
+    pub(crate) state: State,
 }
 
 /// A sha whose release directory is not on disk.
@@ -65,7 +65,7 @@ pub(super) const RECLAIMED: &str = "0000000000000000000000000000000000000000";
 /// a bare clone fetched from it - but no release built and no
 /// `current` at all, which is a target the moment before its first
 /// deploy.
-pub(super) fn fixture_before_any_release() -> Fixture {
+pub(crate) fn fixture_before_any_release() -> Fixture {
     let home = tempfile::tempdir().expect("tempdir");
     let origin = fixtures::checkout(&[("Flockfile.toml", FLOCKFILE)]);
 
@@ -101,7 +101,7 @@ pub(super) fn fixture_before_any_release() -> Fixture {
 
 /// [`fixture_before_any_release`] with its first commit already built,
 /// live under `current`, and recorded in the state.
-pub(super) fn fixture_with_previous_release() -> Fixture {
+pub(crate) fn fixture_with_previous_release() -> Fixture {
     let mut fixture = fixture_before_any_release();
     let first = crate::git::remote_head(&fixture.tree.git(), "main").expect("head");
     install_release(&fixture, &first);
@@ -124,7 +124,7 @@ pub(super) fn install_release(fixture: &Fixture, sha: &str) {
 }
 
 /// Adds a commit to the fixture's origin and returns its sha.
-pub(super) fn commit_on_origin(fixture: &Fixture, name: &str) -> String {
+pub(crate) fn commit_on_origin(fixture: &Fixture, name: &str) -> String {
     fs::write(fixture.origin.path().join(name), "x").expect("write");
     fixtures::run_git(fixture.origin.path(), &["add", "."]);
     fixtures::run_git(fixture.origin.path(), &["commit", "-q", "-m", name]);
