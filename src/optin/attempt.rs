@@ -282,8 +282,9 @@ mod tests {
     /// strength with the deploy reported landed.
     #[tokio::test(start_paused = true)]
     async fn a_scaled_cutover_waits_for_every_instance_the_start_asked_for() {
-        let checkout =
-            checkout_declaring("[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\ninstances = 2\n");
+        let checkout = checkout_declaring(
+            "[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\nwait_ready = true\ninstances = 2\n",
+        );
         let (daemon, prepared, _dirs) =
             cutover_fixture_from(checkout, &[7, 8], comes_up(), None).await;
         let daemon = daemon.spawning_at_most(1);
@@ -306,8 +307,9 @@ mod tests {
     /// originals replaced.
     #[tokio::test(start_paused = true)]
     async fn a_scaled_cutover_lands_when_every_instance_appears() {
-        let checkout =
-            checkout_declaring("[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\ninstances = 2\n");
+        let checkout = checkout_declaring(
+            "[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\nwait_ready = true\ninstances = 2\n",
+        );
         let (daemon, prepared, _dirs) =
             cutover_fixture_from(checkout, &[7, 8], comes_up(), None).await;
 

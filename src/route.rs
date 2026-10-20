@@ -12,7 +12,7 @@ pub const USAGE: &str = "\
 usage: shep-deploy <verb> [args]
 
   deploy <sheep> [--watch auto|manual]   deploy one sheep, or set how it is watched
-  setup <sheep>                          take a sheep over
+  setup <sheep> [--verify probed|alive]  take a sheep over; alive if it has nothing to probe
   survey                                 report where every registered sheep stands
   on-remove                              lifecycle hook; shep runs this itself
   help                                   print this
@@ -45,6 +45,8 @@ pub enum Route<'a> {
     Deploy(&'a str),
     /// Take the named sheep over, up to and including the cutover.
     Setup(&'a str),
+    /// Take the named sheep over, recording `mode` as its verification mode.
+    SetupVerify { sheep: &'a str, mode: &'a str },
     /// Set the named sheep's watch mode.
     Watch { sheep: &'a str, mode: &'a str },
     /// Nothing above matched; print [`USAGE`] and exit on the usage code.
@@ -82,6 +84,7 @@ pub fn route<'a>(args: &[&'a str], supervised: bool) -> Route<'a> {
         // `shep deploy setup`. That is the escape hatch USAGE documents.
         ["setup" | "deploy"] => Route::Usage,
         ["setup", sheep] => Route::Setup(sheep),
+        ["setup", sheep, "--verify", mode] => Route::SetupVerify { sheep, mode },
         ["deploy", sheep] => Route::Deploy(sheep),
         ["deploy", sheep, "--watch", mode] => Route::Watch { sheep, mode },
         // Reached only through `shep deploy <sheep>`: the passthrough
@@ -99,7 +102,11 @@ pub fn route<'a>(args: &[&'a str], supervised: bool) -> Route<'a> {
     // outright rather than traversing out of it.
     match route {
         Route::Setup(sheep) | Route::Deploy(sheep) if !paths::is_sheep_name(sheep) => Route::Usage,
-        Route::Watch { sheep, .. } if !paths::is_sheep_name(sheep) => Route::Usage,
+        Route::SetupVerify { sheep, .. } | Route::Watch { sheep, .. }
+            if !paths::is_sheep_name(sheep) =>
+        {
+            Route::Usage
+        }
         named => named,
     }
 }
@@ -185,6 +192,33 @@ mod tests {
         // same one a sheep named `survey` or `on-remove` uses.
         assert_eq!(route(&["deploy", "setup"], false), Route::Deploy("setup"));
         assert_eq!(route(&["deploy", "deploy"], false), Route::Deploy("deploy"));
+    }
+
+    /// fails if `setup <sheep> --verify <mode>` falls through to a pattern
+    /// that reads it as something else. `["setup", sheep, ..]` has no other
+    /// arm of its own, so it would reach `Usage`; this pins that the flag has
+    /// a variant and that the mode survives to `setup_once` unparsed.
+    #[test]
+    fn setup_with_verify_routes_to_its_own_variant() {
+        assert_eq!(
+            route(&["setup", "koji", "--verify", "alive"], false),
+            Route::SetupVerify {
+                sheep: "koji",
+                mode: "alive"
+            }
+        );
+        assert_eq!(
+            route(&["setup", "koji", "--verify", "bogus"], false),
+            Route::SetupVerify {
+                sheep: "koji",
+                mode: "bogus"
+            },
+            "the mode is parsed where it is used, not here"
+        );
+        assert_eq!(
+            route(&["setup", "../koji", "--verify", "alive"], false),
+            Route::Usage
+        );
     }
 
     /// fails if a sheep name that is really a path reaches a `Tree`.
