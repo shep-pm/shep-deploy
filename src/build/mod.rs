@@ -338,10 +338,6 @@ pub async fn run(
     child.arg("-c").arg(command);
     child.current_dir(release);
 
-    let mut child = Command::new("sh");
-    child.arg("-c").arg(command);
-    child.current_dir(release);
-
     env::apply(&mut child, sheep, passthrough, &spec.env);
 
     if let Some(user) = as_user {
