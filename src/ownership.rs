@@ -43,8 +43,9 @@ pub(crate) enum Handle<'a> {
 /// Each directory is opened with `openat` against the descriptor of the one
 /// above it, so a directory swapped for a link between the listing and the
 /// open is refused by the kernel and skipped, never followed. Symlinks are
-/// never visited: the shared ones point into the operator's checkout. The
-/// `.git` pointer at the release root is left out so the build cannot re-aim
+/// never visited: the shared ones point into the operator's checkout. A file
+/// with another hard link is skipped too, since changing its owner changes
+/// the other name's. The `.git` pointer at the release root is left out so the build cannot re-aim
 /// it at a repository of its own.
 ///
 /// `visit` gets the path relative to `release`, empty for the root itself.
@@ -104,13 +105,23 @@ fn walk_dir(
                     Err(errno) => return Err(io_error(&base.join(&below), errno)),
                 }
             }
-            _ => visit(
-                &below,
-                Handle::Entry {
-                    parent: dir,
-                    name: &name,
-                },
-            )?,
+            _ => {
+                // A name that shares its inode with another is left alone: the
+                // other name may be outside the release, and the owner is the
+                // inode's.
+                match rustix::fs::statat(dir, &name, AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(stat) if stat.st_nlink > 1 => {}
+                    Ok(_) => visit(
+                        &below,
+                        Handle::Entry {
+                            parent: dir,
+                            name: &name,
+                        },
+                    )?,
+                    Err(Errno::NOENT) => {}
+                    Err(errno) => return Err(io_error(&base.join(&below), errno)),
+                }
+            }
         }
     }
     Ok(())
@@ -294,6 +305,28 @@ mod tests {
             .collect();
 
         assert_eq!(paths, ["", "src", "src/main.rs"]);
+    }
+
+    /// fails if a file with more than one link is handed over. A hard link
+    /// shares its inode with a name that may live outside the release, and
+    /// changing the owner of one changes the owner of both.
+    #[test]
+    fn a_file_with_another_hard_link_is_never_visited() {
+        let outside = fixtures::fixture_release(&[("secret", "")]);
+        let release = fixtures::fixture_release(&[("plain.txt", ""), ("twin.txt", "")]);
+        fs::hard_link(outside.path().join("secret"), release.path().join("linked")).expect("link");
+        fs::hard_link(
+            release.path().join("twin.txt"),
+            release.path().join("twin-too.txt"),
+        )
+        .expect("link");
+
+        let paths: Vec<_> = visited(release.path())
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+
+        assert_eq!(paths, ["", "plain.txt"]);
     }
 
     /// fails if the `.git` pointer at the release root is handed over. A
