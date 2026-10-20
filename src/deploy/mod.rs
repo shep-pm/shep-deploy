@@ -413,8 +413,46 @@ async fn attempt<D: Daemon>(
         // sha into `failed` next to the same sha in `deployed`: a record
         // that said the release was serving and held at once.
         Landed::Verified => {
-            if let Err(err) = record_landing(tree, state, head) {
-                eprintln!("shep-deploy: {sheep}: deployed {head}, but could not record it: {err}");
+            // After the record write, so the record names the new sha even
+            // when the hook fails, and only when it does: a hook that reads
+            // `deploy.toml` would otherwise see the previous sha. Like the
+            // write, the hook cannot change the outcome: the release is live
+            // and verified, and undoing it would take a healthy release out
+            // of service.
+            match record_landing(tree, state, head) {
+                Ok(()) => {
+                    if let Err(err) = hook::run_after(
+                        &hooks.after,
+                        &hook::Context {
+                            sheep,
+                            sha: head,
+                            release: &release,
+                            as_user: app.user.as_deref(),
+                            passthrough: &config.passthrough,
+                            budget: config.build_timeout,
+                            cache: &tree.cache_target(),
+                            built: spec.command.is_some(),
+                        },
+                    )
+                    .await
+                    {
+                        eprintln!(
+                            "shep-deploy: {sheep}: deployed {head}, but the after hook failed: \
+                             {err}"
+                        );
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "shep-deploy: {sheep}: deployed {head}, but could not record it: {err}"
+                    );
+                    if hooks.after.command.is_some() {
+                        eprintln!(
+                            "shep-deploy: {sheep}: the after hook was skipped, because the record \
+                             does not name {head}"
+                        );
+                    }
+                }
             }
             Ok(Outcome::Deployed {
                 sha: head.to_owned(),

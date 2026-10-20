@@ -1,6 +1,7 @@
-//! The release hook: a command the operator names in their own
-//! `Flockfile.override.toml`, run once per deploy after the build and before
-//! `current` is swapped.
+//! The release and after hooks: commands the operator names in their own
+//! `Flockfile.override.toml`. The release hook runs once per deploy after the
+//! build and before `current` is swapped; the after hook runs once the new
+//! release is swapped in, verified and recorded.
 //!
 //! It exists for what a build is the wrong place for. A database migration
 //! ends the build command otherwise, so its password reaches every script the
@@ -13,8 +14,15 @@
 //! env = { SUPABASE_DB_PASSWORD = "..." }
 //! ```
 //!
-//! The table is the operator's alone, see [`refuse_repo_hooks`]. A failing
-//! hook stops the deploy before the swap exactly as a failing build does.
+//! ```toml
+//! [dog.deploy.after]
+//! command = "purge-cache"
+//! env = { CLOUDFLARE_API_TOKEN = "..." }
+//! ```
+//!
+//! The tables are the operator's alone, see [`refuse_repo_hooks`]. A failing
+//! release hook stops the deploy before the swap exactly as a failing build
+//! does. A failing after hook changes nothing: the release is already live.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -65,6 +73,9 @@ impl fmt::Debug for HookSpec {
 pub struct Hooks {
     /// Runs after the build and before the swap: `[dog.deploy.release]`.
     pub release: HookSpec,
+    /// Runs once the new release is swapped in, verified and recorded:
+    /// `[dog.deploy.after]`.
+    pub after: HookSpec,
 }
 
 /// How a hook that ran came to an end without succeeding.
@@ -101,8 +112,27 @@ pub(crate) struct Context<'a> {
 /// The name of the release hook in [`Error::Hook`].
 const RELEASE: &str = "release";
 
-/// Runs the release hook `spec` inside `ctx.release`, as `ctx.as_user` if
-/// given, bounded by `ctx.budget`.
+/// The name of the after hook in [`Error::Hook`].
+const AFTER: &str = "after";
+
+/// Runs the release hook `spec`. See [`run_named`].
+///
+/// # Errors
+/// As [`run_named`], with `name` `"release"`.
+pub(crate) async fn run(spec: &HookSpec, ctx: &Context<'_>) -> Result<(), Error> {
+    run_named(RELEASE, Step::ReleaseHook, spec, ctx).await
+}
+
+/// Runs the after hook `spec`. See [`run_named`].
+///
+/// # Errors
+/// As [`run_named`], with `name` `"after"`.
+pub(crate) async fn run_after(spec: &HookSpec, ctx: &Context<'_>) -> Result<(), Error> {
+    run_named(AFTER, Step::AfterHook, spec, ctx).await
+}
+
+/// Runs the hook `spec`, called `name` in the log and in [`Error::Hook`],
+/// inside `ctx.release`, as `ctx.as_user` if given, bounded by `ctx.budget`.
 ///
 /// An absent command is a no-op. Otherwise this prints one line to stderr
 /// naming the sheep and the step, so the migration is its own step in the
@@ -127,15 +157,20 @@ const RELEASE: &str = "release";
 /// path that failed if a root dog cannot hand the release to `as_user`.
 /// [`Error::Hook`] if the command exits non-zero, is killed by a signal, or
 /// runs past `ctx.budget`.
-pub(crate) async fn run(spec: &HookSpec, ctx: &Context<'_>) -> Result<(), Error> {
+async fn run_named(
+    name: &'static str,
+    step: Step,
+    spec: &HookSpec,
+    ctx: &Context<'_>,
+) -> Result<(), Error> {
     let Some(command) = spec.command.as_deref() else {
         return Ok(());
     };
 
-    if let Some(warning) = root_warning(ctx.sheep, ctx.as_user, Step::ReleaseHook).await {
+    if let Some(warning) = root_warning(ctx.sheep, ctx.as_user, step).await {
         eprintln!("{warning}");
     }
-    eprintln!("shep-deploy: {}: running the {RELEASE} hook", ctx.sheep);
+    eprintln!("shep-deploy: {}: running the {name} hook", ctx.sheep);
 
     let release = std::path::absolute(ctx.release).map_err(Error::at(ctx.release))?;
     let mut child = Command::new("sh");
@@ -156,14 +191,21 @@ pub(crate) async fn run(spec: &HookSpec, ctx: &Context<'_>) -> Result<(), Error>
     }
 
     let ran = runner::run_in_group(child, ctx.release, ctx.budget).await;
-    settle_pointer(ctx.sheep, ctx.release, pointer, &ran, "the release hook").await?;
+    settle_pointer(
+        ctx.sheep,
+        ctx.release,
+        pointer,
+        &ran,
+        &format!("the {name} hook"),
+    )
+    .await?;
     ran.map_err(|error| match error {
         Error::Build { status } => Error::Hook {
-            name: RELEASE,
+            name,
             ending: Ending::Exited(status),
         },
         Error::BuildTimedOut { after } => Error::Hook {
-            name: RELEASE,
+            name,
             ending: Ending::TimedOut(after),
         },
         other => other,
@@ -171,9 +213,6 @@ pub(crate) async fn run(spec: &HookSpec, ctx: &Context<'_>) -> Result<(), Error>
 }
 
 /// The tables under `[dog.deploy]` that carry an operator's command.
-///
-/// `after` has no reader yet; it is refused here so the ticket that adds one
-/// needs no second change to the refusal.
 const OPERATOR_TABLES: [&str; 2] = ["release", "after"];
 
 /// The table `name` under `[dog.deploy]` in `doc`, whatever its shape.
@@ -214,24 +253,27 @@ pub(crate) fn refuse_repo_hooks(doc: &Value, file: &str) -> Result<(), Error> {
 /// The hooks in the merged document `doc`, read from `release`'s Flockfiles.
 ///
 /// # Errors
-/// [`Error::Config`] naming `release` if `[dog.deploy.release]` does not match
-/// [`HookSpec`]'s schema: an unknown key, or a value of the wrong type.
+/// [`Error::Config`] naming `release` if `[dog.deploy.release]` or
+/// `[dog.deploy.after]` does not match [`HookSpec`]'s schema: an unknown key,
+/// or a value of the wrong type.
 pub(crate) fn parse(doc: &Value, release: &Path) -> Result<Hooks, Error> {
-    let Some(table) = deploy_table(doc, "release") else {
-        return Ok(Hooks::default());
-    };
-    let release_hook = table
-        .clone()
-        .try_into()
-        .map_err(|source: toml::de::Error| {
-            Error::Config(format!(
-                "{}: `[dog.deploy.release]` does not match the hook schema: {}",
-                release.display(),
-                printable(source.message())
-            ))
-        })?;
     Ok(Hooks {
-        release: release_hook,
+        release: parse_table(doc, RELEASE, release)?,
+        after: parse_table(doc, AFTER, release)?,
+    })
+}
+
+/// The hook under `[dog.deploy.{name}]` in `doc`, or the no-op if absent.
+fn parse_table(doc: &Value, name: &str, release: &Path) -> Result<HookSpec, Error> {
+    let Some(table) = deploy_table(doc, name) else {
+        return Ok(HookSpec::default());
+    };
+    table.clone().try_into().map_err(|source: toml::de::Error| {
+        Error::Config(format!(
+            "{}: `[dog.deploy.{name}]` does not match the hook schema: {}",
+            release.display(),
+            printable(source.message())
+        ))
     })
 }
 
@@ -270,7 +312,7 @@ mod tests {
         assert!(shown.contains("[dog.deploy.release]"), "{shown}");
     }
 
-    /// fails if the sibling table is left open for the ticket that reads it.
+    /// fails if a commit can choose the command that runs after the swap.
     #[test]
     fn a_committed_after_hook_is_refused() {
         let rel = release_with(&format!("{APP}{AFTER_HOOK}"), None);
@@ -323,6 +365,39 @@ mod tests {
                 .map(String::as_str),
             Some("hunter2")
         );
+    }
+
+    /// fails if the operator's `[dog.deploy.after]` is not read into `after`,
+    /// or leaks into `release`.
+    #[test]
+    fn an_after_hook_parses_from_the_operators_override() {
+        let doc: Value = "[dog.deploy.after]\ncommand = \"purge-cache\"\n\
+                          env = { CF_TOKEN = \"hunter2\" }\n"
+            .parse()
+            .expect("toml");
+
+        let hooks = parse(&doc, Path::new("/srv/web/releases/abc")).expect("parses");
+
+        assert_eq!(hooks.after.command.as_deref(), Some("purge-cache"));
+        assert_eq!(
+            hooks.after.env.get("CF_TOKEN").map(String::as_str),
+            Some("hunter2")
+        );
+        assert_eq!(hooks.release, HookSpec::default());
+    }
+
+    /// fails if a typo in the after hook's key becomes a hook that never runs.
+    #[test]
+    fn an_unknown_after_hook_key_is_refused() {
+        let doc: Value = "[dog.deploy.after]\ncommnd = \"true\"\n"
+            .parse()
+            .expect("toml");
+
+        let err = parse(&doc, Path::new("/srv/web/releases/abc")).expect_err("unknown key");
+
+        let shown = err.to_string();
+        assert!(shown.contains("commnd"), "{shown}");
+        assert!(shown.contains("[dog.deploy.after]"), "{shown}");
     }
 
     const TEST_BUDGET: Duration = Duration::from_secs(60);
