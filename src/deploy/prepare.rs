@@ -89,9 +89,8 @@ pub(crate) fn read_staged(tree: &Tree, checkout: &Path, sha: &str) -> Result<Sta
 /// byte all differ.
 ///
 /// # Errors
-/// [`Error::Config`] naming the file. [`Error::Io`] if it cannot be examined.
-/// Whatever [`git::run_git`] returns for a failure that is not a path the
-/// commit lacks.
+/// [`Error::Config`] naming the file. [`Error::Io`] if it cannot be examined,
+/// and whatever [`run_git`] returns when it cannot hash it.
 fn refuse_rewritten(
     tree: &Tree,
     sha: &str,
