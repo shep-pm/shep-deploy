@@ -59,7 +59,7 @@ mod record;
 mod reload;
 mod rollback;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 use std::path::PathBuf;
 
@@ -71,8 +71,8 @@ use crate::paths::Tree;
 use crate::state::State;
 use crate::{git, hook, linkcheck, lock, shared, swap};
 
-use prepare::head_of;
-pub(crate) use prepare::{refuse_ungated_at_setup, refuse_ungated_verification};
+pub(crate) use prepare::{head_of, refuse_ungated_at_setup, refuse_ungated_verification};
+pub(crate) use record::write_record;
 use record::{record, record_landing};
 use reload::{Landed, land, named};
 use rollback::{roll_back, undo_swap};
@@ -862,12 +862,8 @@ mod tests {
             fixtures::TEST_BUDGET,
         )
         .expect("fetch");
-        crate::git::worktree_add(
-            &fixture.tree.git(),
-            &fixture.tree.release(&staged),
-            &staged,
-        )
-        .expect("the staged release");
+        crate::git::worktree_add(&fixture.tree.git(), &fixture.tree.release(&staged), &staged)
+            .expect("the staged release");
         fixture.state.staged = Some(staged.clone());
 
         for name in ["third.txt", "fourth.txt", "fifth.txt"] {

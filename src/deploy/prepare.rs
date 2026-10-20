@@ -140,7 +140,7 @@ fn checkout_release(tree: &Tree, sha: &str) -> Result<(), Error> {
 /// really has disappeared from the clone by the time this runs. That is the
 /// whole point of pruning: without it this would keep resolving a stale sha
 /// and the target would stall silently forever.
-pub(super) fn head_of(tree: &Tree, branch: &str) -> Result<String, Error> {
+pub(crate) fn head_of(tree: &Tree, branch: &str) -> Result<String, Error> {
     let sheep = tree.sheep();
     match git::remote_head(&tree.git(), branch) {
         Ok(sha) => Ok(sha),

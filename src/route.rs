@@ -13,6 +13,7 @@ usage: shep-deploy <verb> [args]
 
   deploy <sheep> [--watch auto|manual]   deploy one sheep, or set how it is watched
   deploy <sheep> --branch <name>         follow another branch; returns without deploying
+  deploy <sheep> --stage                 build the branch head and record it; no swap
   setup <sheep> [--verify probed|alive]  take a sheep over; alive if it has nothing to probe
   survey                                 report where every registered sheep stands
   on-remove                              lifecycle hook; shep runs this itself
@@ -50,6 +51,8 @@ pub enum Route<'a> {
     SetupVerify { sheep: &'a str, mode: &'a str },
     /// Set the named sheep's watch mode.
     Watch { sheep: &'a str, mode: &'a str },
+    /// Build the named sheep's branch head and record it, without swapping.
+    Stage(&'a str),
     /// Point the named sheep at another branch.
     Branch { sheep: &'a str, name: &'a str },
     /// Nothing above matched; print [`USAGE`] and exit on the usage code.
@@ -91,6 +94,7 @@ pub fn route<'a>(args: &[&'a str], supervised: bool) -> Route<'a> {
         ["deploy", sheep] => Route::Deploy(sheep),
         ["deploy", sheep, "--watch", mode] => Route::Watch { sheep, mode },
         ["deploy", sheep, "--branch", name] => Route::Branch { sheep, name },
+        ["deploy", sheep, "--stage"] => Route::Stage(sheep),
         // Reached only through `shep deploy <sheep>`: the passthrough
         // shipped in shep 0.1.1 and strips the dog's own name, so the
         // flagship command arrives as a bare sheep name with no verb.
@@ -98,6 +102,7 @@ pub fn route<'a>(args: &[&'a str], supervised: bool) -> Route<'a> {
         [sheep] => Route::Deploy(sheep),
         [sheep, "--watch", mode] => Route::Watch { sheep, mode },
         [sheep, "--branch", name] => Route::Branch { sheep, name },
+        [sheep, "--stage"] => Route::Stage(sheep),
         _ => Route::Usage,
     };
 
@@ -106,7 +111,11 @@ pub fn route<'a>(args: &[&'a str], supervised: bool) -> Route<'a> {
     // onto `$SHEP_HOME/deploy`, and an absolute name replaces that root
     // outright rather than traversing out of it.
     match route {
-        Route::Setup(sheep) | Route::Deploy(sheep) if !paths::is_sheep_name(sheep) => Route::Usage,
+        Route::Setup(sheep) | Route::Deploy(sheep) | Route::Stage(sheep)
+            if !paths::is_sheep_name(sheep) =>
+        {
+            Route::Usage
+        }
         Route::SetupVerify { sheep, .. }
         | Route::Watch { sheep, .. }
         | Route::Branch { sheep, .. }
@@ -274,6 +283,26 @@ mod tests {
         assert_eq!(route(&["deploy", "koji", "--branch"], false), Route::Usage);
         assert_eq!(
             route(&["deploy", "../koji", "--branch", "main"], false),
+            Route::Usage
+        );
+    }
+
+    /// fails if `--stage` stops routing in either spelling, or a trailing
+    /// word is read as a stage. It takes no value, so `--stage now` is not
+    /// one.
+    #[test]
+    fn stage_routes_in_both_spellings() {
+        assert_eq!(
+            route(&["deploy", "koji", "--stage"], false),
+            Route::Stage("koji")
+        );
+        assert_eq!(route(&["koji", "--stage"], false), Route::Stage("koji"));
+        assert_eq!(
+            route(&["deploy", "koji", "--stage", "now"], false),
+            Route::Usage
+        );
+        assert_eq!(
+            route(&["deploy", "../koji", "--stage"], false),
             Route::Usage
         );
     }

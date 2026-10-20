@@ -86,9 +86,13 @@ pub(super) async fn record(
     // older than the newest `keep` by then.
     let spared: Vec<&str> = [
         state.deployed.as_deref(),
-        recorded.as_ref().and_then(|on_disk| on_disk.deployed.as_deref()),
+        recorded
+            .as_ref()
+            .and_then(|on_disk| on_disk.deployed.as_deref()),
         state.staged.as_deref(),
-        recorded.as_ref().and_then(|on_disk| on_disk.staged.as_deref()),
+        recorded
+            .as_ref()
+            .and_then(|on_disk| on_disk.staged.as_deref()),
     ]
     .into_iter()
     .flatten()
@@ -173,7 +177,7 @@ pub(super) fn record_landing(tree: &Tree, state: &mut State, head: &str) -> Resu
 /// # Errors
 /// [`Error::Io`] if the record lock cannot be taken, and whatever
 /// [`State::write`] returns.
-pub(super) fn write_record(tree: &Tree, state: &mut State) -> Result<(), Error> {
+pub(crate) fn write_record(tree: &Tree, state: &mut State) -> Result<(), Error> {
     let _record = lock::hold_record(tree)?;
     adopt_operator_fields(tree, state);
     state.write(&tree.state_file())
