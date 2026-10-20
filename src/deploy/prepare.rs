@@ -11,7 +11,7 @@ use crate::error::Error;
 use crate::hook::Hooks;
 use crate::paths::Tree;
 use crate::state::Verify;
-use crate::{flockfile, git, shared};
+use crate::{flockfile, git, linkcheck, shared};
 
 /// Everything between a sha and its build: the worktree, the cache link,
 /// the operator's shared files, and the two Flockfiles read once.
@@ -46,6 +46,11 @@ pub(crate) fn stage_release(
     let app = flockfiles.app_config(tree.sheep())?;
     let spec = flockfiles.build_spec()?;
     let hooks = flockfiles.hooks()?;
+    // Printed here rather than returned, as `build::root_warning` is: nothing
+    // is refused, and `deploy` and `setup` both come through this function.
+    for warning in linkcheck::warnings(tree.sheep(), &shared_paths, &spec.artifacts) {
+        eprintln!("{warning}");
+    }
     Ok((app, spec, hooks))
 }
 
