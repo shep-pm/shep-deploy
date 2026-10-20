@@ -185,7 +185,7 @@ mod tests {
     /// fails if `.shepignore` parsing stops skipping blank lines, or stops
     /// skipping `#` comments - two separate clauses of the same filter, and
     /// a filter proven on one clause can still be broken on the other.
-    /// `shepignored_paths_are_not_linked` above only exercises a
+    /// `shared::link`'s `shepignored_paths_are_not_linked` only exercises a
     /// `.shepignore` with neither blank lines nor comments in it, so this
     /// is the only test standing between either clause and going unguarded.
     #[test]
