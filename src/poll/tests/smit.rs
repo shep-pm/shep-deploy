@@ -206,3 +206,57 @@ async fn a_too_long_branch_name_does_not_stop_the_tick() {
     // did not take the whole tick down too.
     assert!(results[0].1.is_err(), "the fetch is what fails here");
 }
+
+/// fails if `shep flock` keeps the old sha after a deploy until the next
+/// tick. The first paint is from the record the tick read, so only a
+/// paint after the deploy can carry the sha it landed.
+#[tokio::test(start_paused = true)]
+async fn a_deploy_repaints_the_smit_in_the_tick_that_made_it() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let origin = write_target_ready(home.path(), "fine", Watch::Auto);
+    let head = fixtures::head_of(origin.path());
+    let daemon = SmitRecording::default();
+
+    let results = tick(&daemon, home.path(), &fixtures::dog_config())
+        .await
+        .results;
+
+    assert!(
+        matches!(results[0].1, Ok(Outcome::Deployed { .. })),
+        "the deploy landed: {results:?}"
+    );
+    let last = daemon.smits().pop().expect("a smit was painted");
+    assert_eq!(last, ("fine".to_owned(), format!("▲ main@{}", &head[..6])));
+}
+
+/// fails if a refused repaint is lost or takes the tick down. It is a
+/// `{name}/smit` row like the first paint's, and the deploy's own row
+/// stays.
+#[tokio::test(start_paused = true)]
+async fn a_refused_repaint_is_a_row_and_does_not_stop_the_tick() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let _origin = write_target_ready(home.path(), "fine", Watch::Auto);
+
+    let results = tick(
+        &RefusingSmits(Ready::new()),
+        home.path(),
+        &fixtures::dog_config(),
+    )
+    .await
+    .results;
+
+    let smit_rows = results
+        .iter()
+        .filter(|(key, outcome)| key == "fine/smit" && outcome.is_err())
+        .count();
+    assert_eq!(
+        smit_rows, 2,
+        "first paint and repaint both refused: {results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|(key, outcome)| key == "fine" && matches!(outcome, Ok(Outcome::Deployed { .. }))),
+        "the deploy still ran: {results:?}"
+    );
+}
