@@ -295,7 +295,7 @@ fn read_required(path: &Path, follow: Follow) -> Result<Value, Error> {
 
 /// As [`read_required`], but a missing file is not an error - it is treated
 /// as an empty document, the same "absent means zero configuration"
-/// precedent [`crate::shared::shepignore_patterns`] already sets for
+/// precedent [`crate::shared::shepignore::shepignore_patterns`] already sets for
 /// `.shepignore`. `Flockfile.override.toml` is optional by design.
 ///
 /// # Errors
