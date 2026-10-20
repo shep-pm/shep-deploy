@@ -146,7 +146,11 @@ exist and each has a precise edge:
 - **uid/gid drop** (`build/mod.rs`), applied to the build's `Command`, so it bounds
   the CHILD. Anything the parent does afterwards on paths the child chose is
   outside it. A path-traversal in `build.artifacts` exploited exactly that gap
-  on 2026-08-28 and reached the tree's own `deploy.toml`.
+  on 2026-08-28 and reached the tree's own `deploy.toml`. A root dog first
+  hands the release and `cache_target()` itself to `user` (`ownership.rs`),
+  by descriptor, never by path, skipping symlinks, files with a second hard
+  link and the root `.git` file, which it writes back after the build because
+  owning the directory lets the build replace it; every other write root makes into a release must stay handle-based too.
 - **cleared environment** (`build/env.rs`), so a build gets `BASE_ENV` plus the
   operator's `passthrough` plus the release's `[build] env`, and nothing else.
   `SSH_AUTH_SOCK` is excluded on purpose.

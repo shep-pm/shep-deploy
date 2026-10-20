@@ -5,6 +5,25 @@ All notable changes to this crate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2026-10-20
+
+### Fixed
+
+- Link shared files into a release by directory handle
+- Hand the release to the build user under a root shepherd
+- Leave hard-linked files alone when handing over a release
+- Chown files through the checked descriptor and restore the .git pointer
+
+
+## [0.3.4] - 2026-10-20
+
+### Fixed
+
+- Report a rollback that never comes up as unverified
+- Capture the rollback's generation before each reload attempt
+- Time a rollback by the restored release and ignore draining rows
+
+
 ## [0.3.3] - 2026-10-20
 
 ### Changed
