@@ -297,3 +297,39 @@ async fn an_after_hook_that_never_finishes_is_abandoned_and_the_deploy_is_still_
     );
     assert_eq!(fixture.state.failed, None);
 }
+
+/// fails if the after hook runs when the record could not be written: it
+/// would read a `deploy.toml` that still names the previous sha. A directory
+/// at the record's path is what makes the write fail.
+#[tokio::test]
+async fn an_after_hook_does_not_run_when_the_record_cannot_be_written() {
+    let mut fixture = fixture_with_previous_release();
+    operators_override(
+        &fixture,
+        "[dog.deploy.after]\ncommand = 'touch after-ran'\n",
+    );
+    let second = commit_on_origin(&fixture, "second.txt");
+    let record = fixture.tree.state_file();
+    fs::remove_file(&record).expect("drop the record");
+    fs::create_dir(&record).expect("a directory where the record goes");
+
+    let outcome = deploy(
+        &Shepherd::ready(),
+        &fixture.tree,
+        &mut fixture.state,
+        &fixtures::dog_config(),
+    )
+    .await
+    .expect("the deploy landed whatever the record did");
+
+    assert_eq!(
+        outcome,
+        Outcome::Deployed {
+            sha: second.clone()
+        }
+    );
+    assert!(
+        !fixture.tree.release(&second).join("after-ran").exists(),
+        "the after hook ran against a record that does not name the new sha"
+    );
+}

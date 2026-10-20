@@ -129,6 +129,8 @@ env = { CLOUDFLARE_API_TOKEN = "...", CLOUDFLARE_ZONE_ID = "..." }
   one line, `shep-deploy: <sheep>: running the after hook`, before it starts.
 - It runs inside the deploy, so no other deploy of that target starts until it
   ends.
+- It runs only if the record write succeeded. If `deploy.toml` cannot be
+  written, the log says the hook was skipped.
 - It never runs for a deploy that is rolled back, that fails before the swap,
   or that finds nothing new, and `setup` runs none.
 - A failure changes nothing. A non-zero exit, a signal or a timeout is logged
