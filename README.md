@@ -284,7 +284,9 @@ An app with neither a `readiness_probe` nor `wait_ready`, a bot with no port
 say, is refused before anything is built, because its first deploy would be
 refused for the same reason. Take it over with `shep-deploy setup <sheep>
 --verify alive`, which records `verify = "alive"` in its `deploy.toml`. A
-refused `setup` leaves no tree behind, so running it again is a retry.
+refused `setup` leaves a directory with the fetched repository and the staged
+release but no `deploy.toml` and no `current`, which is not a deploy target, so
+running it again is a retry.
 
 The first cutover is the one deploy that may have downtime. It runs two
 instances at once, so an app that does not bind with `SO_REUSEPORT` cannot take
