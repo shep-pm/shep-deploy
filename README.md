@@ -496,7 +496,8 @@ compromised build then gets that app's privileges and nothing more.
 
 Under a root shepherd the build user owns its release and its build cache
 directory (`target`, the directory only, not what is in it) and nothing else.
-The dog hands those over just before the build, through open directory handles
+The dog hands those over just before the build, or before the release hook when
+the app has no build command, through open directory handles
 and never through paths, and skips every symlink, every file with a second
 hard link, and the `.git` file at the release root. The build can still replace
 that file, since it owns the directory, so the dog writes it back after the

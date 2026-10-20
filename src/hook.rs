@@ -28,6 +28,7 @@ use toml::Value;
 use crate::build::env;
 use crate::build::privilege::{Step, gid_for, root_warning, uid_for};
 use crate::build::runner;
+use crate::build::{drop_to, settle_pointer};
 use crate::error::Error;
 use crate::shared::printable;
 
@@ -90,6 +91,11 @@ pub(crate) struct Context<'a> {
     pub passthrough: &'a [String],
     /// The dog's `build_timeout`.
     pub budget: Duration,
+    /// The build cache directory, handed over with the release.
+    pub cache: &'a Path,
+    /// Whether a build command ran in the release, which handed it over to
+    /// `as_user` already.
+    pub built: bool,
 }
 
 /// The name of the release hook in [`Error::Hook`].
@@ -109,12 +115,14 @@ const RELEASE: &str = "release";
 /// `SHEP_DEPLOY_SHA` and `SHEP_DEPLOY_RELEASE` (an absolute path) go on last,
 /// so a hook's `env` cannot override them.
 ///
-/// Nothing is handed over to `as_user` here: the build's run already did that,
-/// and a hook is the operator's command, not the repository's.
+/// A root dog hands the release and the cache to `as_user` first when no build
+/// ran to do it, as the build does, so a hook in an app with no build command
+/// can write in its release. After a build there is nothing left to hand over.
 ///
 /// # Errors
 /// [`Error::Config`] if `ctx.as_user` names a user `id` cannot resolve.
-/// [`Error::Io`] naming the release if the shell cannot be launched.
+/// [`Error::Io`] naming the release if the shell cannot be launched, or the
+/// path that failed if a root dog cannot hand the release to `as_user`.
 /// [`Error::Hook`] if the command exits non-zero, is killed by a signal, or
 /// runs past `ctx.budget`.
 pub(crate) async fn run(spec: &HookSpec, ctx: &Context<'_>) -> Result<(), Error> {
@@ -136,26 +144,35 @@ pub(crate) async fn run(spec: &HookSpec, ctx: &Context<'_>) -> Result<(), Error>
         .env("SHEP_DEPLOY_SHA", ctx.sha)
         .env("SHEP_DEPLOY_RELEASE", &release);
 
+    let mut pointer = None;
     if let Some(user) = ctx.as_user {
-        let gid = gid_for(ctx.release, user).await?;
-        let uid = uid_for(ctx.release, user).await?;
+        let (uid, gid) = if ctx.built {
+            (
+                uid_for(ctx.release, user).await?,
+                gid_for(ctx.release, user).await?,
+            )
+        } else {
+            let dropped = drop_to(ctx.release, ctx.cache, user).await?;
+            pointer = dropped.pointer;
+            (dropped.uid, dropped.gid)
+        };
         child.gid(gid);
         child.uid(uid);
     }
 
-    runner::run_in_group(child, ctx.release, ctx.budget)
-        .await
-        .map_err(|error| match error {
-            Error::Build { status } => Error::Hook {
-                name: RELEASE,
-                ending: Ending::Exited(status),
-            },
-            Error::BuildTimedOut { after } => Error::Hook {
-                name: RELEASE,
-                ending: Ending::TimedOut(after),
-            },
-            other => other,
-        })
+    let ran = runner::run_in_group(child, ctx.release, ctx.budget).await;
+    settle_pointer(ctx.sheep, ctx.release, pointer, &ran, "the release hook").await?;
+    ran.map_err(|error| match error {
+        Error::Build { status } => Error::Hook {
+            name: RELEASE,
+            ending: Ending::Exited(status),
+        },
+        Error::BuildTimedOut { after } => Error::Hook {
+            name: RELEASE,
+            ending: Ending::TimedOut(after),
+        },
+        other => other,
+    })
 }
 
 /// The tables under `[dog.deploy]` that carry an operator's command.
@@ -328,6 +345,8 @@ mod tests {
             as_user: None,
             passthrough,
             budget,
+            cache: &rel.join("cache"),
+            built: true,
         };
         run(spec, &ctx).await
     }
@@ -545,5 +564,36 @@ mod tests {
             format!("{spec:?}"),
             "HookSpec { command: Some(\"supabase db push\"), env: <1 vars> }"
         );
+    }
+
+    /// fails if a hook with no build before it cannot run as the dog's own
+    /// user: the hand-over path must be a no-op there, not an error. Handing
+    /// a release to another user needs root, which `ownership`'s own tests
+    /// cover.
+    #[tokio::test]
+    async fn a_hook_without_a_build_runs_as_the_dogs_own_user() {
+        let rel = crate::fixtures::fixture_release(&[]);
+        let me = tokio::process::Command::new("id")
+            .arg("-un")
+            .output()
+            .await
+            .expect("id runs");
+        let me = String::from_utf8(me.stdout)
+            .expect("utf8")
+            .trim()
+            .to_owned();
+        let cache = rel.path().join("cache");
+        let ctx = Context {
+            sheep: "web",
+            sha: crate::fixtures::SHA,
+            release: rel.path(),
+            as_user: Some(&me),
+            passthrough: &[],
+            budget: TEST_BUDGET,
+            cache: &cache,
+            built: false,
+        };
+        run(&hook("touch ran", &[]), &ctx).await.expect("runs");
+        assert!(rel.path().join("ran").exists());
     }
 }

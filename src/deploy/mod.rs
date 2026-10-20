@@ -339,6 +339,8 @@ async fn attempt<D: Daemon>(
             as_user: app.user.as_deref(),
             passthrough: &config.passthrough,
             budget: config.build_timeout,
+            cache: &tree.cache_target(),
+            built: spec.command.is_some(),
         },
     )
     .await?;
