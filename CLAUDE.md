@@ -125,7 +125,7 @@ the exit-code mapping; both left `main.rs` to keep it under 800 lines.
 binary crate with no lib target can share test helpers. Use
 `fixtures::run_git`, `fixtures::head_of`, `fixtures::fixture_release`,
 `fixtures::TEST_BUDGET`. Qualified rather than glob-imported on purpose:
-`shared.rs` has a production `run_git` and `deploy/prepare.rs` a production `head_of`,
+`shared/process.rs` has a production `run_git` and `deploy/prepare.rs` a production `head_of`,
 both in scope in their own test modules.
 
 `tests/integration.rs` is a separate compilation target and keeps its own copy
