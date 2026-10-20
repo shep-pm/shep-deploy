@@ -13,14 +13,23 @@ use crate::paths::Tree;
 use crate::state::Verify;
 use crate::{flockfile, git, linkcheck, shared};
 
+/// What [`stage_release`] hands its callers: the app to register, the build
+/// to run, the hooks to run after it, and the paths linked in from the
+/// operator's checkout, which [`linkcheck::Snapshot`] needs around the build.
+pub(crate) struct Staged {
+    pub(crate) app: AppConfig,
+    pub(crate) spec: BuildSpec,
+    pub(crate) hooks: Hooks,
+    pub(crate) linked: shared::FromCheckout,
+}
+
 /// Everything between a sha and its build: the worktree, the cache link,
 /// the operator's shared files, and the two Flockfiles read once.
 ///
 /// One function because two callers, [`super::attempt`] and
 /// [`crate::optin::prepare_with`], had the same seven lines, and because all of
 /// it is blocking work (git, symlinks, file reads) that both run through
-/// [`shared::off_thread`]. Answers the app to register, the build to
-/// run and the hooks to run after it.
+/// [`shared::off_thread`]. Answers a [`Staged`].
 ///
 /// # Errors
 /// Whatever [`checkout_release`], [`shared::link_cache`],
@@ -28,11 +37,7 @@ use crate::{flockfile, git, linkcheck, shared};
 /// return, plus the app-selection and schema failures of
 /// [`flockfile::Merged::app_config`], [`flockfile::Merged::build_spec`] and
 /// [`flockfile::Merged::hooks`].
-pub(crate) fn stage_release(
-    tree: &Tree,
-    checkout: &Path,
-    sha: &str,
-) -> Result<(AppConfig, BuildSpec, Hooks), Error> {
+pub(crate) fn stage_release(tree: &Tree, checkout: &Path, sha: &str) -> Result<Staged, Error> {
     let release = tree.release(sha);
     checkout_release(tree, sha)?;
     shared::link_cache(&release, &tree.cache_target())?;
@@ -51,7 +56,12 @@ pub(crate) fn stage_release(
     for warning in linkcheck::warnings(tree.sheep(), &shared_paths, &spec.artifacts) {
         eprintln!("{warning}");
     }
-    Ok((app, spec, hooks))
+    Ok(Staged {
+        app,
+        spec,
+        hooks,
+        linked: shared_paths,
+    })
 }
 
 /// Checks `sha` out at `release`, unless a FINISHED checkout is already there.

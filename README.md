@@ -120,7 +120,11 @@ write the command to be idempotent.
    against nothing. A linked path that has a `node_modules`, `.output`, `dist`
    or `.next` component, or that overlaps a `build.artifacts` entry, is named
    in a warning on stderr each deploy; add it to `.shepignore` to stop
-   linking it.
+   linking it. A linked file whose length or modified time, or a linked
+   directory whose own modified time, changed during the build is named too,
+   because the build may have written through the link into your checkout. A
+   file the running app writes, a database or a log, is named as well; leave
+   those linked.
 4. Run the build, as the app's `user` if it sets one.
 5. Run the release hook, if your override sets one.
 6. `rename(2)` `current` onto the new release.

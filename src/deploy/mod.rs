@@ -69,7 +69,7 @@ use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::paths::Tree;
 use crate::state::State;
-use crate::{git, hook, lock, shared, swap};
+use crate::{git, hook, linkcheck, lock, shared, swap};
 
 use prepare::head_of;
 pub(crate) use prepare::{refuse_ungated_at_setup, refuse_ungated_verification};
@@ -77,7 +77,7 @@ use record::{record, record_landing};
 use reload::{Landed, land, named};
 use rollback::{roll_back, undo_swap};
 
-pub(crate) use prepare::stage_release;
+pub(crate) use prepare::{Staged, stage_release};
 pub use record::set_watch;
 
 /// What one deploy did.
@@ -313,12 +313,18 @@ async fn attempt<D: Daemon>(
 ) -> Result<Outcome, Error> {
     let sheep = tree.sheep();
     let release = tree.release(head);
-    let (app, spec, hooks) = {
+    let Staged {
+        app,
+        spec,
+        hooks,
+        linked,
+    } = {
         let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
         shared::off_thread(move || stage_release(&tree, &checkout, &head)).await?
     };
     refuse_ungated_verification(sheep, &app, state.verify)?;
-    build::run(
+    let snapshot = linkcheck::Snapshot::before(sheep, &release, &linked);
+    let built = build::run(
         sheep,
         &release,
         &spec,
@@ -327,7 +333,13 @@ async fn attempt<D: Daemon>(
         &tree.cache_target(),
         config.build_timeout,
     )
-    .await?;
+    .await;
+    // Printed whether or not the build succeeded: a write into the checkout
+    // happened either way.
+    for warning in snapshot.after() {
+        eprintln!("{warning}");
+    }
+    built?;
     // After the build and before `previous` is read, so the `Raced` check
     // below covers the hook's run time as well as the build's.
     hook::run(
