@@ -102,6 +102,19 @@ impl fmt::Display for Error {
                  current nor deploy.toml names one that is still on disk - so it is still \
                  pointed at {sha}"
             ),
+            Self::RollbackUnverified {
+                sheep,
+                to,
+                why,
+                found,
+            } => write!(
+                f,
+                "{sheep}: {why}, so it was rolled back to {to} - but the rollback could not be \
+                 confirmed: {found}. current and deploy.toml both name {to} and the shepherd \
+                 accepted the reload onto it, but nothing is known to be serving. Check \
+                 `shep flock` for a {sheep} row and `shep describe {sheep}` for what it is \
+                 doing"
+            ),
             Self::CutOver {
                 sheep,
                 why,

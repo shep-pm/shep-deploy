@@ -144,7 +144,7 @@ pub enum Outcome {
 /// returned as it arrived, unwrapped. The machine is left exactly as it was
 /// before the deploy, which is why there is nothing extra to say about it.
 ///
-/// A rollback that itself fails gives one of three errors, and a caller
+/// A rollback that itself fails gives one of four errors, and a caller
 /// that wants to detect "the rollback did not work" has to accept all of
 /// them rather than matching [`Error::RollbackFailed`] alone:
 ///
@@ -154,6 +154,9 @@ pub enum Outcome {
 /// - [`Error::RollbackFailed`], wrapping anything else the rollback met -
 ///   a swap that could not be made, a record that could not be written, a
 ///   reload refused for a reason that can never clear.
+/// - [`Error::RollbackUnverified`], bare, when the reload was accepted and
+///   the release put back was not seen to come up, under the same
+///   `state.verify` a deploy is judged by. It exits `1`, not `12`.
 /// - [`Error::Unverified`], bare, when there was no earlier release to
 ///   return to at all. No rollback was attempted, so nothing frames it as
 ///   one that failed.
@@ -376,6 +379,7 @@ async fn attempt<D: Daemon>(
                 daemon,
                 tree,
                 state,
+                &app,
                 previous.as_deref(),
                 head,
                 &why,
@@ -396,6 +400,7 @@ async fn attempt<D: Daemon>(
                 daemon,
                 tree,
                 state,
+                &app,
                 previous.as_deref(),
                 head,
                 &source.to_string(),

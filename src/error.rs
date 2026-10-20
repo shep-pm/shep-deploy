@@ -178,6 +178,26 @@ pub enum Error {
         /// What went wrong before the rollback.
         source: Box<Error>,
     },
+    /// A release was rolled back, and the release put back did not come up
+    /// either.
+    ///
+    /// Not [`Self::RollbackFailed`], which means a swap or a record write
+    /// failed: here `current` and `deploy.toml` both name `to` and the
+    /// shepherd accepted the reload onto it, and what could not be shown is
+    /// that anything is serving. A shepherd that cannot spawn the previous
+    /// release drops the sheep from the flock altogether, so the honest
+    /// answer is that nothing is known to be running.
+    RollbackUnverified {
+        /// The sheep whose rollback was not confirmed.
+        sheep: String,
+        /// The release `current` and `deploy.toml` name now.
+        to: String,
+        /// Why a rollback was wanted in the first place.
+        why: String,
+        /// What the check on the restored release found: the seconds that
+        /// elapsed, or the shepherd's own error text.
+        found: String,
+    },
     /// A release was swapped in, never came up, and there was no earlier
     /// release to fall back to.
     ///
@@ -428,6 +448,7 @@ impl core::error::Error for Error {
             | Self::BuildTimedOut { .. }
             | Self::AlreadyDeploying { .. }
             | Self::Unverified { .. }
+            | Self::RollbackUnverified { .. }
             | Self::Stranded { .. }
             | Self::Panicked { .. }
             | Self::Build { .. } => None,
@@ -673,6 +694,32 @@ mod tests {
         assert!(shown.contains("web"), "{shown}");
         assert!(shown.contains("a1b2c3d"), "{shown}");
         assert!(shown.contains("did not come up and stay up"), "{shown}");
+    }
+
+    /// fails if a rollback that did not come up stops naming the sheep, the
+    /// release it was put back on, the reason it was rolled back, what the
+    /// check found, or where to look. The rollback is the last thing this
+    /// dog does, so this message is all an operator has to go on, and it
+    /// must not claim anything is serving.
+    #[test]
+    fn an_unverified_rollback_names_the_sheep_the_sha_the_reason_and_where_to_look() {
+        let err = Error::RollbackUnverified {
+            sheep: "web".to_owned(),
+            to: "a1b2c3d".to_owned(),
+            why: "it did not come up and stay up, 16s after the reload".to_owned(),
+            found: "it did not come up and stay up, 16s after the rollback's reload".to_owned(),
+        };
+        let shown = err.to_string();
+        assert!(shown.contains("web"), "{shown}");
+        assert!(shown.contains("a1b2c3d"), "{shown}");
+        assert!(
+            shown.contains("did not come up and stay up, 16s after the reload"),
+            "{shown}"
+        );
+        assert!(shown.contains("16s after the rollback's reload"), "{shown}");
+        assert!(shown.contains("nothing is known to be serving"), "{shown}");
+        assert!(shown.contains("shep flock"), "{shown}");
+        assert!(shown.contains("shep describe web"), "{shown}");
     }
 
     /// fails if this failure starts saying the same thing twice. It used to
