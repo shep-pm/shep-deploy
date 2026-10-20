@@ -148,9 +148,13 @@ async fn tick<D: Daemon>(daemon: &D, shep_home: &Path, config: &DogConfig) -> Ti
         // Above the `due` check; `smit::publish` says why. A failure does not
         // stop the deploy, and is a row of its own.
         let painted = smit::text(&state);
-        if let Err(err) = smit::publish(daemon, &name, &state).await {
-            results.push((format!("{name}/smit"), Err(err)));
-        }
+        let refused = match smit::publish(daemon, &name, &state).await {
+            Ok(()) => false,
+            Err(err) => {
+                results.push((format!("{name}/smit"), Err(err)));
+                true
+            }
+        };
         if !due(&state) {
             continue;
         }
@@ -167,7 +171,11 @@ async fn tick<D: Daemon>(daemon: &D, shep_home: &Path, config: &DogConfig) -> Ti
                 what: panic_message(payload.as_ref()),
             }),
         };
-        if let Err(err) = smit::repaint(daemon, &name, &painted, &state).await {
+        // One `/smit` row per target per tick: a second identical refusal
+        // would count twice against the mute.
+        if let Err(err) = smit::repaint(daemon, &name, &painted, &state).await
+            && !refused
+        {
             results.push((format!("{name}/smit"), Err(err)));
         }
         results.push((name, outcome));
