@@ -184,6 +184,7 @@ async fn run(args: &[&str]) -> ExitCode {
         },
         Route::Watch { sheep, mode } => set_watch(sheep, mode),
         Route::Stage(sheep) => stage_once(sheep).await,
+        Route::Promote(sheep) => promote_once(sheep).await,
         Route::Branch { sheep, name } => {
             shep_home().and_then(|home| retarget::branch_once(&Tree::for_sheep(&home, sheep), name))
         }
@@ -438,8 +439,13 @@ async fn deploy_once(sheep: &str) -> Result<u8, Error> {
 
     let config = config::read(&daemon).await?;
     let outcome = deploy::deploy(&daemon, &tree, &mut state, &config).await?;
-    match &outcome {
-        Outcome::UpToDate => println!("{sheep} is up to date at {}", deployed(&state)),
+    Ok(report(sheep, &state, &outcome))
+}
+
+/// Prints what a deploy or a promote did and answers its exit code.
+fn report(sheep: &str, state: &State, outcome: &Outcome) -> u8 {
+    match outcome {
+        Outcome::UpToDate => println!("{sheep} is up to date at {}", deployed(state)),
         Outcome::Deployed { sha } => println!("{sheep} deployed {sha}"),
         Outcome::Skipped { sha } => {
             println!("{sheep} skipped {sha}, nothing under its reload paths changed");
@@ -447,7 +453,25 @@ async fn deploy_once(sheep: &str) -> Result<u8, Error> {
         Outcome::RolledBack { to, why } => println!("{sheep} rolled back to {to}: {why}"),
     }
 
-    Ok(code_for_outcome(&outcome))
+    code_for_outcome(outcome)
+}
+
+/// Swaps `sheep` to the release a stage built, reporting what that did.
+///
+/// # Errors
+/// Whatever [`stage::promote`] returns, plus [`Error::Io`] if the target's
+/// `deploy.toml` cannot be read and [`Error::Connect`] if the shepherd's
+/// socket cannot be reached.
+async fn promote_once(sheep: &str) -> Result<u8, Error> {
+    let tree = Tree::for_sheep(&shep_home()?, sheep);
+    let mut state = State::read(&tree.state_file())?;
+
+    let client = Client::connect(&socket()?).await?;
+    let daemon = Live::command(client);
+
+    let config = config::read(&daemon).await?;
+    let outcome = stage::promote(&daemon, &tree, &mut state, &config).await?;
+    Ok(report(sheep, &state, &outcome))
 }
 
 /// Builds `sheep`'s branch head and records it as staged, without swapping.
@@ -768,6 +792,26 @@ mod tests {
         );
         assert_eq!(
             route(&["deploy", "../koji", "--stage"], false),
+            Route::Usage
+        );
+    }
+
+    /// fails if `--promote` stops routing in either spelling, or a trailing
+    /// word is read as a promote. It takes no value, so `--promote now` is not
+    /// one.
+    #[test]
+    fn promote_routes_in_both_spellings() {
+        assert_eq!(
+            route(&["deploy", "koji", "--promote"], false),
+            Route::Promote("koji")
+        );
+        assert_eq!(route(&["koji", "--promote"], false), Route::Promote("koji"));
+        assert_eq!(
+            route(&["deploy", "koji", "--promote", "now"], false),
+            Route::Usage
+        );
+        assert_eq!(
+            route(&["deploy", "../koji", "--promote"], false),
             Route::Usage
         );
     }

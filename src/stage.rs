@@ -6,14 +6,22 @@
 //! which is why [`stage`] takes no [`crate::daemon::Daemon`] at all: a
 //! function with no connection to the shepherd cannot start, reload or
 //! restart anything even by accident.
+//!
+//! `shep deploy <sheep> --promote` is the other half: [`promote`] swaps to
+//! what a stage built, reloads and verifies it, and takes the daemon a stage
+//! never does.
 
 use crate::build;
 use crate::config::DogConfig;
-use crate::deploy::{self, head_of, refuse_ungated_verification, stage_release};
+use crate::daemon::Daemon;
+use crate::deploy::{
+    self, Outcome, head_of, read_staged, record, refuse_ungated_verification, run_release_hook,
+    stage_release, swap_and_land,
+};
 use crate::error::Error;
 use crate::paths::Tree;
 use crate::state::{State, Watch};
-use crate::{git, linkcheck, lock, retention, shared};
+use crate::{git, linkcheck, lock, retention, shared, swap};
 
 /// What one stage did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +124,83 @@ pub async fn stage(tree: &Tree, state: &mut State, config: &DogConfig) -> Result
     built.map(|()| Staged::Built { sha: head })
 }
 
+/// Swaps `current` to the release [`stage`] built, reloads the sheep, and
+/// verifies it, rolling back if it does not come up.
+///
+/// Runs no build and fetches nothing: the sha is the one `state.staged`
+/// names, whatever the branch says now. The release hook runs first, since a
+/// stage never ran it, and the rest is [`deploy::swap_and_land`] followed by
+/// [`record`], so rollback, the held sha and retention are what a deploy's
+/// are. A sha that failed is recorded in `failed` and left `staged`, so the
+/// operator can promote it again. A hold on the sha does not stop a promote,
+/// as it does not stop a deploy asked for by name.
+///
+/// `state` is replaced by the record as it is on disk once the tree is held.
+///
+/// # Errors
+/// [`Error::AlreadyDeploying`] if another process holds the tree, and
+/// [`Error::Io`] if the lock file cannot be created. [`Error::Io`] or
+/// [`Error::Config`] if `deploy.toml` cannot be read or fails validation.
+/// [`Error::NotCutOver`] if the record names no released sha, as for a
+/// deploy. [`Error::Config`] if nothing is staged, or the staged release or
+/// its completion marker is gone, naming `--stage` as the way back.
+///
+/// Then whatever the release hook and [`deploy::deploy`]'s steps from the
+/// swap on return, with the same rollback endings.
+pub async fn promote<D: Daemon>(
+    daemon: &D,
+    tree: &Tree,
+    state: &mut State,
+    config: &DogConfig,
+) -> Result<Outcome, Error> {
+    let sheep = tree.sheep();
+    let _promoting = lock::hold(tree)?;
+
+    // The caller read `state` before the lock, and a deploy or a stage may
+    // have written the record since.
+    *state = State::read(&tree.state_file())?;
+
+    if state.deployed.is_none() {
+        return Err(Error::NotCutOver {
+            sheep: sheep.to_owned(),
+            tree: tree.root().to_owned(),
+        });
+    }
+    let Some(head) = state.staged.clone() else {
+        return Err(Error::Config(format!(
+            "{sheep} has nothing staged. Run `shep-deploy deploy {sheep} --stage` first."
+        )));
+    };
+    if !tree.release(&head).is_dir() || !tree.completion(&head).is_file() {
+        return Err(Error::Config(format!(
+            "{sheep} has {head} staged, but its release is gone or unfinished. Run \
+             `shep-deploy deploy {sheep} --stage` to build it again."
+        )));
+    }
+
+    let outcome = land_staged(daemon, tree, state, &head, config).await;
+    record(tree, state, &head, &outcome, config.retention).await;
+    outcome
+}
+
+/// The release hook, the swap and the verdict, for the staged `head`.
+async fn land_staged<D: Daemon>(
+    daemon: &D,
+    tree: &Tree,
+    state: &mut State,
+    head: &str,
+    config: &DogConfig,
+) -> Result<Outcome, Error> {
+    let started_at = swap::resolve(&tree.current())?;
+    let staged = {
+        let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
+        shared::off_thread(move || read_staged(&tree, &checkout, &head)).await?
+    };
+    refuse_ungated_verification(tree.sheep(), &staged.app, state.verify)?;
+    run_release_hook(tree, head, &staged, config).await?;
+    swap_and_land(daemon, tree, state, head, started_at, &staged, config).await
+}
+
 /// The release, its build, and the record write, for one sha.
 async fn build_and_record(
     tree: &Tree,
@@ -193,8 +278,10 @@ fn record_staged(tree: &Tree, state: &mut State, head: &str) -> Result<(), Error
 mod tests {
     use std::fs;
 
+    use crate::deploy::Outcome;
     use crate::deploy::test_support::{
-        FLOCKFILE, commit_on_origin, fixture_before_any_release, fixture_with_previous_release,
+        FLOCKFILE, Shepherd, commit_on_origin, fixture_before_any_release,
+        fixture_with_previous_release,
     };
     use crate::{fixtures, swap};
 
@@ -212,6 +299,214 @@ mod tests {
         )
         .expect("write Flockfile");
         commit_on_origin(fixture, name)
+    }
+
+    /// Stages the head of a new commit whose build runs `command`, returning
+    /// its sha. The record is on disk and in `fixture.state`.
+    async fn stage_a_build(
+        fixture: &mut crate::deploy::test_support::Fixture,
+        command: &str,
+    ) -> String {
+        let second = commit_building(fixture, command, "second.txt");
+        stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
+            .await
+            .expect("stages");
+        second
+    }
+
+    /// fails if a promote builds again, does not reload, or leaves `staged`
+    /// behind. The marker is removed after the stage, so a second build would
+    /// put it back; the reload count is what separates a swap from a
+    /// symlink move.
+    #[tokio::test]
+    async fn promote_swaps_to_the_staged_release_and_clears_the_record() {
+        let mut fixture = fixture_with_previous_release();
+        let second = stage_a_build(&mut fixture, "touch built.marker").await;
+        let marker = fixture.tree.release(&second).join("built.marker");
+        fs::remove_file(&marker).expect("marker");
+        let daemon = Shepherd::ready();
+
+        let outcome = promote(
+            &daemon,
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("promotes");
+
+        assert_eq!(
+            outcome,
+            Outcome::Deployed {
+                sha: second.clone()
+            }
+        );
+        assert!(!marker.exists(), "no build ran");
+        assert_eq!(daemon.reload_count(), 1);
+        assert_eq!(
+            swap::resolve(&fixture.tree.current()).expect("reads"),
+            Some(fixture.tree.release(&second))
+        );
+        assert_eq!(fixture.state.deployed.as_deref(), Some(second.as_str()));
+        assert_eq!(fixture.state.staged, None);
+        let written = State::read(&fixture.tree.state_file()).expect("deploy.toml");
+        assert_eq!(written.deployed.as_deref(), Some(second.as_str()));
+        assert_eq!(written.staged, None);
+        assert_eq!(written.failed, None);
+    }
+
+    /// fails if a promote with nothing staged builds, swaps or reloads
+    /// anything, or changes the record. The branch has a newer head, so
+    /// deploying "the head" instead of refusing is the symptom.
+    #[tokio::test]
+    async fn promote_with_nothing_staged_is_refused_and_touches_nothing() {
+        let mut fixture = fixture_with_previous_release();
+        let previous = fixture.state.deployed.clone().expect("a previous release");
+        let before = std::fs::read_to_string(fixture.tree.state_file()).expect("deploy.toml");
+        commit_on_origin(&fixture, "second.txt");
+        let daemon = Shepherd::ready();
+
+        let err = promote(
+            &daemon,
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect_err("refuses");
+
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+        let shown = err.to_string();
+        assert!(shown.contains("--stage"), "{shown}");
+        assert_eq!(daemon.reload_count(), 0);
+        assert_eq!(
+            swap::resolve(&fixture.tree.current()).expect("reads"),
+            Some(fixture.tree.release(&previous))
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.tree.state_file()).expect("deploy.toml"),
+            before
+        );
+    }
+
+    /// fails if a promote lands the branch's newest head rather than the sha
+    /// that was staged. The operator approved what was built, and the
+    /// branch moving since is a reason to stage again, not to deploy
+    /// something nobody built.
+    #[tokio::test]
+    async fn promote_after_the_branch_moved_still_deploys_the_staged_sha() {
+        let mut fixture = fixture_with_previous_release();
+        let second = stage_a_build(&mut fixture, "true").await;
+        let third = commit_on_origin(&fixture, "third.txt");
+        let remote = fixture.state.remote.clone();
+        git::fetch(&fixture.tree.git(), &remote, fixtures::TEST_BUDGET).expect("fetch");
+        assert_eq!(
+            git::remote_head(&fixture.tree.git(), "main").expect("head"),
+            third,
+            "the branch has moved on"
+        );
+
+        let outcome = promote(
+            &Shepherd::ready(),
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("promotes");
+
+        assert_eq!(
+            outcome,
+            Outcome::Deployed {
+                sha: second.clone()
+            }
+        );
+        assert_eq!(fixture.state.deployed.as_deref(), Some(second.as_str()));
+        assert!(
+            !fixture.tree.release(&third).exists(),
+            "the head was not built"
+        );
+    }
+
+    /// fails if a promote swaps to a release that retention or a hand has
+    /// removed, or one whose completion marker is gone, or does not say how
+    /// to get a release back. Either would point `current` at a directory
+    /// that is missing or half there.
+    #[tokio::test]
+    async fn promote_with_the_staged_release_gone_names_stage() {
+        let mut fixture = fixture_with_previous_release();
+        let previous = fixture.state.deployed.clone().expect("a previous release");
+        let second = stage_a_build(&mut fixture, "true").await;
+        let daemon = Shepherd::ready();
+
+        fs::remove_file(fixture.tree.completion(&second)).expect("marker");
+        let err = promote(
+            &daemon,
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect_err("no marker");
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+        assert!(err.to_string().contains("--stage"), "{err}");
+
+        fs::remove_dir_all(fixture.tree.release(&second)).expect("release");
+        let err = promote(
+            &daemon,
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect_err("no release");
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+        assert!(err.to_string().contains("--stage"), "{err}");
+
+        assert_eq!(daemon.reload_count(), 0);
+        assert_eq!(
+            swap::resolve(&fixture.tree.current()).expect("reads"),
+            Some(fixture.tree.release(&previous))
+        );
+        assert_eq!(fixture.state.staged.as_deref(), Some(second.as_str()));
+    }
+
+    /// fails if a promote that does not come up leaves the new release live,
+    /// or forgets what was staged. Keeping `staged` is what lets the operator
+    /// promote again once the cause is fixed, without paying for the build.
+    #[tokio::test(start_paused = true)]
+    async fn a_promote_that_does_not_come_up_is_rolled_back_and_stays_staged() {
+        let mut fixture = fixture_with_previous_release();
+        let previous = fixture.state.deployed.clone().expect("a previous release");
+        // No build command: the paused clock would time a real one out.
+        let second = commit_on_origin(&fixture, "second.txt");
+        stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
+            .await
+            .expect("stages");
+
+        let outcome = promote(
+            &Shepherd::never_ready(),
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("completes");
+
+        assert!(matches!(outcome, Outcome::RolledBack { .. }), "{outcome:?}");
+        assert_eq!(
+            swap::resolve(&fixture.tree.current()).expect("reads"),
+            Some(fixture.tree.release(&previous))
+        );
+        assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
+        assert_eq!(fixture.state.staged.as_deref(), Some(second.as_str()));
+        let written = State::read(&fixture.tree.state_file()).expect("deploy.toml");
+        assert_eq!(written.deployed.as_deref(), Some(previous.as_str()));
+        assert_eq!(written.staged.as_deref(), Some(second.as_str()));
+        assert!(
+            fixture.tree.release(&second).exists(),
+            "retention spares what is staged"
+        );
     }
 
     /// fails if a stage swaps, or fails to leave a built release and a

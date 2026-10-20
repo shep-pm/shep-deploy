@@ -31,7 +31,7 @@ use crate::{lock, retention, shared};
 /// decided and true - what a lost write costs is one more attempt at the
 /// same sha - and the prune failure has always been reported this way; see
 /// [`crate::retention`]'s own doc.
-pub(super) async fn record(
+pub(crate) async fn record(
     tree: &Tree,
     state: &mut State,
     head: &str,

@@ -54,6 +54,7 @@
 //! symlink was not left by this dog, and is refused with the path to move
 //! aside.
 
+mod landing;
 mod prepare;
 mod record;
 mod reload;
@@ -69,14 +70,16 @@ use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::paths::Tree;
 use crate::state::State;
-use crate::{git, hook, linkcheck, lock, shared, skip, swap};
+use crate::{git, linkcheck, lock, shared, skip, swap};
 
-pub(crate) use prepare::{head_of, refuse_ungated_at_setup, refuse_ungated_verification};
-use record::{record, record_landing};
-use reload::{Landed, land, named};
-use rollback::{roll_back, undo_swap};
+use record::record_landing;
 
-pub(crate) use prepare::{Staged, stage_release};
+pub(crate) use landing::{run_release_hook, swap_and_land};
+pub(crate) use prepare::{
+    Staged, head_of, read_staged, refuse_ungated_at_setup, refuse_ungated_verification,
+    stage_release,
+};
+pub(crate) use record::record;
 pub use record::set_watch;
 
 /// What one deploy did.
@@ -320,7 +323,8 @@ async fn go<D: Daemon>(
 }
 
 /// Everything from the release directory to the verdict, for one sha that
-/// is going to be attempted.
+/// is going to be attempted: the checkout and the build, then
+/// [`swap_and_land`].
 ///
 /// Split out of [`go`] so that recording what the attempt came to has one
 /// place to happen rather than five. See [`deploy`] for what each ending
@@ -335,22 +339,17 @@ async fn attempt<D: Daemon>(
 ) -> Result<Outcome, Error> {
     let sheep = tree.sheep();
     let release = tree.release(head);
-    let Staged {
-        app,
-        spec,
-        hooks,
-        linked,
-    } = {
+    let staged = {
         let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
         shared::off_thread(move || stage_release(&tree, &checkout, &head)).await?
     };
-    refuse_ungated_verification(sheep, &app, state.verify)?;
-    let snapshot = linkcheck::Snapshot::before(sheep, &release, &linked);
+    refuse_ungated_verification(sheep, &staged.app, state.verify)?;
+    let snapshot = linkcheck::Snapshot::before(sheep, &release, &staged.linked);
     let built = build::run(
         sheep,
         &release,
-        &spec,
-        app.user.as_deref(),
+        &staged.spec,
+        staged.app.user.as_deref(),
         &config.passthrough,
         &tree.cache_target(),
         config.build_timeout,
@@ -362,146 +361,9 @@ async fn attempt<D: Daemon>(
         eprintln!("{warning}");
     }
     built?;
-    // After the build and before `previous` is read, so the `Raced` check
-    // below covers the hook's run time as well as the build's.
-    hook::run(
-        &hooks.release,
-        &hook::Context {
-            sheep,
-            sha: head,
-            release: &release,
-            as_user: app.user.as_deref(),
-            passthrough: &config.passthrough,
-            budget: config.build_timeout,
-            cache: &tree.cache_target(),
-            built: spec.command.is_some(),
-        },
-    )
-    .await?;
+    run_release_hook(tree, head, &staged, config).await?;
 
-    // Nothing above here has touched the running app. Everything below has.
-    //
-    // Both sides of this comparison are `read_link` of the same file by the
-    // same process, so they are the same spelling of any path that has not
-    // changed - unlike `roll_back`'s check, which sees text from two
-    // sources and compares shas for that reason.
-    let previous = swap::resolve(&tree.current())?;
-    if previous != started_at {
-        return Err(Error::Raced {
-            sheep: sheep.to_owned(),
-            started: named(started_at.as_deref()),
-            found: named(previous.as_deref()),
-        });
-    }
-    swap::point_at(&tree.current(), &release)?;
-
-    // THE BOUNDARY. Every step from here that can fail and might need
-    // undoing lives inside `land`, so that this one `match` is the only
-    // place that decides what to undo. The boundary used to sit around a
-    // reload-and-verify call with the generation capture outside it, and
-    // that one line outside was enough to leave `current` on a release
-    // nothing had verified: see [`land`].
-    match land(daemon, sheep, &app, state.verify).await {
-        // The record write below is the one fallible thing past the swap
-        // that `land` does not own, and it is deliberate rather than a
-        // leak. It runs only after a verify has SUCCEEDED, so the new
-        // release is up and serving: there is nothing to undo, and undoing
-        // it would take a healthy release out of service. Its failure is
-        // printed and the outcome stays `Deployed`, because that is what
-        // happened. Returning the failure instead had `record` write the
-        // sha into `failed` next to the same sha in `deployed`: a record
-        // that said the release was serving and held at once.
-        Landed::Verified => {
-            // After the record write, so the record names the new sha even
-            // when the hook fails, and only when it does: a hook that reads
-            // `deploy.toml` would otherwise see the previous sha. Like the
-            // write, the hook cannot change the outcome: the release is live
-            // and verified, and undoing it would take a healthy release out
-            // of service.
-            match record_landing(tree, state, head) {
-                Ok(()) => {
-                    if let Err(err) = hook::run_after(
-                        &hooks.after,
-                        &hook::Context {
-                            sheep,
-                            sha: head,
-                            release: &release,
-                            as_user: app.user.as_deref(),
-                            passthrough: &config.passthrough,
-                            budget: config.build_timeout,
-                            cache: &tree.cache_target(),
-                            built: spec.command.is_some(),
-                        },
-                    )
-                    .await
-                    {
-                        eprintln!(
-                            "shep-deploy: {sheep}: deployed {head}, but the after hook failed: \
-                             {err}"
-                        );
-                    }
-                }
-                Err(err) => {
-                    eprintln!(
-                        "shep-deploy: {sheep}: deployed {head}, but could not record it: {err}"
-                    );
-                    if hooks.after.command.is_some() {
-                        eprintln!(
-                            "shep-deploy: {sheep}: the after hook was skipped, because the record \
-                             does not name {head}"
-                        );
-                    }
-                }
-            }
-            Ok(Outcome::Deployed {
-                sha: head.to_owned(),
-            })
-        }
-        // Nothing was ever started on the new release, so there is nothing
-        // to reload onto the old one - only a symlink to put back.
-        Landed::NotStarted(source) => {
-            undo_swap(tree, state, previous.as_deref(), head, &source)?;
-            Err(source)
-        }
-        Landed::NotVerified { why, patience } => {
-            let to = roll_back(
-                daemon,
-                tree,
-                state,
-                &app,
-                previous.as_deref(),
-                head,
-                &why,
-                patience,
-            )
-            .await?;
-            Ok(Outcome::RolledBack { to, why })
-        }
-        // The same rollback as above, not a lesser one. This error arrived
-        // after a reload the shepherd accepted, so the new release may be
-        // running: shep spawns the replacement, waits for it, and drains
-        // the old instance, and only then did a `describe` fail. Moving a
-        // symlink does not move a running process, so a swap without a
-        // reload would leave the daemon on the new code while `current`
-        // and `deploy.toml` both name the old one.
-        Landed::Failed { source, patience } => {
-            let to = roll_back(
-                daemon,
-                tree,
-                state,
-                &app,
-                previous.as_deref(),
-                head,
-                &source.to_string(),
-                patience,
-            )
-            .await?;
-            Err(Error::RolledBack {
-                to,
-                source: Box::new(source),
-            })
-        }
-    }
+    swap_and_land(daemon, tree, state, head, started_at, &staged, config).await
 }
 
 #[cfg(test)]
@@ -546,6 +408,65 @@ mod tests {
             Some(fixture.tree.release(&previous))
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
+    }
+
+    /// fails if a deploy stops running its steps in the order build, release
+    /// hook, swap and reload, record, after hook. The two halves of `attempt`
+    /// are joined by a call, and this pins that the join drops no step and
+    /// reorders none: each step appends its name to one file in the release,
+    /// and the after hook also copies the record it found.
+    ///
+    /// Not paused, for the reason on `a_current_that_moved_during_the_build_is_not_swapped_over`.
+    #[tokio::test]
+    async fn attempt_behaves_as_before_after_the_split() {
+        let mut fixture = fixture_with_previous_release();
+        fs::write(
+            fixture.origin.path().join("Flockfile.toml"),
+            format!("{FLOCKFILE}\n[dog.deploy.build]\ncommand = 'echo build >> order.txt'\n"),
+        )
+        .expect("write Flockfile");
+        fs::write(
+            fixture.origin.path().join(".gitignore"),
+            format!("{}\n", crate::flockfile::OVERRIDE),
+        )
+        .expect("write .gitignore");
+        fs::write(
+            fixture.origin.path().join(crate::flockfile::OVERRIDE),
+            "[dog.deploy.release]\ncommand = 'echo release >> order.txt'\n\
+             [dog.deploy.after]\ncommand = 'echo after >> order.txt'\n",
+        )
+        .expect("write override");
+        let second = commit_on_origin(&fixture, "second.txt");
+        let daemon = Shepherd::ready();
+
+        let outcome = deploy(
+            &daemon,
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("completes");
+
+        assert_eq!(
+            outcome,
+            Outcome::Deployed {
+                sha: second.clone()
+            }
+        );
+        let release = fixture.tree.release(&second);
+        assert_eq!(
+            fs::read_to_string(release.join("order.txt")).expect("the steps ran"),
+            "build\nrelease\nafter\n"
+        );
+        assert_eq!(daemon.reload_count(), 1);
+        assert_eq!(
+            swap::resolve(&fixture.tree.current()).unwrap(),
+            Some(release)
+        );
+        let written = State::read(&fixture.tree.state_file()).expect("deploy.toml");
+        assert_eq!(written.deployed.as_deref(), Some(second.as_str()));
+        assert_eq!(written.failed, None);
     }
 
     /// fails if an unchanged remote head still does the work. Polling must

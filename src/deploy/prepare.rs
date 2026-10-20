@@ -47,15 +47,44 @@ pub(crate) fn stage_release(tree: &Tree, checkout: &Path, sha: &str) -> Result<S
     let shared_paths = shared::to_link(checkout)?;
     shared::link_into(&release, checkout, &shared_paths)?;
 
-    let flockfiles = flockfile::read(&release, &shared_paths)?;
+    let staged = read_release(tree, &release, shared_paths)?;
+    // Printed here rather than returned, as `build::root_warning` is: nothing
+    // is refused, and `deploy` and `setup` both come through this function.
+    for warning in linkcheck::warnings(tree.sheep(), &staged.linked, &staged.spec.artifacts) {
+        eprintln!("{warning}");
+    }
+    Ok(staged)
+}
+
+/// What [`stage_release`] reads, for a release it staged earlier: the
+/// operator's shared files are linked in again and both Flockfiles are read
+/// again, with no checkout and no cache link.
+///
+/// The link step is what keeps the override's proof honest. A build runs in
+/// the release as `user` and can replace any file there, and
+/// [`flockfile::read`] follows the override only when the checkout says it
+/// is the operator's, so a regular file left at that path since the stage is
+/// refused by [`shared::link_into`] here rather than read as the operator's.
+///
+/// # Errors
+/// As [`stage_release`], less the checkout and the cache link.
+pub(crate) fn read_staged(tree: &Tree, checkout: &Path, sha: &str) -> Result<Staged, Error> {
+    let release = tree.release(sha);
+    let shared_paths = shared::to_link(checkout)?;
+    shared::link_into(&release, checkout, &shared_paths)?;
+    read_release(tree, &release, shared_paths)
+}
+
+/// The Flockfiles of a release whose files are already linked in.
+fn read_release(
+    tree: &Tree,
+    release: &Path,
+    shared_paths: shared::FromCheckout,
+) -> Result<Staged, Error> {
+    let flockfiles = flockfile::read(release, &shared_paths)?;
     let app = flockfiles.app_config(tree.sheep())?;
     let spec = flockfiles.build_spec()?;
     let hooks = flockfiles.hooks()?;
-    // Printed here rather than returned, as `build::root_warning` is: nothing
-    // is refused, and `deploy` and `setup` both come through this function.
-    for warning in linkcheck::warnings(tree.sheep(), &shared_paths, &spec.artifacts) {
-        eprintln!("{warning}");
-    }
     Ok(Staged {
         app,
         spec,
