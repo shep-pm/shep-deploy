@@ -438,10 +438,9 @@ mod tests {
     }
 
     /// fails if the branch stops coming from the operator's own checkout.
-    /// That was the best idea in this design: `git checkout stable`
-    /// retargets the deploy and nobody learns a new config key. A --branch
-    /// flag would give one fact two sources of truth, which is why there
-    /// is not one.
+    /// It is read there once, at setup, so `git checkout stable` before
+    /// `setup` picks the branch and nobody learns a new config key. After
+    /// that `--branch` changes it, and the checkout is not read again.
     #[tokio::test]
     async fn the_branch_comes_from_the_checkouts_own_head() {
         let home = tempfile::tempdir().expect("tempdir");

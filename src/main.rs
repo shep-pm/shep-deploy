@@ -29,12 +29,13 @@
 //! ```text
 //! shep-deploy deploy <sheep>
 //! shep-deploy deploy <sheep> --watch auto|manual
+//! shep-deploy deploy <sheep> --branch <name>
 //! shep-deploy setup <sheep>
 //! shep-deploy survey
 //! ```
 //!
 //! `--watch` changes one setting and returns without deploying. See
-//! [`deploy::set_watch`]. `survey` reports where every registered sheep
+//! [`deploy::set_watch`]; so does `--branch`, see [`retarget::set_branch`]. `survey` reports where every registered sheep
 //! stands and touches nothing; see [`survey::survey`]. `setup` takes a
 //! sheep over: it builds the deploy tree and its first release, then
 //! re-registers the sheep against `current` and removes the instances it
@@ -72,6 +73,7 @@ mod ownership;
 mod paths;
 mod poll;
 mod restore;
+mod retarget;
 mod retention;
 mod roll;
 mod route;
@@ -178,6 +180,9 @@ async fn run(args: &[&str]) -> ExitCode {
             Err(err) => Err(err),
         },
         Route::Watch { sheep, mode } => set_watch(sheep, mode),
+        Route::Branch { sheep, name } => {
+            shep_home().and_then(|home| retarget::branch_once(&Tree::for_sheep(&home, sheep), name))
+        }
         Route::Usage => return usage(),
     };
 
