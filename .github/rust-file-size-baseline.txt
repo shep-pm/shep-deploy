@@ -10,5 +10,4 @@
 1473 src/poll.rs
 1450 src/restore.rs
 1378 src/flockfile.rs
-1349 src/verify.rs
 1212 tests/integration.rs
