@@ -524,21 +524,14 @@ mod tests {
         .await
         .expect_err("describe fails");
 
-        // The deploy still failed, so this is still an error - but it
-        // names the rollback, and the shepherd's own complaint is still
-        // reachable underneath it.
-        assert!(matches!(err, Error::RolledBack { .. }), "{err:?}");
-        assert!(
-            err.to_string().contains("the shepherd stopped answering"),
-            "{err}"
-        );
-        assert!(
-            matches!(
-                err.source().and_then(|s| s.downcast_ref()),
-                Some(Error::Protocol(_))
-            ),
-            "{err:?}"
-        );
+        // The shepherd is still not answering when the rollback's own
+        // generation is captured, so the rollback was sent and could not
+        // be confirmed. Both halves of the story are in the message.
+        let Error::RollbackUnverified { why, found, .. } = &err else {
+            panic!("a rollback nothing could confirm is unverified: {err:?}");
+        };
+        assert!(why.contains("the shepherd stopped answering"), "{why}");
+        assert!(found.contains("the shepherd stopped answering"), "{found}");
         assert_eq!(
             daemon.reload_count(),
             2,

@@ -85,7 +85,9 @@ rather than ignored and silently building nothing.
 4. Run the build, as the app's `user` if it sets one.
 5. `rename(2)` `current` onto the new release.
 6. `Reload` the sheep.
-7. Verify. On failure, put `current` back and reload again.
+7. Verify. On failure, put `current` back, reload again, and verify that the
+   old release came up. A rollback that does not come up is an error, not a
+   rollback.
 
 Steps 1 to 4 never touch the running app. A build that fails costs a
 directory, not an outage.
@@ -368,6 +370,12 @@ direction to fail, but it wants a wider budget.
 Rollback works for a release that crashes and for one that starts without
 serving. Both are caught.
 
+The rollback is verified the same way. The shepherd accepting its reload is not
+enough: a previous release whose binary is gone is dropped from the flock after
+the reload is accepted. A rollback is reported as one only once the old release
+is seen to come up; otherwise nothing is known to be serving, and the error
+says so and points at `shep flock` and `shep describe <sheep>`.
+
 ## Removing it
 
 `shep-deploy on-remove` is the lifecycle hook: shep runs it before forgetting
@@ -387,12 +395,14 @@ Follows [shep's own
 taxonomy](https://github.com/shep-pm/shep/blob/main/docs/specs/shep-v1.md):
 `0` deployed or already up to date, `2` bad arguments, `4` bad configuration,
 `5` no daemon answered or one refused this dog's handshake, `1` anything else.
+`1` includes a rollback that did not come up: the previous release was put back
+on disk, and nothing is known to be serving.
 
 Two are this dog's own:
 
 | code | means | the flock is |
 |---|---|---|
-| `12` | the deploy was rejected and the previous release was put back | healthy, on the old release |
+| `12` | the deploy was rejected, the previous release was put back and came up | healthy, on the old release |
 | `13` | a first cutover landed and then could not tidy up | healthy, on the new release |
 
 A script that treats any nonzero code as "the deploy broke" will be wrong about

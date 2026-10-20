@@ -1325,17 +1325,20 @@ mod tests {
     /// A [`Daemon`] whose `set_smit` always answers an [`RpcError`], and
     /// which otherwise deploys cleanly - the shepherd refusing a smit is
     /// not the same thing as a shepherd that cannot be reached.
-    struct RefusingSmits;
+    struct RefusingSmits {
+        reloads: Cell<u32>,
+    }
 
     impl Daemon for RefusingSmits {
         async fn describe(&self, sheep: &str) -> Result<Vec<ProcessInfo>, Error> {
             Ok(vec![
                 ProcessInfo::builder(0, sheep, ProcStatus::Online)
-                    .pid(Some(FIRST_PID))
+                    .pid(Some(FIRST_PID + self.reloads.get() * 100))
                     .build(),
             ])
         }
         async fn reload(&self, _sheep: &str) -> Result<(), Error> {
+            self.reloads.set(self.reloads.get() + 1);
             Ok(())
         }
         async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), Error> {
@@ -1417,9 +1420,15 @@ mod tests {
         // with the smit refusal this test exists to pin - see every other
         // `write_target_ready` caller in this file for the pattern.
         let _origin = write_target_ready(home.path(), "fine", Watch::Auto);
-        let results = tick(&RefusingSmits, home.path(), &fixtures::dog_config())
-            .await
-            .results;
+        let results = tick(
+            &RefusingSmits {
+                reloads: Cell::new(0),
+            },
+            home.path(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .results;
         let row = |name: &str| {
             results
                 .iter()

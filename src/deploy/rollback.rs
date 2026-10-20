@@ -4,6 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use tokio::time::Instant;
+
+use shep_client::shep_core::config::AppConfig;
+
 use crate::daemon::Daemon;
 use crate::deploy::record::write_record;
 use crate::deploy::reload::{reload_until, sha_of};
@@ -11,6 +15,8 @@ use crate::error::Error;
 use crate::paths::Tree;
 use crate::state::State;
 use crate::swap;
+use crate::verify::{self, Generation};
+use crate::window::dwell_for;
 
 /// Puts `current` back after a deploy that never started anything.
 ///
@@ -80,10 +86,12 @@ pub(super) fn undo_swap(
 /// between the failure that made a rollback necessary and the failure of
 /// the rollback itself. Both are what an operator needs.
 ///
-/// [`Error::Split`] is the exception and passes through untouched. It
-/// already carries `why`, and wrapping it produced a message that ended by
-/// telling an operator to go and compare the three things its inner half
-/// had just finished telling them.
+/// [`Error::Split`] and [`Error::RollbackUnverified`] are the exceptions and
+/// pass through untouched. Each already carries `why`, and wrapping `Split`
+/// produced a message that ended by telling an operator to go and compare the
+/// three things its inner half had just finished telling them. The second is
+/// not a rollback that failed: the swap, the record and the reload all
+/// worked, and what is missing is proof the release came up.
 ///
 /// "Nothing to roll back to" is not wrapped that way, because no rollback
 /// was attempted: there was nothing to attempt one against.
@@ -108,12 +116,15 @@ pub(super) fn undo_swap(
 /// [`Error::Unverified`] if [`rollback_target`] finds nothing to roll back
 /// to: neither `current` nor `deploy.toml` names an earlier release that is
 /// still on disk.
-/// [`Error::Split`], unwrapped, if that is what [`restore`] returned.
+/// [`Error::Split`] or [`Error::RollbackUnverified`], unwrapped, if that is
+/// what [`restore`] returned.
 /// [`Error::RollbackFailed`] wrapping anything else it returned.
+#[expect(clippy::too_many_arguments, reason = "one rollback, one call site")]
 pub(super) async fn roll_back<D: Daemon>(
     daemon: &D,
     tree: &Tree,
     state: &mut State,
+    app: &AppConfig,
     previous: Option<&Path>,
     attempted: &str,
     why: &str,
@@ -128,19 +139,21 @@ pub(super) async fn roll_back<D: Daemon>(
     };
 
     let to = sha_of(&previous);
-    restore(daemon, tree, state, &previous, attempted, why, patience)
-        .await
-        // `Split` already carries `why`, and says more about the machine
-        // than the wrapper's own tail could - wrapping it produced a
-        // message that ended by telling an operator to go and check the
-        // three things the inner half had just told them.
-        .map_err(|source| match source {
-            split @ Error::Split { .. } => split,
-            source => Error::RollbackFailed {
-                why: why.to_owned(),
-                source: Box::new(source),
-            },
-        })?;
+    restore(
+        daemon, tree, state, app, &previous, attempted, why, patience,
+    )
+    .await
+    // `Split` already carries `why`, and says more about the machine
+    // than the wrapper's own tail could - wrapping it produced a
+    // message that ended by telling an operator to go and check the
+    // three things the inner half had just told them.
+    .map_err(|source| match source {
+        passed @ (Error::Split { .. } | Error::RollbackUnverified { .. }) => passed,
+        source => Error::RollbackFailed {
+            why: why.to_owned(),
+            source: Box::new(source),
+        },
+    })?;
 
     Ok(to)
 }
@@ -206,6 +219,15 @@ fn rollback_target(
 /// also leaves the record naming a release the next poll will see as behind
 /// the branch head, so an unattended target retries rather than settling.
 ///
+/// The reload is then checked like a deploy's own, by `state.verify` against
+/// the flock as it was just before the reload, with a fresh `patience` and the
+/// dwell `app` asks for. The reload being accepted says the shepherd began a
+/// swap and nothing about the release coming up: one whose binary cannot be
+/// spawned is dropped from the flock after the acceptance. The generation is
+/// captured without `?`, since a capture that fails is no reason to skip the
+/// reload; it leaves nothing to verify against, and is reported as unverified
+/// once the reload is sent.
+///
 /// The reload is not best-effort: a swap back that is never reloaded leaves
 /// the old code on disk and the new, unhealthy instance still running, and
 /// an operator told the rollback succeeded. Moving a symlink does not move
@@ -227,10 +249,14 @@ fn rollback_target(
 /// operator is told. The reload's own error, unchanged and unwrapped, if it
 /// was one that never could have cleared: a `NotFound` is that failure and
 /// not a split, since there is no sheep for a process to be running.
+/// [`Error::RollbackUnverified`] if the reload was accepted and the release
+/// was not seen to come up, or the generation before it could not be taken.
+#[expect(clippy::too_many_arguments, reason = "one rollback, one call site")]
 async fn restore<D: Daemon>(
     daemon: &D,
     tree: &Tree,
     state: &mut State,
+    app: &AppConfig,
     previous: &Path,
     attempted: &str,
     why: &str,
@@ -246,21 +272,51 @@ async fn restore<D: Daemon>(
         write_record(tree, state)?;
     }
 
+    let before = Generation::of(daemon, sheep).await;
+
     match reload_until(daemon, sheep, patience).await {
-        Ok(()) => Ok(()),
+        Ok(()) => {}
         // A failure that could have cleared and did not is the split state:
         // the reload may yet be pending, so the process may be on either
         // release. A failure that could never clear is not - it is just
         // that failure, and dressing it as a split would claim a running
         // process that a `NotFound` says is not there.
-        Err(source) if source.is_retryable() => Err(Error::Split {
-            sheep: sheep.to_owned(),
-            on: to,
-            running: attempted.to_owned(),
-            why: why.to_owned(),
-            source: Box::new(source),
-        }),
-        Err(source) => Err(source),
+        Err(source) if source.is_retryable() => {
+            return Err(Error::Split {
+                sheep: sheep.to_owned(),
+                on: to,
+                running: attempted.to_owned(),
+                why: why.to_owned(),
+                source: Box::new(source),
+            });
+        }
+        Err(source) => return Err(source),
+    }
+    let reloaded_at = Instant::now();
+
+    let unverified = |found: String| Error::RollbackUnverified {
+        sheep: sheep.to_owned(),
+        to: to.clone(),
+        why: why.to_owned(),
+        found,
+    };
+    let before = before.map_err(|source| unverified(source.to_string()))?;
+    match verify::wait(
+        daemon,
+        sheep,
+        state.verify,
+        &before,
+        patience,
+        dwell_for(app),
+    )
+    .await
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(unverified(format!(
+            "it did not come up and stay up, {}s after the rollback's reload",
+            reloaded_at.elapsed().as_secs()
+        ))),
+        Err(source) => Err(unverified(source.to_string())),
     }
 }
 
@@ -762,6 +818,132 @@ mod tests {
                 .as_deref(),
             Some(live.as_str())
         );
+    }
+
+    /// fails if a rollback onto a release that spawns and never becomes
+    /// ready is reported as a rollback. Exit 12 promises a healthy flock on
+    /// the old release, and the reload being accepted says nothing of the
+    /// sort. `current` and the record still name the old release: the
+    /// filesystem is right, and what is running is not known.
+    #[tokio::test(start_paused = true)]
+    async fn a_rollback_onto_a_release_that_never_comes_up_is_reported_unverified() {
+        let mut fixture = fixture_with_previous_release();
+        let previous = fixture.state.deployed.clone().expect("a previous release");
+        commit_on_origin(&fixture, "second.txt");
+        let daemon = Shepherd::rollback_never_ready();
+
+        let err = deploy(
+            &daemon,
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect_err("neither release comes up");
+
+        let Error::RollbackUnverified {
+            sheep,
+            to,
+            why,
+            found,
+        } = &err
+        else {
+            panic!("expected an unverified rollback: {err:?}");
+        };
+        assert_eq!(sheep, "web");
+        assert_eq!(to, &previous);
+        assert!(why.contains("did not come up and stay up"), "{why}");
+        assert!(found.contains("did not come up and stay up"), "{found}");
+        assert_eq!(daemon.reload_count(), 2);
+        assert_eq!(
+            swap::resolve(&fixture.tree.current()).unwrap(),
+            Some(fixture.tree.release(&previous))
+        );
+        assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
+        assert_eq!(
+            State::read(&fixture.tree.state_file())
+                .expect("deploy.toml")
+                .deployed
+                .as_deref(),
+            Some(previous.as_str())
+        );
+    }
+
+    /// fails if a sheep the shepherd dropped is reported as rolled back.
+    /// This is what shep does when it cannot spawn the release it was asked
+    /// to go back to: the reload is accepted, and `shep flock` then has no
+    /// row for the sheep. It is not a swap or a record write that failed,
+    /// so it is not `RollbackFailed`, and the shepherd's own words are what
+    /// an operator needs.
+    #[tokio::test(start_paused = true)]
+    async fn a_rollback_onto_a_sheep_the_shepherd_dropped_is_reported_unverified() {
+        let mut fixture = fixture_with_previous_release();
+        commit_on_origin(&fixture, "second.txt");
+
+        let err = deploy(
+            &Shepherd::rollback_drops_the_sheep(),
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect_err("the sheep is gone");
+
+        assert!(!matches!(err, Error::RollbackFailed { .. }), "{err:?}");
+        let Error::RollbackUnverified { found, .. } = &err else {
+            panic!("expected an unverified rollback: {err:?}");
+        };
+        assert!(found.contains("no sheep named web"), "{found}");
+    }
+
+    /// fails if a rollback that does come up stops being reported as one.
+    /// The check added to `restore` must not turn the ordinary, healthy
+    /// rollback into an error: exit 12 still means a verified rollback.
+    #[tokio::test(start_paused = true)]
+    async fn a_rollback_that_comes_up_is_still_reported_rolled_back() {
+        let mut fixture = fixture_with_previous_release();
+        let previous = fixture.state.deployed.clone().expect("a previous release");
+        commit_on_origin(&fixture, "second.txt");
+        let daemon = Shepherd::never_ready();
+
+        let outcome = deploy(
+            &daemon,
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("a healthy rollback is an outcome");
+
+        assert!(
+            matches!(&outcome, Outcome::RolledBack { to, .. } if *to == previous),
+            "{outcome:?}"
+        );
+        assert_eq!(daemon.reload_count(), 2);
+    }
+
+    /// fails if `Alive` stops asking the rollback for a turnover. A probeless
+    /// app is judged by its pid changing and holding, and a shepherd that
+    /// keeps the old instance through both reloads has shown the rollback
+    /// nothing, so it is unverified rather than rolled back.
+    #[tokio::test(start_paused = true)]
+    async fn an_alive_rollback_that_never_turns_over_is_reported_unverified() {
+        let mut fixture = fixture_with_previous_release();
+        fixture.state.verify = crate::state::Verify::Alive;
+        commit_on_origin(&fixture, "second.txt");
+        let daemon = Shepherd::never_turns_over();
+
+        let err = deploy(
+            &daemon,
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect_err("the rollback never turns the flock over");
+
+        assert!(matches!(err, Error::RollbackUnverified { .. }), "{err:?}");
+        assert_eq!(daemon.reload_count(), 2);
     }
 
     /// fails if a rollback that cannot swap back reports only half of what

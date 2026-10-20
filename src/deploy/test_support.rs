@@ -154,6 +154,18 @@ pub(super) struct Shepherd {
     /// old instance serving, so the listing settles back to one
     /// `Online` entry under the pid that was already there.
     replaces: bool,
+    /// What the flock settles to after the SECOND reload, which is a
+    /// rollback's. `Online` by default, so a rollback comes up and the
+    /// tests of everything else keep their meaning.
+    rollback_settles_to: ProcStatus,
+    /// As [`Self::replaces`], for the rollback's reload. `true` by
+    /// default, because a rollback onto a release that runs is a new
+    /// process under a new pid.
+    rollback_replaces: bool,
+    /// From which reload count `describe` answers `NotFound`, standing in
+    /// for a shepherd that dropped the sheep from the flock because it
+    /// could not spawn it. `None` for never.
+    drops_the_sheep_from: Option<u32>,
     /// From which reload count `describe` starts failing outright, or
     /// `None` for never.
     ///
@@ -220,6 +232,9 @@ impl Shepherd {
         Self {
             settles_to: ProcStatus::Online,
             replaces: true,
+            rollback_settles_to: ProcStatus::Online,
+            rollback_replaces: true,
+            drops_the_sheep_from: None,
             describe_fails_from: None,
             plant: None,
             flip_watch: None,
@@ -252,6 +267,38 @@ impl Shepherd {
     pub(super) fn keeps_the_old_instance() -> Self {
         Self {
             replaces: false,
+            ..Self::ready()
+        }
+    }
+
+    /// As [`Self::never_ready`], and the rollback's replacement spawns and
+    /// never becomes ready either.
+    pub(super) fn rollback_never_ready() -> Self {
+        Self {
+            rollback_settles_to: ProcStatus::Starting,
+            ..Self::never_ready()
+        }
+    }
+
+    /// As [`Self::never_ready`], and once the rollback's reload has been
+    /// accepted the shepherd no longer knows the sheep: `describe`
+    /// answers `NotFound`. What shep does when the release it is asked to
+    /// go back to cannot be spawned - a binary that is a link to a deleted
+    /// file, say.
+    pub(super) fn rollback_drops_the_sheep() -> Self {
+        Self {
+            drops_the_sheep_from: Some(2),
+            ..Self::never_ready()
+        }
+    }
+
+    /// A shepherd whose reloads never turn the flock over: both the
+    /// deploy's and the rollback's leave the old instance, under its old
+    /// pid.
+    pub(super) fn never_turns_over() -> Self {
+        Self {
+            replaces: false,
+            rollback_replaces: false,
             ..Self::ready()
         }
     }
@@ -387,6 +434,14 @@ impl Shepherd {
     /// The pid of instance `index`: a fresh generation per landed
     /// reload, unless this shepherd keeps the old instance.
     fn pid(&self, index: u32) -> u32 {
+        if self.rolling_back() {
+            if !self.rollback_replaces {
+                return FIRST_PID + index;
+            }
+            // Past every pid the deploy's own reload can have shown, and
+            // steady: a rollback that comes up stays up.
+            return FIRST_PID + 1_000_000 + index;
+        }
         if !self.replaces {
             return FIRST_PID + index;
         }
@@ -398,12 +453,19 @@ impl Shepherd {
         FIRST_PID + (self.landed() + churn) * 100 + index
     }
 
+    /// Whether the rollback's reload, the second, has landed.
+    fn rolling_back(&self) -> bool {
+        self.reloads.get() >= 2 && self.landed() > 0
+    }
+
     /// The status currently serving: whatever this shepherd settles to
     /// once a reload has landed, and `Online` before that, since the
     /// process that was already there is up.
     fn status(&self) -> ProcStatus {
         if self.landed() == 0 {
             ProcStatus::Online
+        } else if self.rolling_back() {
+            self.rollback_settles_to
         } else {
             self.settles_to
         }
@@ -428,6 +490,16 @@ impl Daemon for Shepherd {
             .is_some_and(|from| self.reloads.get() >= from)
         {
             return Err(Error::Protocol("the shepherd stopped answering".to_owned()));
+        }
+        if self
+            .drops_the_sheep_from
+            .is_some_and(|from| self.reloads.get() >= from)
+        {
+            return Err(Error::Request(RequestError::Rpc(RpcError {
+                code: RpcErrorCode::NotFound,
+                message: format!("no sheep named {sheep}"),
+                daemon_version: None,
+            })));
         }
         Ok((0..self.instances)
             .map(|index| {
