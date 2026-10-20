@@ -9,7 +9,7 @@
 
 use crate::build;
 use crate::config::DogConfig;
-use crate::deploy::{self, head_of, refuse_ungated_verification, stage_release, write_record};
+use crate::deploy::{self, head_of, refuse_ungated_verification, stage_release};
 use crate::error::Error;
 use crate::paths::Tree;
 use crate::state::{State, Watch};
@@ -148,8 +148,45 @@ async fn build_and_record(
     }
     built?;
 
-    let before = state.staged.replace(head.to_owned());
-    write_record(tree, state).inspect_err(|_| state.staged = before)
+    record_staged(tree, state, head)
+}
+
+/// Writes `head` as `staged` into the record on disk, under the record lock,
+/// and makes `state` that record.
+///
+/// Built from the disk, not from `state`: the build took as long as it took,
+/// and `--branch`, `--watch` or a hand edit may have written the record
+/// since. Writing `state` whole put back a `failed` that `--branch` had just
+/// cleared, beside a `staged` from the branch the target no longer follows.
+///
+/// # Errors
+/// [`Error::Config`] if the target's branch is not the one `head` was built
+/// from: nothing is written, and `state` becomes the record as it is, so the
+/// operator's move stands and the next stage builds the new branch's head.
+/// [`Error::Io`] if the record lock cannot be taken, and whatever
+/// [`State::read`] and [`State::write`] return, in which case `state` is as
+/// it was.
+fn record_staged(tree: &Tree, state: &mut State, head: &str) -> Result<(), Error> {
+    let _record = lock::hold_record(tree)?;
+    let on_disk = State::read(&tree.state_file())?;
+    if on_disk.branch != state.branch {
+        let message = format!(
+            "{}: the branch changed from {} to {} while {head} was building, so it was not \
+             staged. Run the stage again for the new branch.",
+            tree.sheep(),
+            state.branch,
+            on_disk.branch
+        );
+        *state = on_disk;
+        return Err(Error::Config(message));
+    }
+    let next = State {
+        staged: Some(head.to_owned()),
+        ..on_disk
+    };
+    next.write(&tree.state_file())?;
+    *state = next;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -363,5 +400,54 @@ mod tests {
         );
         assert!(!fixture.tree.release(&second).exists(), "nothing was built");
         assert_eq!(fixture.state.staged.as_deref(), Some(second.as_str()));
+    }
+
+    /// fails if a stage's record write puts back what `--branch` changed
+    /// while it built. The stale copy still holds the old branch and the
+    /// `failed` that `--branch` clears; writing it whole recorded a `staged`
+    /// from the branch the target no longer follows.
+    #[test]
+    fn a_branch_set_while_a_stage_builds_is_not_overwritten() {
+        let mut fixture = fixture_with_previous_release();
+        fixture.state.failed = Some(fixtures::OTHER_SHA.to_owned());
+        fixture
+            .state
+            .write(&fixture.tree.state_file())
+            .expect("write deploy.toml");
+        let mut in_flight = fixture.state.clone();
+
+        crate::retarget::set_branch(&fixture.tree, "release").expect("--branch release");
+        let err = record_staged(&fixture.tree, &mut in_flight, fixtures::SHA)
+            .expect_err("the branch moved");
+
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+        let shown = err.to_string();
+        assert!(shown.contains("main to release"), "{shown}");
+        let written = State::read(&fixture.tree.state_file()).expect("deploy.toml");
+        assert_eq!(written.branch, "release");
+        assert_eq!(written.failed, None);
+        assert_eq!(written.staged, None);
+        assert_eq!(in_flight, written, "memory follows the disk");
+    }
+
+    /// fails if a stage records its own stale copy of `failed`. A hold put
+    /// on the record while the build ran is not the stage's to drop.
+    #[test]
+    fn a_stage_leaves_the_record_fields_it_does_not_own() {
+        let fixture = fixture_with_previous_release();
+        let mut in_flight = fixture.state.clone();
+        State {
+            failed: Some(fixtures::OTHER_SHA.to_owned()),
+            ..fixture.state.clone()
+        }
+        .write(&fixture.tree.state_file())
+        .expect("a hold written meanwhile");
+
+        record_staged(&fixture.tree, &mut in_flight, fixtures::SHA).expect("records");
+
+        let written = State::read(&fixture.tree.state_file()).expect("deploy.toml");
+        assert_eq!(written.staged.as_deref(), Some(fixtures::SHA));
+        assert_eq!(written.failed.as_deref(), Some(fixtures::OTHER_SHA));
+        assert_eq!(in_flight, written);
     }
 }

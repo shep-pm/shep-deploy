@@ -72,7 +72,6 @@ use crate::state::State;
 use crate::{git, hook, linkcheck, lock, shared, skip, swap};
 
 pub(crate) use prepare::{head_of, refuse_ungated_at_setup, refuse_ungated_verification};
-pub(crate) use record::write_record;
 use record::{record, record_landing};
 use reload::{Landed, land, named};
 use rollback::{roll_back, undo_swap};

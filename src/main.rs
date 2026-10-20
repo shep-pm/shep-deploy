@@ -751,4 +751,24 @@ mod tests {
         assert!(matches!(err, Error::Config(_)), "{err}");
         assert!(err.to_string().contains("--verify"), "{err}");
     }
+
+    /// fails if `--stage` stops routing in either spelling, or a trailing
+    /// word is read as a stage. It takes no value, so `--stage now` is not
+    /// one.
+    #[test]
+    fn stage_routes_in_both_spellings() {
+        assert_eq!(
+            route(&["deploy", "koji", "--stage"], false),
+            Route::Stage("koji")
+        );
+        assert_eq!(route(&["koji", "--stage"], false), Route::Stage("koji"));
+        assert_eq!(
+            route(&["deploy", "koji", "--stage", "now"], false),
+            Route::Usage
+        );
+        assert_eq!(
+            route(&["deploy", "../koji", "--stage"], false),
+            Route::Usage
+        );
+    }
 }
