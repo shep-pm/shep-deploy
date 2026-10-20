@@ -144,7 +144,7 @@ pub(crate) fn commit_on_origin(fixture: &Fixture, name: &str) -> String {
 /// behaviour rather than a convenient answer, and
 /// [`Self::keeps_the_old_instance`] is the one checked against a real
 /// shepherd.
-pub(super) struct Shepherd {
+pub(crate) struct Shepherd {
     /// What the flock settles to after a reload: `Online` is a release
     /// that came up, `Starting` one that spawned and never became
     /// ready.
@@ -234,7 +234,7 @@ const FIRST_PID: u32 = 12835;
 
 impl Shepherd {
     /// A reload that replaces the process and brings it to `Online`.
-    pub(super) fn ready() -> Self {
+    pub(crate) fn ready() -> Self {
         Self {
             settles_to: ProcStatus::Online,
             replaces: true,
@@ -261,7 +261,7 @@ impl Shepherd {
 
     /// A reload that replaces the process with one that never becomes
     /// ready.
-    pub(super) fn never_ready() -> Self {
+    pub(crate) fn never_ready() -> Self {
         Self {
             settles_to: ProcStatus::Starting,
             ..Self::ready()
@@ -433,7 +433,7 @@ impl Shepherd {
         self.attempts.get()
     }
 
-    pub(super) fn reload_count(&self) -> u32 {
+    pub(crate) fn reload_count(&self) -> u32 {
         self.reloads.get()
     }
 
