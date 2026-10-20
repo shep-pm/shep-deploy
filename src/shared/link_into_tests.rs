@@ -160,3 +160,29 @@ fn link_into_fails_loudly_when_checkout_does_not_exist() {
         .expect_err("a checkout that does not exist cannot be canonicalised");
     assert!(matches!(err, Error::Io { .. }));
 }
+
+/// fails if a directory of a retried release that the previous build swapped
+/// for a link carries the dog's writes out of the release. The dog is root and
+/// the retried release belongs to the build user, so a path-based
+/// `create_dir_all` and `symlink` would follow the link.
+#[test]
+fn link_into_does_not_write_through_a_directory_swapped_for_a_link() {
+    let repo = fixtures::checkout(&[
+        (".gitignore", "config/local.json\n"),
+        ("config/local.json", "{}"),
+    ]);
+    let release = tempfile::tempdir().expect("release tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    symlink(outside.path(), release.path().join("config")).expect("swapped directory");
+
+    let paths = to_link(repo.path()).expect("computes");
+    let err = link_into(release.path(), repo.path(), &paths)
+        .expect_err("a link where a directory belongs must be refused");
+
+    assert!(matches!(err, Error::Io { .. }), "{err}");
+    assert_eq!(
+        fs::read_dir(outside.path()).expect("lists").count(),
+        0,
+        "nothing may be written outside the release"
+    );
+}
