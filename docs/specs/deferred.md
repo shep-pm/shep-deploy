@@ -141,7 +141,7 @@ by name at open time. A component that answers `ELOOP` is read with
 the walk continues from that root's own descriptor rather than from wherever
 the link pointed. Missing destination parents are made with `mkdirat` on the
 walked descriptor; the file is opened `O_CREAT | O_EXCL | O_WRONLY |
-O_NOFOLLOW`. `src/build.rs`'s `Walk` is the whole of it.
+O_NOFOLLOW`. `src/build/walk.rs`'s `Walk` is the whole of it.
 
 Round 7 of the founder's review raised this from two independent lenses, and
 neither won the race in a harness, which read as narrow. It is not. The

@@ -5,7 +5,6 @@
 # Format: <lines> <path>.
 
 # https://github.com/shep-pm/shep-deploy/issues/27
-2614 src/build.rs
 1626 src/shared.rs
 1473 src/poll.rs
 1450 src/restore.rs
