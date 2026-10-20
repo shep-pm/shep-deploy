@@ -16,7 +16,7 @@ use crate::verify::Generation;
 /// and stay up, and deletes the instances it replaced.
 ///
 /// A cutover that lands with nothing stranded promotes the record's `watch`
-/// from the `manual` [`super::prepare()`] wrote to `auto`, which is what makes the
+/// from the `manual` [`super::prepare_with()`] wrote to `auto`, which is what makes the
 /// target the poll loop's. A stranded one does not: instances it could not
 /// delete are still registered, and every later deploy reloads the name and
 /// respawns each of them from its own pre-adoption spec, so a loop polling
@@ -25,7 +25,7 @@ use crate::verify::Generation;
 ///
 /// A `verify` the operator edited in the record while the cutover ran is
 /// kept; a `--watch manual` typed while it ran is not, because the record
-/// already said `manual` from [`super::prepare()`] and the two cannot be told
+/// already said `manual` from [`super::prepare_with()`] and the two cannot be told
 /// apart. Run it after setup returns.
 ///
 /// # Errors

@@ -60,7 +60,7 @@ impl Daemon for RollOf<'_> {
 /// reads, and a checkout is a perfectly fetchable remote for its own
 /// history.
 pub(super) fn checkout_with_commit() -> tempfile::TempDir {
-    checkout_declaring("[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\n")
+    checkout_declaring("[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\nwait_ready = true\n")
 }
 
 /// As [`checkout_with_commit`], with the Flockfile's text given.

@@ -7,6 +7,7 @@ use shep_client::shep_core::config::AppConfig;
 use crate::build;
 use crate::config::DogConfig;
 use crate::daemon::Daemon;
+use crate::deploy::refuse_ungated_verification;
 use crate::error::Error;
 use crate::git;
 use crate::lock;
@@ -85,11 +86,37 @@ impl Prepared {
 /// [`crate::deploy::stage_release`] (the worktree, the cache link, the shared
 /// files and both Flockfiles),
 /// [`build::run`] or [`swap::point_at`] return.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "setup calls prepare_with; tests keep the default")
+)]
 pub async fn prepare<D: Daemon>(
     daemon: &D,
     shep_home: &Path,
     sheep: &str,
     config: &DogConfig,
+) -> Result<Prepared, Error> {
+    prepare_with(daemon, shep_home, sheep, config, Verify::default()).await
+}
+
+/// As [`prepare`], recording `verify` as the target's mode instead of the
+/// default.
+///
+/// The first deploy refuses a `probed` target whose app declares no readiness
+/// gate, after the cutover has already landed. That refusal is made here
+/// instead, once the release's Flockfile is staged and before it is built, so
+/// the run leaves no record and no swap and a second `setup` is a retry. A
+/// sheep with nothing to probe is taken over with [`Verify::Alive`].
+///
+/// # Errors
+/// As [`prepare`], and [`Error::Config`] if `verify` is [`Verify::Probed`] and
+/// the release's app has neither a `readiness_probe` nor `wait_ready`.
+pub async fn prepare_with<D: Daemon>(
+    daemon: &D,
+    shep_home: &Path,
+    sheep: &str,
+    config: &DogConfig,
+    verify: Verify,
 ) -> Result<Prepared, Error> {
     let tree = Tree::for_sheep(shep_home, sheep);
 
@@ -248,7 +275,7 @@ pub async fn prepare<D: Daemon>(
         branch,
         deployed: None,
         failed: None,
-        verify: Verify::default(),
+        verify,
         // `manual` until the cutover lands, and `cut_over` is what promotes
         // it. A tree nothing has served from is not a deploy target - the
         // deploy path refuses one outright - so writing `auto` here would
@@ -306,6 +333,15 @@ pub async fn prepare<D: Daemon>(
         let (tree, checkout, sha) = (tree.clone(), state.checkout.clone(), sha.clone());
         shared::off_thread(move || crate::deploy::stage_release(&tree, &checkout, &sha)).await?
     };
+    // Before the build, so a refusal costs no build; the text is the deploy's
+    // own, with the way out this command offers added.
+    refuse_ungated_verification(sheep, &app, verify).map_err(|err| match err {
+        Error::Config(why) => Error::Config(format!(
+            "{why} Or take {sheep} over without a gate: `shep-deploy setup {sheep} --verify \
+             alive`."
+        )),
+        other => other,
+    })?;
     build::run(
         sheep,
         &release,
@@ -349,7 +385,9 @@ pub async fn prepare<D: Daemon>(
 mod tests {
     use super::*;
     use crate::fixtures;
-    use crate::optin::test_support::{RollOf, checkout_with_commit, write_target};
+    use crate::optin::test_support::{
+        RollOf, checkout_declaring, checkout_with_commit, write_target,
+    };
 
     /// fails if a sheep that is already a target can be opted in again.
     /// The second run would `git init --bare` over a live tree and rebuild
@@ -689,5 +727,118 @@ mod tests {
             shown.contains("shep-deploy setup bpm"),
             "it says how to try again: {shown}"
         );
+    }
+
+    /// A portless app: no `readiness_probe`, no `wait_ready`, and a build
+    /// command that leaves `marker` behind if it ever runs.
+    fn ungated_checkout_building(marker: &Path) -> tempfile::TempDir {
+        checkout_declaring(&format!(
+            "[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\n\n[dog.deploy.build]\ncommand = \"touch {}\"\n",
+            marker.display()
+        ))
+    }
+
+    /// fails if setup takes over a sheep its first deploy would refuse, or
+    /// pays for a build before it says so. The refusal at the first deploy
+    /// lands after the cutover, with the sheep already running from the tree.
+    #[tokio::test]
+    async fn an_ungated_app_under_probed_is_refused_before_it_is_built_or_recorded() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let marker = scratch.path().join("built");
+        let checkout = ungated_checkout_building(&marker);
+        let entries = [("bpm", checkout.path())];
+        let daemon = RollOf(&entries);
+
+        let err = prepare_with(
+            &daemon,
+            home.path(),
+            "bpm",
+            &fixtures::dog_config(),
+            Verify::Probed,
+        )
+        .await
+        .expect_err("refuses");
+
+        assert!(matches!(err, Error::Config(_)), "{err}");
+        assert!(
+            err.to_string().contains("--verify alive"),
+            "it names the way out: {err}"
+        );
+        let tree = Tree::for_sheep(home.path(), "bpm");
+        assert!(!marker.exists(), "the build ran");
+        assert!(!tree.state_file().exists(), "a record was written");
+        assert_eq!(swap::resolve(&tree.current()).expect("reads"), None);
+    }
+
+    /// fails if a refused setup leaves anything a second one trips on. The
+    /// operator's next move after the refusal is the same command with
+    /// `--verify alive`, so the tree the first run touched must not count as
+    /// a target.
+    #[tokio::test]
+    async fn a_refused_setup_can_be_retried_with_alive() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let checkout = ungated_checkout_building(&scratch.path().join("built"));
+        let entries = [("bpm", checkout.path())];
+        let daemon = RollOf(&entries);
+        let config = fixtures::dog_config();
+        prepare_with(&daemon, home.path(), "bpm", &config, Verify::Probed)
+            .await
+            .expect_err("refuses");
+
+        let again = prepare_with(&daemon, home.path(), "bpm", &config, Verify::Alive).await;
+
+        assert!(again.is_ok(), "{:?}", again.err());
+    }
+
+    /// fails if `--verify alive` is not what the record says. The forward
+    /// deploy reads `verify` from this record, and an `alive` that setup
+    /// accepted but wrote as `probed` strands the app on its first push.
+    #[tokio::test]
+    async fn an_ungated_app_under_alive_is_prepared_and_recorded_as_alive() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let checkout = ungated_checkout_building(&scratch.path().join("built"));
+        let entries = [("bpm", checkout.path())];
+        let daemon = RollOf(&entries);
+
+        let prepared = prepare_with(
+            &daemon,
+            home.path(),
+            "bpm",
+            &fixtures::dog_config(),
+            Verify::Alive,
+        )
+        .await
+        .expect("prepares");
+
+        assert_eq!(prepared.state.verify, Verify::Alive);
+        let on_disk = State::read(&prepared.tree.state_file()).expect("reads");
+        assert_eq!(on_disk.verify, Verify::Alive);
+    }
+
+    /// fails if the check refuses an app that does have a gate, which would
+    /// make `--verify alive` mandatory for every sheep.
+    #[tokio::test]
+    async fn an_app_with_wait_ready_is_prepared_under_probed() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let checkout = checkout_declaring(
+            "[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\nwait_ready = true\n",
+        );
+        let entries = [("bpm", checkout.path())];
+        let daemon = RollOf(&entries);
+
+        let prepared = prepare_with(
+            &daemon,
+            home.path(),
+            "bpm",
+            &fixtures::dog_config(),
+            Verify::Probed,
+        )
+        .await
+        .expect("prepares");
+
+        assert_eq!(prepared.state.verify, Verify::Probed);
     }
 }

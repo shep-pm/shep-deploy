@@ -16,7 +16,7 @@ use crate::{flockfile, git, shared};
 /// the operator's shared files, and the two Flockfiles read once.
 ///
 /// One function because two callers, [`super::attempt`] and
-/// [`crate::optin::prepare`], had the same seven lines, and because all of
+/// [`crate::optin::prepare_with`], had the same seven lines, and because all of
 /// it is blocking work (git, symlinks, file reads) that both run through
 /// [`shared::off_thread`]. Answers the app to register and the build to
 /// run.
@@ -178,7 +178,7 @@ pub(super) fn head_of(tree: &Tree, branch: &str) -> Result<String, Error> {
 ///
 /// # Errors
 /// [`Error::Config`] naming the sheep and every way out.
-pub(super) fn refuse_ungated_verification(
+pub(crate) fn refuse_ungated_verification(
     sheep: &str,
     app: &AppConfig,
     mode: Verify,
