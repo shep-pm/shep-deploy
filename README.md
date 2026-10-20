@@ -230,6 +230,7 @@ invisible to it.
 shep-deploy deploy <sheep>
 shep-deploy deploy <sheep> --watch auto|manual
 shep-deploy deploy <sheep> --branch <name>
+shep-deploy deploy <sheep> --branch refs/pull/1/head
 shep-deploy setup <sheep>
 shep-deploy setup <sheep> --verify probed|alive
 shep-deploy survey
@@ -240,7 +241,11 @@ shep-deploy help
 `--watch` changes the setting and returns without deploying. `--branch` does
 the same for the branch a target tracks, which `setup` read from the checkout
 once; it clears a held sha and refuses a target `setup` never finished. A name
-the remote lacks is reported by the next tick. `--verify` on
+the remote lacks is reported by the next tick. `--branch` also takes a full
+ref beginning `refs/`, such as `refs/pull/1/head`, which the target then
+follows on every push like a branch. Only that ref is fetched, not every pull
+ref the remote has. A closed pull request's ref stays on GitHub, so the target
+keeps serving its last head. `--verify` on
 `setup` records how the sheep's deploys are verified, `probed` when it is
 left out. `survey` reports
 where every registered sheep stands and starts, registers and writes nothing.

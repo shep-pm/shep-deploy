@@ -575,6 +575,7 @@ mod tests {
             crate::git::fetch(
                 &fixture.tree.git(),
                 fixture.origin.path().to_str().expect("utf-8"),
+                "main",
                 fixtures::TEST_BUDGET,
             )
             .expect("fetch");

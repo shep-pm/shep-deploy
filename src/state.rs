@@ -77,7 +77,13 @@ pub enum Watch {
 pub struct State {
     /// The git remote this sheep is deployed from.
     pub remote: String,
-    /// The branch polled for new commits.
+    /// The branch polled for new commits, or a full ref beginning `refs/`,
+    /// such as `refs/pull/1/head`, to follow that ref instead.
+    ///
+    /// A ref outside `refs/heads/` is fetched by name alongside the branch
+    /// mirror, so only that one ref is. The field keeps its name so an older
+    /// shep-deploy still reads the record and fails with "no branch named"
+    /// rather than refusing the file.
     pub branch: String,
     /// The sha currently live under `current`, or `None` before the first
     /// successful deploy.
@@ -169,6 +175,8 @@ impl State {
     /// [`Error::Config`], naming `path` and the field, for: an empty
     /// `remote`, `branch` or `checkout`; a `remote` or `branch` beginning
     /// with `-` or carrying a character that would rewrite a log line; a
+    /// `branch` beginning `refs/` that git would refuse as a ref name or
+    /// that would change the meaning of the refspec built from it; a
     /// relative `checkout`; a
     /// `deployed` or `failed` that is not a full commit sha; `deployed` and
     /// `failed` naming the same sha; or exactly one of `origin_cwd` and
@@ -193,6 +201,12 @@ impl State {
                     "carries a control or invisible character that would rewrite a log line",
                 ));
             }
+        }
+
+        if self.branch.starts_with("refs/")
+            && let Some(why) = ref_refusal(&self.branch)
+        {
+            return Err(refuse("branch", why));
         }
 
         if self.checkout.as_os_str().is_empty() {
@@ -342,6 +356,47 @@ impl State {
         // is a flush that did not happen.
         sync_dir(dir).map_err(Error::at(dir))
     }
+}
+
+/// Why `tracked`, a value beginning `refs/`, cannot be fetched as the ref it
+/// names, or `None` when it can.
+///
+/// Git's own ref rules, plus `:` and `*`, which git also refuses and which
+/// would turn the `+<ref>:<ref>` refspec built from this value into a
+/// different one.
+fn ref_refusal(tracked: &str) -> Option<&'static str> {
+    const CARRIES: [(&str, &str); 11] = [
+        (" ", "carries a space, which git refuses in a ref name"),
+        (
+            ":",
+            "carries `:`, which would split the refspec into a source and a destination",
+        ),
+        (
+            "*",
+            "carries `*`, which would turn the refspec into a pattern",
+        ),
+        ("?", "carries `?`, which git refuses in a ref name"),
+        ("[", "carries `[`, which git refuses in a ref name"),
+        ("\\", "carries `\\`, which git refuses in a ref name"),
+        ("^", "carries `^`, which git refuses in a ref name"),
+        ("~", "carries `~`, which git refuses in a ref name"),
+        ("..", "carries `..`, which git refuses in a ref name"),
+        ("@{", "carries `@{`, which git refuses in a ref name"),
+        (
+            "//",
+            "carries `//`, an empty path component, which git refuses in a ref name",
+        ),
+    ];
+    if let Some((_, why)) = CARRIES.iter().find(|(needle, _)| tracked.contains(needle)) {
+        return Some(why);
+    }
+    if tracked.ends_with('/') {
+        return Some("ends with `/`, which git refuses in a ref name");
+    }
+    if tracked.ends_with(".lock") {
+        return Some("ends with `.lock`, which git refuses in a ref name");
+    }
+    None
 }
 
 /// Whether `text` is a full git object id: 40 hexadecimal characters for
@@ -507,6 +562,53 @@ verfiy = "alive"
                 err.to_string().contains(&format!("`{field}`")),
                 "must name `{field}`: {err}"
             );
+        }
+    }
+
+    /// fails if a `refs/` value that git would refuse as a ref name, or that
+    /// would change what a refspec means, reaches the fetch. `:` splits a
+    /// refspec into source and destination and `*` makes it a pattern, so
+    /// either would make the dog fetch something other than the ref named.
+    #[test]
+    fn a_ref_with_a_colon_or_star_is_refused() {
+        for value in [
+            "refs/pull/1/head:refs/heads/main",
+            "refs/pull/*/head",
+            "refs/pull/1 /head",
+            "refs/pull/?/head",
+            "refs/pull/[1]/head",
+            "refs/pull\\1/head",
+            "refs/pull/1^/head",
+            "refs/pull/1~/head",
+            "refs/pull/../head",
+            "refs/pull/@{1}/head",
+            "refs/pull/1/",
+            "refs/pull/1.lock",
+            "refs/pull//1/head",
+        ] {
+            let text = format!(
+                "remote = \"https://example.com/x\"\nbranch = \"{}\"\ncheckout = \"/srv/x\"\n",
+                value.replace('\\', "\\\\")
+            );
+            let err = read_text(&text).expect_err(&format!("must refuse: {value}"));
+            assert!(matches!(err, Error::Config(_)), "{value}: {err}");
+            assert!(err.to_string().contains("`branch`"), "{value}: {err}");
+        }
+    }
+
+    /// fails if a ref a forge really publishes is refused.
+    #[test]
+    fn a_well_formed_pull_ref_is_accepted() {
+        for value in [
+            "refs/pull/1/head",
+            "refs/pull/1234/merge",
+            "refs/tags/v1.2.3",
+        ] {
+            let text = format!(
+                "remote = \"https://example.com/x\"\nbranch = \"{value}\"\ncheckout = \"/srv/x\"\n"
+            );
+            let state = read_text(&text).expect(value);
+            assert_eq!(state.branch, value);
         }
     }
 

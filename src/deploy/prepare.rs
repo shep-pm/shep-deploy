@@ -125,8 +125,9 @@ fn checkout_release(tree: &Tree, sha: &str) -> Result<(), Error> {
     fs::write(&marker, b"").map_err(Error::at(marker))
 }
 
-/// The sha `branch` points at in the tree's bare clone, with the one
-/// failure that means "the branch is gone" said in words.
+/// The sha `branch` (a branch name, or a full ref) points at in the tree's
+/// bare clone, with the one failure that means "the branch is gone" said in
+/// words.
 ///
 /// Only that one failure is reworded, matching what
 /// [`crate::git::current_branch`] does for a detached `HEAD`: `git
@@ -148,16 +149,23 @@ pub(super) fn head_of(tree: &Tree, branch: &str) -> Result<String, Error> {
             command,
             status,
             stderr,
-        }) if stderr.contains("Needed a single revision") => Err(Error::Git {
-            command,
-            status,
-            stderr: format!(
-                "the fetch succeeded but the remote has no branch named {branch:?} - it was \
-                 deleted or renamed upstream, or never existed - so there is nothing to deploy \
-                 (to follow another branch, run `shep-deploy deploy {sheep} --branch <name>`): \
-                 {stderr}"
-            ),
-        }),
+        }) if stderr.contains("Needed a single revision") => {
+            let kind = if branch.starts_with("refs/") {
+                "ref"
+            } else {
+                "branch"
+            };
+            Err(Error::Git {
+                command,
+                status,
+                stderr: format!(
+                    "the fetch succeeded but the remote has no {kind} named {branch:?} - it was \
+                     deleted or renamed upstream, or never existed - so there is nothing to \
+                     deploy (to follow another branch, run `shep-deploy deploy {sheep} --branch \
+                     <name>`): {stderr}"
+                ),
+            })
+        }
         Err(other) => Err(other),
     }
 }
@@ -287,6 +295,7 @@ mod tests {
         crate::git::fetch(
             &fixture.tree.git(),
             &fixture.state.remote,
+            "main",
             fixtures::TEST_BUDGET,
         )
         .expect("fetch");
@@ -339,6 +348,7 @@ mod tests {
         crate::git::fetch(
             &fixture.tree.git(),
             &fixture.state.remote,
+            "main",
             fixtures::TEST_BUDGET,
         )
         .expect("fetch so the sha is checkoutable");
@@ -493,5 +503,30 @@ mod tests {
             "{shown}"
         );
         assert!(!shown.contains('\\'), "{shown}");
+    }
+
+    /// fails if a tracked full ref that is not on the remote is called a
+    /// branch. `refs/heads/gone` is the ref spelling of a branch the mirror
+    /// fetch does not fail on, so it reaches the same lookup a deleted branch
+    /// does.
+    #[tokio::test]
+    async fn a_ref_that_is_not_on_the_remote_says_so() {
+        let mut fixture = fixture_with_previous_release();
+        fixture.state.branch = "refs/heads/gone".to_owned();
+
+        let err = deploy(
+            &Shepherd::ready(),
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect_err("no such ref");
+
+        let shown = err.to_string();
+        assert!(shown.contains("refs/heads/gone"), "{shown}");
+        assert!(shown.contains("no ref named"), "{shown}");
+        assert!(!shown.contains("no branch named"), "{shown}");
+        assert!(shown.contains("nothing to deploy"), "{shown}");
     }
 }

@@ -28,6 +28,7 @@ fn fixture_declaring_reload_paths() -> Fixture {
     git::fetch(
         &fixture.tree.git(),
         &fixture.state.remote,
+        "main",
         fixtures::TEST_BUDGET,
     )
     .expect("fetch");

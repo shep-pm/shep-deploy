@@ -74,7 +74,7 @@ pub(super) fn fixture_before_any_release() -> Fixture {
     fixtures::run_git(&tree.git(), &["init", "-q", "--bare"]);
 
     let remote = origin.path().to_str().expect("utf-8 path").to_owned();
-    crate::git::fetch(&tree.git(), &remote, fixtures::TEST_BUDGET).expect("fetch");
+    crate::git::fetch(&tree.git(), &remote, "main", fixtures::TEST_BUDGET).expect("fetch");
 
     let state = State {
         remote,

@@ -95,7 +95,7 @@ fn write_target_with_flockfile(home: &Path, sheep: &str, watch: Watch, flockfile
     fs::create_dir_all(tree.git()).expect("create the git dir");
     fixtures::run_git(&tree.git(), &["init", "-q", "--bare"]);
     let remote = origin.path().to_str().expect("utf-8 path").to_owned();
-    crate::git::fetch(&tree.git(), &remote, fixtures::TEST_BUDGET).expect("fetch");
+    crate::git::fetch(&tree.git(), &remote, "main", fixtures::TEST_BUDGET).expect("fetch");
 
     let first = crate::git::remote_head(&tree.git(), "main").expect("head");
     crate::git::worktree_add(&tree.git(), &tree.release(&first), &first).expect("worktree");
