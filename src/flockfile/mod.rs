@@ -32,6 +32,11 @@
 //! restriction: it is the operator's own file, and pinning `user` or a log
 //! path there is exactly the "pin it so upstream can never change it"
 //! mechanism every other field already gets.
+//!
+//! The release hook tables, `[dog.deploy.release]` and `[dog.deploy.after]`,
+//! are held to the same line for a different reason: their `env` holds the
+//! operator's secrets, so only an override the dog linked in from the
+//! operator's checkout may carry them. See [`crate::hook`].
 
 mod read;
 mod refuse;
@@ -77,7 +82,9 @@ pub struct Merged {
 /// committed file names one app twice; or if it sets, on any app, `user`,
 /// `group`, `out_file`, `err_file`, `watch`, an `exec` probe, a probe whose
 /// target is off loopback, or a probe spelled as anything but a table. See
-/// [`refuse_repo_privilege`] for why each is on the list.
+/// [`refuse_repo_privilege`] for why each is on the list. Also if the committed
+/// file, or an override the operator did not link in, carries
+/// `[dog.deploy.release]` or `[dog.deploy.after]`: see [`hook::refuse_repo_hooks`].
 pub fn read(release: &Path, shared: &FromCheckout) -> Result<Merged, Error> {
     Ok(Merged {
         doc: merged_document(release, shared)?,

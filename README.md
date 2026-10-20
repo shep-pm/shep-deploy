@@ -70,6 +70,42 @@ operator following these instructions could not register their app at all. A
 top-level `[build]` is now refused here by name, pointing at the new spelling,
 rather than ignored and silently building nothing.
 
+## Running a migration before the swap
+
+A release hook is a command that runs once per deploy, after the build and its
+artifacts and before `current` moves. It exists for a database migration, which
+otherwise has to end the build command: its password then reaches every script
+the build runs, and its output sits unlabelled in the build log.
+
+```toml
+[dog.deploy.release]
+command = "supabase db push"
+env = { SUPABASE_DB_PASSWORD = "..." }
+```
+
+- It belongs in `Flockfile.override.toml`, which is yours. A committed
+  `Flockfile.toml`, or an override the dog did not link in from your checkout,
+  that carries `[dog.deploy.release]` is refused by file and table: the hook's
+  `env` holds your secrets, and a commit must not choose the command that
+  receives them. `[dog.deploy.after]` is refused the same way.
+- It runs in the release, as the app's `user`, through `sh -c`, with the build's
+  cleared environment: the base set, the dog's `passthrough`, then the hook's
+  own `env`. The dog sets `SHEP_DEPLOY_SHEEP`, `SHEP_DEPLOY_SHA` and
+  `SHEP_DEPLOY_RELEASE` (an absolute path) last, so the hook's `env` cannot
+  override them.
+- It is bounded by `build_timeout` and killed as a process group, like the
+  build. The log gets one line, `shep-deploy: <sheep>: running the release
+  hook`, before it starts.
+- A non-zero exit, a signal or a timeout stops the deploy. `current` does not
+  move, the old release keeps serving, and the sha is held as for a failed
+  build.
+- `setup` runs no hook. A cutover does not touch the app's database.
+
+A rollback does not undo a migration. If the new release fails verification
+after the hook ran, the old release comes back against the migrated database.
+A held sha that you retry with `shep deploy <sheep>` runs the hook again, so
+write the command to be idempotent.
+
 ## What one deploy does
 
 1. Fetch into a bare clone, and compare the branch head to the last deployed
@@ -83,14 +119,16 @@ rather than ignored and silently building nothing.
    other backslash escape or a `..` is refused by name rather than matched
    against nothing.
 4. Run the build, as the app's `user` if it sets one.
-5. `rename(2)` `current` onto the new release.
-6. `Reload` the sheep.
-7. Verify. On failure, put `current` back, reload again, and verify that the
+5. Run the release hook, if your override sets one.
+6. `rename(2)` `current` onto the new release.
+7. `Reload` the sheep.
+8. Verify. On failure, put `current` back, reload again, and verify that the
    old release came up. A rollback that does not come up is an error, not a
    rollback.
 
-Steps 1 to 4 never touch the running app. A build that fails costs a
-directory, not an outage.
+Steps 1 to 5 never touch the running app. A build that fails costs a
+directory, not an outage. A hook acts on whatever it was written to act on,
+which is why a rollback cannot undo it.
 
 Verification waits for a *new* process to reach `Online`, not for any process
 to be `Online`. shep answers a reload before it has finished one, and keeps
@@ -183,7 +221,7 @@ every target and every smit refresh, with no error and no log line. Five
 minutes by default, which is generous enough for a cold clone of a large
 repository.
 
-`build_timeout` bounds the build command, against the same failure and for the
+`build_timeout` bounds the build command and the release hook, against the same failure and for the
 same reason. A build that never finishes holds that same one-at-a-time loop, so
 no other target deploys and nothing is logged, because from the loop's point of
 view nothing has gone wrong. An hour by default, which no honest build should
@@ -446,8 +484,11 @@ its own uid: `user` and `group`, an `exec` probe (the daemon runs it through
 `sh -c`, forever, ignoring `user`), `out_file` and `err_file` (the daemon
 opens and `shep flush` truncates them), an `http` or `tcp` probe whose target
 is not loopback (the daemon makes the connection), and `watch` (the daemon
-walks the working directory as itself, following symlinks). Every one of them
-stays available in `Flockfile.override.toml`, which is yours.
+walks the working directory as itself, following symlinks). It is also refused
+for carrying `[dog.deploy.release]` or `[dog.deploy.after]`, because a hook's
+`env` holds your secrets and a commit must not choose the command that receives
+them. Every one of them stays available in `Flockfile.override.toml`, which is
+yours.
 
 Set `user` on the app and the build drops to that user's uid and primary group,
 with the shepherd's supplementary groups cleared, before it runs anything. A

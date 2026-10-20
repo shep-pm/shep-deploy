@@ -69,7 +69,7 @@ use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::paths::Tree;
 use crate::state::State;
-use crate::{git, lock, shared, swap};
+use crate::{git, hook, lock, shared, swap};
 
 use prepare::head_of;
 pub(crate) use prepare::{refuse_ungated_at_setup, refuse_ungated_verification};
@@ -313,7 +313,7 @@ async fn attempt<D: Daemon>(
 ) -> Result<Outcome, Error> {
     let sheep = tree.sheep();
     let release = tree.release(head);
-    let (app, spec) = {
+    let (app, spec, hooks) = {
         let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
         shared::off_thread(move || stage_release(&tree, &checkout, &head)).await?
     };
@@ -326,6 +326,20 @@ async fn attempt<D: Daemon>(
         &config.passthrough,
         &tree.cache_target(),
         config.build_timeout,
+    )
+    .await?;
+    // After the build and before `previous` is read, so the `Raced` check
+    // below covers the hook's run time as well as the build's.
+    hook::run(
+        &hooks.release,
+        &hook::Context {
+            sheep,
+            sha: head,
+            release: &release,
+            as_user: app.user.as_deref(),
+            passthrough: &config.passthrough,
+            budget: config.build_timeout,
+        },
     )
     .await?;
 
@@ -418,6 +432,8 @@ async fn attempt<D: Daemon>(
 
 #[cfg(test)]
 mod tests {
+    mod hooks;
+
     use std::fs;
 
     use crate::deploy::test_support::{

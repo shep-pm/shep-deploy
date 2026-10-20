@@ -257,7 +257,9 @@ class rather than the instances.
   probes, `out_file`/`err_file`, non-loopback probe targets, and `watch`,
   because the daemon acts on all of them at its own uid (read out of
   shep-daemon on 2026-09-04; `flockfile::refuse::refuse_repo_privilege` says why per
-  field). Presence is checked before shape: serde builds a probe from a
+  field). It is also refused `[dog.deploy.release]` and `[dog.deploy.after]`,
+  because a hook's env holds the operator's secrets (`hook::refuse_repo_hooks`),
+  and so is an override the dog did not link in from the operator's checkout. Presence is checked before shape: serde builds a probe from a
   TOML array too, and a walk that read only tables let one through.
 - **`Online` is a one-time verdict in shep.** A crash after it respawns under
   a new pid with the reload committed; a failed post-drain re-probe demotes
