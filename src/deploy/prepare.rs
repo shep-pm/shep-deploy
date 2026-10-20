@@ -10,6 +10,7 @@ use crate::build::BuildSpec;
 use crate::error::Error;
 use crate::hook::Hooks;
 use crate::paths::Tree;
+use crate::shared::run_git;
 use crate::state::Verify;
 use crate::{flockfile, git, linkcheck, shared};
 
@@ -72,7 +73,68 @@ pub(crate) fn read_staged(tree: &Tree, checkout: &Path, sha: &str) -> Result<Sta
     let release = tree.release(sha);
     let shared_paths = shared::to_link(checkout)?;
     shared::link_into(&release, checkout, &shared_paths)?;
+    refuse_rewritten(tree, sha, &shared_paths)?;
     read_release(tree, &release, shared_paths)
+}
+
+/// Refuses a release whose committed Flockfile, or a committed or planted
+/// override, is not what the commit carries.
+///
+/// A build runs as `user` over a directory it owns, so after the stage the
+/// files in the release are whatever the build left, and the app and the
+/// hooks of a promote would come from them. The operator's own override is
+/// exempt: it is a link into their checkout, and [`shared::link_into`]
+/// has just refused anything else at that path. Compared by git's own hash of
+/// the file against the commit's blob, so a link, a missing file or a changed
+/// byte all differ.
+///
+/// # Errors
+/// [`Error::Config`] naming the file. [`Error::Io`] if it cannot be examined.
+/// Whatever [`git::run_git`] returns for a failure that is not a path the
+/// commit lacks.
+fn refuse_rewritten(
+    tree: &Tree,
+    sha: &str,
+    shared_paths: &shared::FromCheckout,
+) -> Result<(), Error> {
+    let release = tree.release(sha);
+    let git_dir = tree.git();
+    let mut names = vec!["Flockfile.toml"];
+    if !shared_paths.includes_override() {
+        names.push(flockfile::OVERRIDE);
+    }
+    for name in names {
+        let path = release.join(name);
+        let on_disk = match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_file() => Some(
+                run_git(
+                    &git_dir,
+                    &["hash-object", "--no-filters", "--", &path.to_string_lossy()],
+                )?
+                .trim()
+                .to_owned(),
+            ),
+            Ok(_) => Some(String::new()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(Error::at(&path)(err)),
+        };
+        let committed = run_git(
+            &git_dir,
+            &["rev-parse", "--verify", "-q", &format!("{sha}:{name}")],
+        )
+        .ok()
+        .map(|hash| hash.trim().to_owned());
+        if committed != on_disk {
+            return Err(Error::Config(format!(
+                "{name} in {} is not what {sha} commits: a build can rewrite it after the stage, \
+                 and a promote reads the app and the hooks from it. Remove the release and run \
+                 `shep-deploy deploy {} --stage` again.",
+                release.display(),
+                tree.sheep()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The Flockfiles of a release whose files are already linked in.

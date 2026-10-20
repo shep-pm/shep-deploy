@@ -471,6 +471,40 @@ mod tests {
         assert_eq!(fixture.state.staged.as_deref(), Some(second.as_str()));
     }
 
+    /// fails if a promote reads configuration the build rewrote. The build
+    /// runs as the app's user and owns the release, so a Flockfile it
+    /// changed after the stage is not the one the commit carries. Neither
+    /// the app nor the hooks may come from it.
+    #[tokio::test]
+    async fn promote_refuses_a_flockfile_the_build_changed() {
+        for command in [
+            "echo '# changed' >> Flockfile.toml",
+            "echo '' > Flockfile.override.toml",
+        ] {
+            let mut fixture = fixture_with_previous_release();
+            let previous = fixture.state.deployed.clone().expect("a previous release");
+            stage_a_build(&mut fixture, command).await;
+            let daemon = Shepherd::ready();
+
+            let err = promote(
+                &daemon,
+                &fixture.tree,
+                &mut fixture.state,
+                &fixtures::dog_config(),
+            )
+            .await
+            .expect_err("refuses");
+
+            assert!(matches!(err, Error::Config(_)), "{command}: {err:?}");
+            assert_eq!(daemon.reload_count(), 0, "{command}");
+            assert_eq!(
+                swap::resolve(&fixture.tree.current()).expect("reads"),
+                Some(fixture.tree.release(&previous)),
+                "{command}"
+            );
+        }
+    }
+
     /// fails if a promote that does not come up leaves the new release live,
     /// or forgets what was staged. Keeping `staged` is what lets the operator
     /// promote again once the cause is fixed, without paying for the build.
