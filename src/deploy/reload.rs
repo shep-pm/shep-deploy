@@ -159,7 +159,8 @@ fn never_reached_the_shepherd(err: &Error) -> bool {
 const RETRY_EVERY: Duration = Duration::from_millis(500);
 
 /// Reloads `sheep`, retrying a failure that could clear until `patience`
-/// runs out.
+/// runs out, and answers with the generation taken just before the attempt
+/// the shepherd accepted.
 ///
 /// The refusal this exists for is transient and self-clearing: the shepherd
 /// will not start a reload while another is in flight, and the one in flight
@@ -168,18 +169,27 @@ const RETRY_EVERY: Duration = Duration::from_millis(500);
 /// and one that cannot happen at all. What is retried and what is not is
 /// [`Error::is_retryable`]'s decision.
 ///
+/// The generation is taken before EVERY attempt rather than once up front,
+/// because the reload in flight can land while the retries wait. A generation
+/// from before them would call the pids it arrived under "not new", and a
+/// verdict on this reload would then pass on the strength of the one it is
+/// refusing to overlap. A capture that fails does not stop the attempt: a
+/// reload that is not sent is worse than one nothing can be checked against.
+///
 /// # Errors
 /// The failure, at once if it could never clear, or the last one after
-/// `patience` has run out.
+/// `patience` has run out. On success the inner `Result` is the generation,
+/// or the error that stopped it being taken before the accepted attempt.
 pub(super) async fn reload_until<D: Daemon>(
     daemon: &D,
     sheep: &str,
     patience: Duration,
-) -> Result<(), Error> {
+) -> Result<Result<Generation, Error>, Error> {
     let deadline = Instant::now() + patience;
     loop {
+        let before = Generation::of(daemon, sheep).await;
         match daemon.reload(sheep).await {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(before),
             Err(err) => {
                 if !err.is_retryable() || Instant::now() >= deadline {
                     return Err(err);
@@ -212,9 +222,10 @@ mod tests {
     use core::error::Error as _;
     use std::time::Duration;
 
-    use shep_client::shep_core::protocol::RpcError;
     use shep_client::shep_core::protocol::RpcErrorCode;
     use shep_client::shep_core::protocol::wire::WireError;
+    use shep_client::shep_core::protocol::{ProcessInfo, RpcError};
+    use shep_client::shep_core::status::ProcStatus;
 
     use crate::deploy::test_support::{Shepherd, commit_on_origin, fixture_with_previous_release};
     use crate::deploy::{Outcome, deploy};
@@ -524,21 +535,14 @@ mod tests {
         .await
         .expect_err("describe fails");
 
-        // The deploy still failed, so this is still an error - but it
-        // names the rollback, and the shepherd's own complaint is still
-        // reachable underneath it.
-        assert!(matches!(err, Error::RolledBack { .. }), "{err:?}");
-        assert!(
-            err.to_string().contains("the shepherd stopped answering"),
-            "{err}"
-        );
-        assert!(
-            matches!(
-                err.source().and_then(|s| s.downcast_ref()),
-                Some(Error::Protocol(_))
-            ),
-            "{err:?}"
-        );
+        // The shepherd is still not answering when the rollback's own
+        // generation is captured, so the rollback was sent and could not
+        // be confirmed. Both halves of the story are in the message.
+        let Error::RollbackUnverified { why, found, .. } = &err else {
+            panic!("a rollback nothing could confirm is unverified: {err:?}");
+        };
+        assert!(why.contains("the shepherd stopped answering"), "{why}");
+        assert!(found.contains("the shepherd stopped answering"), "{found}");
         assert_eq!(
             daemon.reload_count(),
             2,
@@ -549,5 +553,64 @@ mod tests {
             Some(fixture.tree.release(&previous))
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
+    }
+
+    /// A shepherd whose pid moves on every look, and which refuses the first
+    /// `refusals` reloads: a reload still in flight when the rollback's
+    /// arrives, landing while the rollback waits its turn.
+    struct Drifting {
+        looks: std::cell::Cell<u32>,
+        refusals: std::cell::Cell<u32>,
+    }
+
+    impl Daemon for Drifting {
+        async fn describe(&self, sheep: &str) -> Result<Vec<ProcessInfo>, Error> {
+            self.looks.set(self.looks.get() + 1);
+            Ok(vec![
+                ProcessInfo::builder(0, sheep, ProcStatus::Online)
+                    .pid(Some(1000 + self.looks.get()))
+                    .build(),
+            ])
+        }
+        async fn reload(&self, sheep: &str) -> Result<(), Error> {
+            let refusals = self.refusals.get();
+            if refusals == 0 {
+                return Ok(());
+            }
+            self.refusals.set(refusals - 1);
+            Err(Error::Request(RequestError::Rpc(RpcError {
+                code: RpcErrorCode::Internal,
+                message: format!("{sheep} is already being reloaded"),
+                daemon_version: None,
+            })))
+        }
+
+        crate::fixtures::daemon_methods!(unimplemented;
+            dog_config, list_flock, start, delete, restart, save_roll, set_smit,
+        );
+    }
+
+    /// fails if the generation a reload is judged against is taken before the
+    /// FIRST attempt rather than the one the shepherd accepted. A rollback is
+    /// refused while the deploy's own reload is in flight, and that reload
+    /// can land during the retries: a generation from before them lists the
+    /// pids the bad release arrived under as "not new", and the bad release
+    /// passes for a turnover onto the one being restored.
+    #[tokio::test(start_paused = true)]
+    async fn the_generation_is_taken_before_the_attempt_the_shepherd_accepts() {
+        let daemon = Drifting {
+            looks: std::cell::Cell::new(0),
+            refusals: std::cell::Cell::new(2),
+        };
+
+        let before = reload_until(&daemon, "web", Duration::from_secs(30))
+            .await
+            .expect("the third attempt is accepted")
+            .expect("every look was answered");
+
+        let at_acceptance = ProcessInfo::builder(0, "web", ProcStatus::Online)
+            .pid(Some(1003))
+            .build();
+        assert_eq!(before, Generation::of_infos(&[&at_acceptance]));
     }
 }

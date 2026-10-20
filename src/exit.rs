@@ -85,6 +85,22 @@ mod tests {
         );
     }
 
+    /// fails if a rollback that did not come up is reported on the code that
+    /// promises a healthy flock on the old release. 12 means the previous
+    /// release is serving; here nothing is known to be, which is "broke",
+    /// and that is what 1 already means.
+    #[test]
+    fn a_rollback_that_did_not_come_up_is_not_the_rolled_back_code() {
+        let unverified = Error::RollbackUnverified {
+            sheep: "web".to_owned(),
+            to: "old-sha".to_owned(),
+            why: "it did not come up".to_owned(),
+            found: "the shepherd has no sheep called web".to_owned(),
+        };
+        assert_eq!(code_for(&unverified), 1);
+        assert_ne!(code_for(&unverified), ROLLED_BACK);
+    }
+
     /// fails if a cutover that landed and then could not tidy up is reported
     /// as an ordinary failure. The sheep IS live on the new release; only the
     /// cleanup after the swap did not finish. The poll loop is why the

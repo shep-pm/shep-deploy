@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 
 use shep_client::shep_core::protocol::ProcessInfo;
+use shep_client::shep_core::status::ProcStatus;
 
 use crate::daemon::Daemon;
 use crate::error::Error;
@@ -72,7 +73,19 @@ impl Generation {
             // A flock of more than u32::MAX processes is not a thing this
             // host could be running, but saturating says so without a cast
             // that could wrap.
-            rows: u32::try_from(infos.len()).unwrap_or(u32::MAX),
+            //
+            // A `Stopping` row is going away and is not counted: a reload
+            // that finishes between this listing and the next one leaves
+            // its replacement and nothing else, and a count that included
+            // the drainee demanded a row the sheep no longer has. Its pid
+            // stays in `pids`, so it is still never mistaken for new.
+            rows: u32::try_from(
+                infos
+                    .iter()
+                    .filter(|info| info.status != ProcStatus::Stopping)
+                    .count(),
+            )
+            .unwrap_or(u32::MAX),
         }
     }
 
@@ -170,5 +183,24 @@ mod tests {
                 rows: 3,
             }
         );
+    }
+
+    /// fails if a drainee is counted as an instance the reload has to bring
+    /// back. The reload a rollback waits out can finish between the capture
+    /// and the rollback's own reload: the listing then holds the old
+    /// instance, `stopping`, beside its replacement, and the restored sheep
+    /// lists one row. Counting both demanded two rows from a flock that
+    /// only ever had one, and a rollback that came up was never confirmed.
+    #[tokio::test(start_paused = true)]
+    async fn a_draining_instance_is_not_one_the_reload_must_bring_back() {
+        let daemon = Listings::new(vec![vec![
+            instance(0, ProcStatus::Stopping, 12835),
+            instance(0, ProcStatus::Starting, 12935),
+        ]]);
+        let generation = Generation::of(&daemon, "web").await.unwrap();
+
+        assert_eq!(generation.instances(), 1);
+        let restored = [instance(0, ProcStatus::Online, 13035)];
+        assert!(generation.has_turned_over(&restored, super::super::is_online));
     }
 }
