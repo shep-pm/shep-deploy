@@ -143,11 +143,11 @@ A deploy runs a build command **from the repository being deployed**. Anyone who
 can land a commit on the tracked branch chooses that command. Three bounds
 exist and each has a precise edge:
 
-- **uid/gid drop** (`build.rs`), applied to the build's `Command`, so it bounds
+- **uid/gid drop** (`build/mod.rs`), applied to the build's `Command`, so it bounds
   the CHILD. Anything the parent does afterwards on paths the child chose is
   outside it. A path-traversal in `build.artifacts` exploited exactly that gap
   on 2026-08-28 and reached the tree's own `deploy.toml`.
-- **cleared environment** (`build.rs`), so a build gets `BASE_ENV` plus the
+- **cleared environment** (`build/env.rs`), so a build gets `BASE_ENV` plus the
   operator's `passthrough` plus the release's `[build] env`, and nothing else.
   `SSH_AUTH_SOCK` is excluded on purpose.
 - **`user` on the app**, which is the only bound that also covers what the
@@ -272,7 +272,7 @@ class rather than the instances.
   purpose: a trait impl is reachable from every module, which would let any
   caller mint the proof. Tests build one with `FromCheckout::of`.
 - **An artifact is copied through a per-component walk, not through a path.**
-  `build::Walk` opens every directory from the release or the build cache with
+  `build::walk::Walk` opens every directory from the release or the build cache with
   `openat` and `O_NOFOLLOW | O_DIRECTORY` against the descriptor above it, so
   a parent swapped for a symlink mid-copy is refused rather than followed. A
   component that answers `ELOOP` is followed only when `readlinkat` says it
@@ -297,7 +297,8 @@ class rather than the instances.
   'read _'` on a pipe the dog holds, so the group id stays reserved after the
   build is reaped and `killpg` cannot land on a recycled pid. Never signal a
   pid after reaping it; `shared::abandon` kills before it waits for the same
-  reason.
+  reason. It lives in `build::runner::run_in_group`, which takes a prepared
+  `Command` so another caller can reuse it.
 - **`git::fetch` is the only git call that touches a network**, and the only
   one using `run_git_within`. The other ten `run_git` callers are local.
 
@@ -305,5 +306,5 @@ class rather than the instances.
 
 Invoke the `rust-house-style` skill before writing or reviewing Rust: the
 rules are shep-pm/rust-house-style, IR-1..IR-48. `#![forbid(unsafe_code)]`
-at `main.rs:40`, which is why `build.rs` resolves users by shelling out to
+at `main.rs:40`, which is why `build/privilege.rs` resolves users by shelling out to
 `id` rather than calling `getpwnam`.
