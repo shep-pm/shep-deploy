@@ -81,7 +81,10 @@ rather than ignored and silently building nothing.
    leading `./` and a trailing `/` are dropped, and `\!name` names a file
    that begins with `!`, as in `.gitignore`. A glob, a bare `!` negation, any
    other backslash escape or a `..` is refused by name rather than matched
-   against nothing.
+   against nothing. A linked path that has a `node_modules`, `.output`, `dist`
+   or `.next` component, or that overlaps a `build.artifacts` entry, is named
+   in a warning on stderr each deploy; add it to `.shepignore` to stop
+   linking it.
 4. Run the build, as the app's `user` if it sets one.
 5. `rename(2)` `current` onto the new release.
 6. `Reload` the sheep.
