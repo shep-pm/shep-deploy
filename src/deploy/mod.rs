@@ -447,6 +447,7 @@ async fn attempt<D: Daemon>(
 #[cfg(test)]
 mod tests {
     mod hooks;
+    mod retarget;
 
     use std::fs;
 

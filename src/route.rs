@@ -12,6 +12,7 @@ pub const USAGE: &str = "\
 usage: shep-deploy <verb> [args]
 
   deploy <sheep> [--watch auto|manual]   deploy one sheep, or set how it is watched
+  deploy <sheep> --branch <name>         follow another branch; returns without deploying
   setup <sheep> [--verify probed|alive]  take a sheep over; alive if it has nothing to probe
   survey                                 report where every registered sheep stands
   on-remove                              lifecycle hook; shep runs this itself
@@ -49,6 +50,8 @@ pub enum Route<'a> {
     SetupVerify { sheep: &'a str, mode: &'a str },
     /// Set the named sheep's watch mode.
     Watch { sheep: &'a str, mode: &'a str },
+    /// Point the named sheep at another branch.
+    Branch { sheep: &'a str, name: &'a str },
     /// Nothing above matched; print [`USAGE`] and exit on the usage code.
     Usage,
 }
@@ -87,12 +90,14 @@ pub fn route<'a>(args: &[&'a str], supervised: bool) -> Route<'a> {
         ["setup", sheep, "--verify", mode] => Route::SetupVerify { sheep, mode },
         ["deploy", sheep] => Route::Deploy(sheep),
         ["deploy", sheep, "--watch", mode] => Route::Watch { sheep, mode },
+        ["deploy", sheep, "--branch", name] => Route::Branch { sheep, name },
         // Reached only through `shep deploy <sheep>`: the passthrough
         // shipped in shep 0.1.1 and strips the dog's own name, so the
         // flagship command arrives as a bare sheep name with no verb.
         // Last, so a verb always wins.
         [sheep] => Route::Deploy(sheep),
         [sheep, "--watch", mode] => Route::Watch { sheep, mode },
+        [sheep, "--branch", name] => Route::Branch { sheep, name },
         _ => Route::Usage,
     };
 
@@ -102,7 +107,9 @@ pub fn route<'a>(args: &[&'a str], supervised: bool) -> Route<'a> {
     // outright rather than traversing out of it.
     match route {
         Route::Setup(sheep) | Route::Deploy(sheep) if !paths::is_sheep_name(sheep) => Route::Usage,
-        Route::SetupVerify { sheep, .. } | Route::Watch { sheep, .. }
+        Route::SetupVerify { sheep, .. }
+        | Route::Watch { sheep, .. }
+        | Route::Branch { sheep, .. }
             if !paths::is_sheep_name(sheep) =>
         {
             Route::Usage
@@ -248,5 +255,26 @@ mod tests {
                 "watch: {name}"
             );
         }
+    }
+
+    /// fails if `--branch` stops routing in either spelling, or a verb
+    /// missing its name is read as something else. The name is not
+    /// validated here: `set_branch` owns that, through `State::validate`.
+    #[test]
+    fn a_branch_flag_routes_with_and_without_the_verb() {
+        let expected = Route::Branch {
+            sheep: "koji",
+            name: "main",
+        };
+        assert_eq!(
+            route(&["deploy", "koji", "--branch", "main"], false),
+            expected
+        );
+        assert_eq!(route(&["koji", "--branch", "main"], false), expected);
+        assert_eq!(route(&["deploy", "koji", "--branch"], false), Route::Usage);
+        assert_eq!(
+            route(&["deploy", "../koji", "--branch", "main"], false),
+            Route::Usage
+        );
     }
 }
