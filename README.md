@@ -226,7 +226,7 @@ cosmetic and never worth failing a deploy over.
 A deploy in the dog's own tick repaints the smit as soon as it lands. A smit
 belongs to the connection that painted it, so a `deploy`, `setup` or `--watch`
 run by hand cannot leave one: the dog paints the new state on its next tick,
-within `interval`.
+which starts `interval` after the current one finishes.
 
 ## How it holds its connection
 
