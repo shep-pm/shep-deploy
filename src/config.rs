@@ -9,7 +9,7 @@
 //!
 //! Both values are refused rather than clamped when they name something
 //! that cannot work. That is the same choice
-//! [`crate::shared::shepignore_patterns`] makes about a glob and
+//! [`crate::shared::shepignore::shepignore_patterns`] makes about a glob and
 //! [`crate::deploy`] makes about an ungated `probed` target: a setting that
 //! silently does something other than what it says is a setting an operator
 //! will believe in for as long as the disk lasts.

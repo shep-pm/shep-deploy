@@ -1,5 +1,5 @@
-//! `link_into`, tested at its public seam. Its own file because `shared.rs`
-//! is over the IR-48 line limit and may not grow.
+//! `link_into`, tested at its public seam. Its own file to keep `link.rs`
+//! under the IR-48 line limit.
 
 use std::fs;
 use std::os::unix::fs::symlink;
