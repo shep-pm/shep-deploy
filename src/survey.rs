@@ -54,6 +54,10 @@ pub enum Standing {
         branch: String,
         /// As [`Self::Watched::sha`].
         sha: Option<String>,
+        /// The sha built and waiting for a deploy to be asked for, if any.
+        /// Only a manual target carries one, since `--stage` refuses a
+        /// watched target.
+        staged: Option<String>,
     },
     /// A git checkout whose repository ships a `Flockfile.toml`, so
     /// upstream has said how to run it and nothing has taken it over yet.
@@ -118,7 +122,7 @@ pub fn classify(shep_home: &Path, app: &AppConfig) -> Standing {
         Err(err) => return Standing::Unreadable(err.to_string()),
     };
     if let Some(state) = state {
-        let (branch, sha) = (state.branch, state.deployed);
+        let (branch, sha, staged) = (state.branch, state.deployed, state.staged);
         // A hold is only reported for a target something polls. `failed`
         // is written by an operator's own deploy too, and for a manual
         // target it changes nothing at all - the next `shep deploy` retries
@@ -131,7 +135,11 @@ pub fn classify(shep_home: &Path, app: &AppConfig) -> Standing {
                 failed,
             },
             (Watch::Auto, None) => Standing::Watched { branch, sha },
-            (Watch::Manual, _) => Standing::Manual { branch, sha },
+            (Watch::Manual, _) => Standing::Manual {
+                branch,
+                sha,
+                staged,
+            },
         };
     }
 
@@ -232,8 +240,16 @@ impl Standing {
                 at(branch, sha.as_deref()),
                 short(failed)
             ),
-            Self::Manual { branch, sha } => {
-                format!("{}, deploys only when asked", at(branch, sha.as_deref()))
+            Self::Manual {
+                branch,
+                sha,
+                staged,
+            } => {
+                let mut reason = format!("{}, deploys only when asked", at(branch, sha.as_deref()));
+                if let Some(staged) = staged {
+                    reason.push_str(&format!(", staged {}", short(staged)));
+                }
+                reason
             }
             Self::NeedsSetup => "a git checkout that ships a Flockfile".to_owned(),
             Self::Eligible => "a git checkout, nothing declares a deploy".to_owned(),
@@ -536,6 +552,19 @@ mod tests {
         state.write(&tree.state_file()).expect("write state");
     }
 
+    fn write_staged_target(home: &Path, sheep: &str, staged: &str) {
+        let tree = Tree::for_sheep(home, sheep);
+        std::fs::create_dir_all(tree.state_file().parent().expect("has a parent"))
+            .expect("create target dir");
+        let state = State {
+            deployed: Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_owned()),
+            staged: Some(staged.to_owned()),
+            watch: Watch::Manual,
+            ..crate::fixtures::state()
+        };
+        state.write(&tree.state_file()).expect("write state");
+    }
+
     /// fails if a sheep whose cwd is not a git checkout is offered for
     /// deployment. Turning a directory into a checkout is the operator's
     /// decision, and a dog that started doing it for them would be acting
@@ -715,6 +744,58 @@ mod tests {
         assert!(!row.contains("held"), "{row}");
     }
 
+    /// fails if a staged release is invisible in the survey. An operator
+    /// who staged a head to avoid waiting for its build has to be able to
+    /// see, from the one command that lists every target, that one is
+    /// waiting and which commit it is.
+    #[test]
+    fn a_manual_target_with_a_staged_sha_says_what_is_staged() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let current = tempfile::tempdir().expect("tempdir");
+        write_staged_target(
+            home.path(),
+            "bpm",
+            "d4e5f6a7b8c9d4e5f6a7b8c9d4e5f6a7b8c9d4e5",
+        );
+
+        let row = render(&[(
+            "bpm".to_owned(),
+            classify(home.path(), &app("bpm", current.path().to_str())),
+        )]);
+
+        assert!(row.contains("manual"), "{row}");
+        assert!(
+            row.contains("main@a1b2c3, deploys only when asked, staged d4e5f6"),
+            "{row}"
+        );
+    }
+
+    /// fails if a manual target with nothing staged reads differently from
+    /// before the field existed.
+    #[test]
+    fn a_manual_target_with_nothing_staged_reads_as_before() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let current = tempfile::tempdir().expect("tempdir");
+        write_target(
+            home.path(),
+            "bpm",
+            Watch::Manual,
+            Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
+            None,
+        );
+
+        let row = render(&[(
+            "bpm".to_owned(),
+            classify(home.path(), &app("bpm", current.path().to_str())),
+        )]);
+
+        assert!(
+            row.contains("main@a1b2c3, deploys only when asked"),
+            "{row}"
+        );
+        assert!(!row.contains("staged"), "{row}");
+    }
+
     /// fails if the rendered table stops naming every standing, or stops
     /// reading as columns. This is the entire output of a command whose
     /// only job is to be read, and an exact string is what keeps a later
@@ -735,6 +816,7 @@ mod tests {
                 Standing::Manual {
                     branch: "main".to_owned(),
                     sha: Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_owned()),
+                    staged: None,
                 },
             ),
             (

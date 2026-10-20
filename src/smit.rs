@@ -4,6 +4,7 @@
 //! ```text
 //! ▲ main@a1b2c3      watched
 //! ⏸ main@a1b2c3      manual
+//! ⏸ main@a1b2c3 +d4e5f6  manual, with d4e5f6 staged
 //! ```
 //!
 //! The two marks differ so `shep flock` answers "which of these is actually
@@ -40,24 +41,41 @@ use crate::state::{State, Watch};
 /// column that has to compete with nine others.
 const ABBREVIATED: usize = 6;
 
+/// `get`, not a slice: a hand-edited deploy.toml carrying a short sha must
+/// degrade to a shorter smit, never take the dog down on its next poll.
+fn abbreviate(sha: &str) -> &str {
+    sha.get(..ABBREVIATED).unwrap_or(sha)
+}
+
 /// The smit for one target.
 ///
 /// `none` rather than an empty sha for a target between opt-in and its
 /// first verified deploy: `main@` reads as deployed at nothing, where
 /// `main@none` reads as not deployed yet.
+///
+/// A staged sha follows the deployed one as ` +d4e5f6`, on a manual target
+/// only. A branch too long for the suffix is shortened so the suffix stays.
 #[must_use]
 pub fn text(state: &State) -> String {
     let mark = match state.watch {
         Watch::Auto => '▲',
         Watch::Manual => '⏸',
     };
-    let sha = state.deployed.as_deref().map_or("none", |sha| {
-        // `get`, not a slice: a hand-edited deploy.toml carrying a short
-        // sha must degrade to a shorter smit, never take the dog down on
-        // its next poll.
-        sha.get(..ABBREVIATED).unwrap_or(sha)
-    });
-    format!("{mark} {}@{sha}", state.branch)
+    let sha = state.deployed.as_deref().map_or("none", abbreviate);
+    // A watched target deploys its head on the next tick, so a sha waiting
+    // on a deploy "being asked for" only means something on a manual one.
+    match (state.watch, state.staged.as_deref()) {
+        (Watch::Manual, Some(staged)) => {
+            // `fit` cuts from the end, which would drop the staged sha, the
+            // one thing this suffix is there to show. Shorten the branch so
+            // the suffix always fits.
+            let suffix = format!("@{sha} +{}", abbreviate(staged));
+            let room = Smit::MAX_CHARS.saturating_sub(2 + suffix.chars().count());
+            let branch: String = state.branch.chars().take(room).collect();
+            format!("{mark} {branch}{suffix}")
+        }
+        _ => format!("{mark} {}@{sha}", state.branch),
+    }
 }
 
 /// Shorten `text` to [`Smit::MAX_CHARS`] and drop any control character, so
@@ -192,6 +210,41 @@ mod tests {
         state.branch = "x".repeat(100);
         let shortened = fit(text(&state));
         assert_eq!(shortened.chars().count(), Smit::MAX_CHARS);
+        assert!(shortened.parse::<Smit>().is_ok(), "{shortened}");
+    }
+
+    /// fails if a staged sha is not shown, or is shown before the deployed
+    /// one. The deployed sha is what is serving, and the staged one is what
+    /// is waiting, so it reads second.
+    #[test]
+    fn a_staged_sha_is_shown_after_the_deployed_one() {
+        let mut state = target(Watch::Manual, Some("a1b2c3d4e5f6"));
+        state.staged = Some("d4e5f6a7b8c9".to_owned());
+        assert_eq!(text(&state), "⏸ main@a1b2c3 +d4e5f6");
+    }
+
+    /// fails if a watched target shows a staged sha. `--stage` refuses a
+    /// watched target, but `--watch auto` after staging leaves the sha in the
+    /// record, and the next tick deploys the head anyway.
+    #[test]
+    fn a_watched_target_does_not_show_a_staged_sha() {
+        let mut state = target(Watch::Auto, Some("a1b2c3d4e5f6"));
+        state.staged = Some("d4e5f6a7b8c9".to_owned());
+        assert_eq!(text(&state), "▲ main@a1b2c3");
+    }
+
+    /// fails if a long branch costs the staged sha its place. The branch is
+    /// the variable part, so it has to lose its own tail, and what is
+    /// published must still parse and still end in the deployed and staged
+    /// shas.
+    #[test]
+    fn a_staged_sha_cannot_push_the_smit_past_the_shepherds_limit() {
+        let mut state = target(Watch::Manual, Some("a1b2c3d4e5f6"));
+        state.branch = "x".repeat(100);
+        state.staged = Some("d4e5f6a7b8c9".to_owned());
+        let shortened = fit(text(&state));
+        assert_eq!(shortened.chars().count(), Smit::MAX_CHARS);
+        assert!(shortened.ends_with("@a1b2c3 +d4e5f6"), "{shortened}");
         assert!(shortened.parse::<Smit>().is_ok(), "{shortened}");
     }
 
