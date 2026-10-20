@@ -80,6 +80,7 @@ mod route;
 mod shared;
 mod skip;
 mod smit;
+mod stage;
 mod state;
 mod survey;
 mod swap;
@@ -99,6 +100,7 @@ use crate::error::Error;
 use crate::exit::{code_for, code_for_outcome};
 use crate::paths::Tree;
 use crate::route::{Route, USAGE, route};
+use crate::stage::Staged;
 use crate::state::{State, Verify, Watch};
 
 /// How long the runtime waits for blocking work after the main future ends.
@@ -181,6 +183,7 @@ async fn run(args: &[&str]) -> ExitCode {
             Err(err) => Err(err),
         },
         Route::Watch { sheep, mode } => set_watch(sheep, mode),
+        Route::Stage(sheep) => stage_once(sheep).await,
         Route::Branch { sheep, name } => {
             shep_home().and_then(|home| retarget::branch_once(&Tree::for_sheep(&home, sheep), name))
         }
@@ -445,6 +448,35 @@ async fn deploy_once(sheep: &str) -> Result<u8, Error> {
     }
 
     Ok(code_for_outcome(&outcome))
+}
+
+/// Builds `sheep`'s branch head and records it as staged, without swapping.
+///
+/// Reads the dog's config through the shepherd, as a deploy does, but never
+/// asks it to start or reload anything.
+///
+/// # Errors
+/// Whatever [`stage::stage`] returns, plus [`Error::Io`] if the target's
+/// `deploy.toml` cannot be read and [`Error::Connect`] if the shepherd's
+/// socket cannot be reached.
+async fn stage_once(sheep: &str) -> Result<u8, Error> {
+    let tree = Tree::for_sheep(&shep_home()?, sheep);
+    let mut state = State::read(&tree.state_file())?;
+
+    let client = Client::connect(&socket()?).await?;
+    let config = config::read(&Live::command(client)).await?;
+    match stage::stage(&tree, &mut state, &config).await? {
+        Staged::Built { sha } => println!(
+            "{sheep} staged {sha}, still deployed at {}",
+            deployed(&state)
+        ),
+        Staged::AlreadyStaged { sha } => println!("{sheep} already has {sha} staged"),
+        Staged::AlreadyLive { sha } => {
+            println!("{sheep} is already deployed at {sha}, nothing to stage")
+        }
+    }
+
+    Ok(0)
 }
 
 /// Takes `sheep` over: builds its deploy tree and first release, then cuts
@@ -718,5 +750,25 @@ mod tests {
         let err = parse_verify("Alive").expect_err("case matters");
         assert!(matches!(err, Error::Config(_)), "{err}");
         assert!(err.to_string().contains("--verify"), "{err}");
+    }
+
+    /// fails if `--stage` stops routing in either spelling, or a trailing
+    /// word is read as a stage. It takes no value, so `--stage now` is not
+    /// one.
+    #[test]
+    fn stage_routes_in_both_spellings() {
+        assert_eq!(
+            route(&["deploy", "koji", "--stage"], false),
+            Route::Stage("koji")
+        );
+        assert_eq!(route(&["koji", "--stage"], false), Route::Stage("koji"));
+        assert_eq!(
+            route(&["deploy", "koji", "--stage", "now"], false),
+            Route::Usage
+        );
+        assert_eq!(
+            route(&["deploy", "../koji", "--stage"], false),
+            Route::Usage
+        );
     }
 }

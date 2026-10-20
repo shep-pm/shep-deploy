@@ -291,6 +291,7 @@ pub async fn prepare_with<D: Daemon>(
         // the probes and everything else the operator had, not the two
         // fields above alone.
         origin: Some(previous_config.clone()),
+        staged: None,
     };
     // Checked here, before the fetch, the worktree and the build, rather
     // than found out by the record write at the very end. Neither value was

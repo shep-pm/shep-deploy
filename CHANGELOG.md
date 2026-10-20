@@ -5,6 +5,30 @@ All notable changes to this crate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.17] - 2026-10-20
+
+### Added
+
+- Record a staged sha, spared by retention and cleared when a deploy lands
+- Add `deploy <sheep> --stage`, which builds the head and records it without swapping
+
+### Fixed
+
+- Re-read the record after taking the tree lock
+- Record the stage from the on-disk record and refuse when the branch moved
+
+
+## [0.3.16] - 2026-10-20
+
+### Added
+
+- Leave a target alone when a push touches none of its reload paths
+
+### Fixed
+
+- Check Flockfile.toml apart from the table's pathspecs
+
+
 ## [0.3.15] - 2026-10-20
 
 ### Added
