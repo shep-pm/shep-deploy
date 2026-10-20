@@ -373,8 +373,10 @@ serving. Both are caught.
 The rollback is verified the same way. The shepherd accepting its reload is not
 enough: a previous release whose binary is gone is dropped from the flock after
 the reload is accepted. A rollback is reported as one only once the old release
-is seen to come up; otherwise nothing is known to be serving, and the error
-says so and points at `shep flock` and `shep describe <sheep>`.
+is seen to come up, within the restored release's own `listen_timeout` and
+`graceful_timeout` rather than the rejected one's; otherwise nothing is known
+to be serving, and the error says so and points at `shep flock` and `shep
+describe <sheep>`.
 
 ## Removing it
 

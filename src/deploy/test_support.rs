@@ -162,6 +162,12 @@ pub(super) struct Shepherd {
     /// default, because a rollback onto a release that runs is a new
     /// process under a new pid.
     rollback_replaces: bool,
+    /// How many `describe` calls after the rollback's reload it takes the
+    /// restored release to appear, standing in for a previous release that
+    /// needs longer to become ready than the one rejected did.
+    rollback_turnover_after: u32,
+    /// The `describe` count when the rollback's reload was accepted.
+    second_reload_at: Cell<u32>,
     /// From which reload count `describe` answers `NotFound`, standing in
     /// for a shepherd that dropped the sheep from the flock because it
     /// could not spawn it. `None` for never.
@@ -234,6 +240,8 @@ impl Shepherd {
             replaces: true,
             rollback_settles_to: ProcStatus::Online,
             rollback_replaces: true,
+            rollback_turnover_after: 0,
+            second_reload_at: Cell::new(0),
             drops_the_sheep_from: None,
             describe_fails_from: None,
             plant: None,
@@ -382,6 +390,16 @@ impl Shepherd {
         }
     }
 
+    /// The same shepherd, with a rollback that comes up only once `describes`
+    /// more looks have gone by after its reload. At `verify`'s 100ms poll,
+    /// `describes` is tenths of a second.
+    pub(super) fn rollback_ready_after(self, describes: u32) -> Self {
+        Self {
+            rollback_turnover_after: describes,
+            ..self
+        }
+    }
+
     /// The same shepherd, running `instances` instances.
     pub(super) fn running(self, instances: u32) -> Self {
         Self { instances, ..self }
@@ -424,11 +442,20 @@ impl Shepherd {
     /// nothing, which is what an in-flight swap looks like from
     /// `describe`: the old generation, still serving.
     fn landed(&self) -> u32 {
-        if self.describes.get() > self.turnover_after {
-            self.reloads.get()
-        } else {
+        if self.describes.get() <= self.turnover_after {
             0
+        } else if self.reloads.get() >= 2 && !self.rollback_landed() {
+            1
+        } else {
+            self.reloads.get()
         }
+    }
+
+    /// Whether the rollback's reload, once accepted, has put its replacement
+    /// in place.
+    fn rollback_landed(&self) -> bool {
+        self.reloads.get() >= 2
+            && self.describes.get() > self.second_reload_at.get() + self.rollback_turnover_after
     }
 
     /// The pid of instance `index`: a fresh generation per landed
@@ -455,7 +482,7 @@ impl Shepherd {
 
     /// Whether the rollback's reload, the second, has landed.
     fn rolling_back(&self) -> bool {
-        self.reloads.get() >= 2 && self.landed() > 0
+        self.rollback_landed() && self.landed() > 0
     }
 
     /// The status currently serving: whatever this shepherd settles to
@@ -536,6 +563,9 @@ impl Daemon for Shepherd {
             })));
         }
         self.reloads.set(self.reloads.get() + 1);
+        if self.reloads.get() == 2 {
+            self.second_reload_at.set(self.describes.get());
+        }
 
         let lost = self.replies_lost.get();
         if lost > 0 {
