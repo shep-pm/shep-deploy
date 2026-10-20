@@ -330,13 +330,16 @@ pub async fn prepare_with<D: Daemon>(
     // release directory that made the next run fail on git rather than
     // resume, which is the opposite of what the doc above promises.
     // Setup runs no hook: a cutover must not touch the app's database.
-    let (app, spec, _hooks) = {
+    let crate::deploy::Staged {
+        app, spec, linked, ..
+    } = {
         let (tree, checkout, sha) = (tree.clone(), state.checkout.clone(), sha.clone());
         shared::off_thread(move || crate::deploy::stage_release(&tree, &checkout, &sha)).await?
     };
     // Before the build, so a refusal costs no build.
     refuse_ungated_at_setup(sheep, &app, verify)?;
-    build::run(
+    let snapshot = crate::linkcheck::Snapshot::before(sheep, &release, &linked);
+    let built = build::run(
         sheep,
         &release,
         &spec,
@@ -345,7 +348,11 @@ pub async fn prepare_with<D: Daemon>(
         &tree.cache_target(),
         config.build_timeout,
     )
-    .await?;
+    .await;
+    for warning in snapshot.after() {
+        eprintln!("{warning}");
+    }
+    built?;
 
     // `current` now points through a real release carrying the operator's
     // shared files - the whole deliverable of part one. `state.write` comes
