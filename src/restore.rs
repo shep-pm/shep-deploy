@@ -533,7 +533,7 @@ mod tests {
     /// an app running from a path under `$SHEP_HOME` with nothing said about
     /// it.
     ///
-    /// `poll.rs` pins the identical shape for `tick` in
+    /// `poll/tests.rs` pins the identical shape for `tick` in
     /// `a_record_that_cannot_be_read_is_reported_rather_than_skipped`; the
     /// branch here had no equivalent, so a change to `State::read`'s error
     /// path could have gone quiet on one side and been caught only on the
