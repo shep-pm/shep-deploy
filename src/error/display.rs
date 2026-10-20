@@ -1,6 +1,7 @@
 use core::fmt;
 
 use super::Error;
+use crate::hook::Ending;
 use crate::shared::printable;
 
 impl fmt::Display for Error {
@@ -217,6 +218,17 @@ impl fmt::Display for Error {
                 "the build did not finish within {after:?} and was abandoned; raise \
                  build_timeout under [deploy] in dogs.toml if it legitimately needs longer"
             ),
+            Self::Hook { name, ending } => match ending {
+                Ending::Exited(Some(code)) => {
+                    write!(f, "the {name} hook exited with status {code}")
+                }
+                Ending::Exited(None) => write!(f, "the {name} hook was killed by a signal"),
+                Ending::TimedOut(after) => write!(
+                    f,
+                    "the {name} hook did not finish within {after:?} and was abandoned; raise \
+                     build_timeout under [deploy] in dogs.toml if it legitimately needs longer"
+                ),
+            },
             Self::Build { status } => match status {
                 Some(code) => write!(f, "the build exited with status {code}"),
                 None => write!(f, "the build was killed by a signal"),

@@ -70,8 +70,8 @@
 
 mod artifacts;
 mod contain;
-mod env;
-mod privilege;
+pub(crate) mod env;
+pub(crate) mod privilege;
 pub(crate) mod runner;
 #[cfg(test)]
 mod test_support;
@@ -91,7 +91,7 @@ use crate::shared::printable;
 
 use artifacts::copy_artifact;
 use contain::artifact_roots;
-use privilege::{effective_uid, gid_for, root_warning, uid_for};
+use privilege::{Step, effective_uid, gid_for, root_warning, uid_for};
 
 /// What to run to turn a freshly checked-out release into something its
 /// declared script can execute, and what to salvage from wherever that run
@@ -325,7 +325,7 @@ pub async fn run(
     // Once, here, rather than at parse time or per instance: this is the
     // moment the exposure becomes real, and an absent command never reaches
     // it because there is nothing to run.
-    if let Some(warning) = root_warning(sheep, as_user).await {
+    if let Some(warning) = root_warning(sheep, as_user, Step::Build).await {
         eprintln!("{warning}");
     }
 

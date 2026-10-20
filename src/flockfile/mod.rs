@@ -44,6 +44,7 @@ use toml::{Table, Value};
 
 use crate::build::BuildSpec;
 use crate::error::Error;
+use crate::hook::{self, Hooks};
 use crate::shared::{FromCheckout, printable};
 
 pub(crate) use read::OVERRIDE;
@@ -148,6 +149,19 @@ impl Merged {
             ))
         })
     }
+
+    /// The release hooks, or the default (no command, which
+    /// [`crate::hook::run`] treats as a no-op) if neither file declares one.
+    ///
+    /// Read from the same merged document as [`Merged::build_spec`].
+    ///
+    /// # Errors
+    /// [`Error::Config`] if `[dog.deploy.release]` does not match
+    /// [`crate::hook::HookSpec`]'s schema - an unknown key, or a value of the
+    /// wrong type.
+    pub fn hooks(&self) -> Result<Hooks, Error> {
+        hook::parse(&self.doc, &self.release)
+    }
 }
 
 /// The [`AppConfig`] for `sheep`, built from `release`'s own Flockfile.
@@ -225,6 +239,7 @@ fn merged_document(release: &Path, shared: &FromCheckout) -> Result<Value, Error
     // this host the dog reads. See `read_flockfile`.
     let committed = read_required(&release.join("Flockfile.toml"), Follow::Never)?;
     refuse_repo_privilege(&committed)?;
+    hook::refuse_repo_hooks(&committed, "Flockfile.toml")?;
     refuse_duplicate_apps(&committed)?;
 
     // The override is exempt from the privilege refusal only because it is the
@@ -255,6 +270,7 @@ fn merged_document(release: &Path, shared: &FromCheckout) -> Result<Value, Error
     )?;
     if !operators {
         refuse_repo_privilege(&override_doc)?;
+        hook::refuse_repo_hooks(&override_doc, OVERRIDE)?;
     }
 
     Ok(deep_merge(committed, override_doc))
