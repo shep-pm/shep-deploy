@@ -6,4 +6,3 @@
 
 # https://github.com/shep-pm/shep-deploy/issues/27
 1378 src/flockfile.rs
-1212 tests/integration.rs

@@ -8,7 +8,7 @@
 //! Before it, `run_git` was copy-pasted verbatim into six modules, `head_of`
 //! into three, `fixture_release` into two, and `TEST_BUDGET` into four. That
 //! is not a tidiness complaint: the copies had already drifted. The one in
-//! `tests/integration.rs` prints the directory when git fails and the six in
+//! `tests/integration/` prints the directory when git fails and the six in
 //! `src/` do not, so an improvement landed once and six fixtures kept the
 //! worse message. `build.rs`'s copy of `fixture_release` even carried a doc
 //! comment naming the duplication and leaving it there.
@@ -25,7 +25,7 @@
 //! `unimplemented!()` methods between them, which buried the one or two
 //! methods each double really answers.
 //!
-//! `tests/integration.rs` is a separate compilation target and cannot reach
+//! `tests/integration/` is a separate compilation target and cannot reach
 //! this module, so it keeps its own copy. One copy across a target boundary is
 //! the cost of the boundary; six inside one target was not.
 

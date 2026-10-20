@@ -1,7 +1,7 @@
 //! The two questions shep asks this binary before it ever adopts or starts
 //! it: `--version` and `--schema`.
 //!
-//! A separate target from `integration.rs` because it needs no shepherd. The
+//! A separate target from `integration/` because it needs no shepherd. The
 //! whole point of the contract is that shep can ask a dog that has never run
 //! and cannot connect to anything, so a test that required a live daemon
 //! would be testing something else.
