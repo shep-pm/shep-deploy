@@ -113,9 +113,9 @@ reviews:
         top-level `[build]` block, an artifact path that leaves the release, a
         `retention` below 2.
 
-    - path: "src/build.rs"
+    - path: "src/build/**/*.rs"
       instructions: >-
-        This file is the security surface of the crate and has had seven review
+        These files are the security surface of the crate and have had seven review
         rounds. A build command comes from the repository being deployed, so
         whoever can land a commit on the tracked branch chooses code that runs
         on the operator's host, at the dog's own uid unless the app sets `user`.
