@@ -393,6 +393,29 @@ async fn attempt<D: Daemon>(
             if let Err(err) = record_landing(tree, state, head) {
                 eprintln!("shep-deploy: {sheep}: deployed {head}, but could not record it: {err}");
             }
+            // After the record write, so the record names the new sha even
+            // when the hook fails. Like that write, it cannot change the
+            // outcome: the release is live and verified, and undoing it
+            // would take a healthy release out of service.
+            if let Err(err) = hook::run_after(
+                &hooks.after,
+                &hook::Context {
+                    sheep,
+                    sha: head,
+                    release: &release,
+                    as_user: app.user.as_deref(),
+                    passthrough: &config.passthrough,
+                    budget: config.build_timeout,
+                    cache: &tree.cache_target(),
+                    built: spec.command.is_some(),
+                },
+            )
+            .await
+            {
+                eprintln!(
+                    "shep-deploy: {sheep}: deployed {head}, but the after hook failed: {err}"
+                );
+            }
             Ok(Outcome::Deployed {
                 sha: head.to_owned(),
             })

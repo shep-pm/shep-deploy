@@ -82,6 +82,8 @@ pub(crate) enum Step {
     Build,
     /// A release hook, whose command the operator chose.
     ReleaseHook,
+    /// An after hook, whose command the operator chose.
+    AfterHook,
 }
 
 /// The warning to print before running `sheep`'s `step`, or `None` when
@@ -137,6 +139,13 @@ fn root_step_warning(sheep: &str, euid: u32, as_user: Option<&str>, step: Step) 
             "shep-deploy: warning: {sheep}'s release hook is about to run as root, because its \
              app sets no `user`. The hook runs inside a release the deployed repository's build \
              has just written, so whatever that build left there, the hook runs with root's \
+             privilege and the hook's own credentials. Set `user` on the app to run it as that \
+             user instead."
+        ),
+        Step::AfterHook => format!(
+            "shep-deploy: warning: {sheep}'s after hook is about to run as root, because its \
+             app sets no `user`. The hook runs inside a release the deployed repository's build \
+             has written, so whatever that build left there, the hook runs with root's \
              privilege and the hook's own credentials. Set `user` on the app to run it as that \
              user instead."
         ),
@@ -256,6 +265,14 @@ mod tests {
         assert!(warning.contains("web's release hook"), "{warning}");
         assert!(warning.contains("`user`"), "{warning}");
         assert!(!warning.contains("command comes from"), "{warning}");
+    }
+
+    /// fails if the after hook's warning calls itself the release hook.
+    #[test]
+    fn the_after_hook_warning_names_its_own_step() {
+        let warning = root_step_warning("web", 0, None, Step::AfterHook).expect("warns");
+        assert!(warning.contains("web's after hook"), "{warning}");
+        assert!(warning.contains("`user`"), "{warning}");
     }
 
     /// fails if the warning stops naming the sheep, what the exposure is,
