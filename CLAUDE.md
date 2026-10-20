@@ -128,8 +128,10 @@ binary crate with no lib target can share test helpers. Use
 `shared/process.rs` has a production `run_git` and `deploy/prepare.rs` a production `head_of`,
 both in scope in their own test modules.
 
-`tests/integration.rs` is a separate compilation target and keeps its own copy
-of those helpers. That is the cost of the boundary, not an oversight.
+`tests/integration/` is a separate compilation target, one target of several
+modules (`main.rs`, one module per group of tests, `support/` for the helpers),
+and keeps its own copy of those helpers. That is the cost of the boundary, not
+an oversight.
 
 `tests/probe.rs` is the other one, and unlike the integration tier it is NOT
 feature-gated and needs no shepherd: it spawns the built binary with

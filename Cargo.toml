@@ -68,4 +68,5 @@ integration = []
 
 [[test]]
 name = "integration"
+path = "tests/integration/main.rs"
 required-features = ["integration"]
