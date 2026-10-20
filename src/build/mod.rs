@@ -86,11 +86,12 @@ use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::error::Error;
+use crate::ownership;
 use crate::shared::printable;
 
 use artifacts::copy_artifact;
 use contain::artifact_roots;
-use privilege::{gid_for, root_warning, uid_for};
+use privilege::{effective_uid, gid_for, root_warning, uid_for};
 
 /// What to run to turn a freshly checked-out release into something its
 /// declared script can execute, and what to salvage from wherever that run
@@ -277,6 +278,11 @@ impl fmt::Debug for BuildSpec {
 /// their own direct test - a `run`-level test alone can only ever observe
 /// whichever of the two lookups happens to run first.
 ///
+/// A root dog hands `release` and `cache` itself to `as_user` before the
+/// build, since the release was made as root, and puts the release's `.git`
+/// pointer back afterwards, since owning the directory lets the build replace
+/// it. Nothing is handed over when the dog is not root or `as_user` is root.
+///
 /// ## A failing build stops everything
 ///
 /// A non-zero exit becomes [`Error::Build`]. This is the guard that keeps
@@ -295,6 +301,10 @@ impl fmt::Debug for BuildSpec {
 /// source, its destination, or that destination's parent if a declared
 /// artifact cannot be copied - see [`copy_artifact`], which names the source
 /// for the copy itself even when it was the destination that failed.
+/// [`Error::Config`] also if `as_user` was refused on the way to `release`, see
+/// [`ownership::explain_spawn_failure`]. [`Error::Io`] naming the path that
+/// failed if a root dog cannot hand the release to `as_user`, see
+/// [`ownership::hand_over`].
 /// [`Error::Build`] if the command launches and
 /// exits non-zero, or is killed by a signal, naming the exit status when there
 /// is one. [`Error::BuildTimedOut`] if it runs past `budget`, which is
@@ -340,12 +350,42 @@ pub async fn run(
 
     env::apply(&mut child, sheep, passthrough, &spec.env);
 
+    let mut pointer = None;
     if let Some(user) = as_user {
-        child.gid(gid_for(release, user).await?);
-        child.uid(uid_for(release, user).await?);
+        let gid = gid_for(release, user).await?;
+        let uid = uid_for(release, user).await?;
+        if ownership::is_due(effective_uid().await, uid) {
+            let (release, cache) = (release.to_owned(), cache.to_owned());
+            pointer = crate::shared::off_thread(move || {
+                ownership::hand_over(&release, &cache, uid, gid)?;
+                ownership::pin_git_pointer(&release, 0)
+            })
+            .await?;
+        }
+        child.gid(gid);
+        child.uid(uid);
     }
 
-    runner::run_in_group(child, release, budget).await?;
+    let built = runner::run_in_group(child, release, budget)
+        .await
+        .map_err(|error| ownership::explain_spawn_failure(error, as_user, release));
+
+    // However the build ended: a release that fails its build is still
+    // reclaimed by retention later, and git must still recognise its pointer.
+    if let Some(pointer) = pointer {
+        let (path, saved) = (release.to_owned(), pointer);
+        let restored =
+            crate::shared::off_thread(move || ownership::restore_git_pointer(&path, &saved)).await;
+        match (&built, restored) {
+            (Ok(()), restored) => restored?,
+            (Err(_), Err(error)) => eprintln!(
+                "shep-deploy: {sheep}: could not restore the release's .git pointer after the \
+                 build: {error}"
+            ),
+            (Err(_), Ok(())) => {}
+        }
+    }
+    built?;
 
     // Resolved once for every artifact rather than once per artifact:
     // `canonicalize` walks the whole chain and the two roots do not change.

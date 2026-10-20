@@ -812,7 +812,9 @@ pub fn to_link(checkout: &Path) -> Result<FromCheckout, Error> {
 /// [`Error::Io`], naming `checkout`, if it cannot be canonicalised - it
 /// does not exist, or a component of it cannot be resolved. Otherwise
 /// [`Error::Io`], naming the release-side path that failed, if a parent
-/// directory cannot be created or the symlink itself cannot be made.
+/// directory cannot be opened or created or the symlink itself cannot be made.
+/// A parent directory that is a symlink is refused, not followed: see
+/// [`link::link_within`].
 ///
 /// A release-side symlink that already points at the very target this would
 /// make is accepted and left alone: a retry reuses a finished release, and
@@ -831,36 +833,24 @@ pub fn link_into(release: &Path, checkout: &Path, paths: &FromCheckout) -> Resul
         let target = checkout.join(relative);
         let link = release.join(relative);
 
-        if let Some(parent) = link.parent() {
-            fs::create_dir_all(parent).map_err(Error::at(parent))?;
+        // A retry reuses a finished release, so the links the earlier attempt
+        // made are still there. One aimed at exactly the target we would make
+        // is that attempt's own, not a collision.
+        let in_place = link::link_within(release, relative, &target).map_err(Error::at(&link))?;
+        if !in_place {
+            return Err(Error::Config(format!(
+                "{} is already present in the release, so {} cannot be linked from the \
+                 checkout. The usual cause is a build output that git ignores and \
+                 `.shepignore` does not: this dog gives each sheep its own build cache and \
+                 links it in first, and the operator's own build artifacts must not be \
+                 shared into a release at all, because the next release's build would write \
+                 through the link and replace what the current one is serving. Add {} to \
+                 `.shepignore` in the checkout.",
+                link.display(),
+                relative.display(),
+                relative.display()
+            )));
         }
-
-        symlink(&target, &link).or_else(|source| {
-            if source.kind() == io::ErrorKind::AlreadyExists {
-                // A retry reuses a finished release, so the links the earlier
-                // attempt made are still there. One aimed at exactly the
-                // target we would make is that attempt's own, not a collision.
-                if fs::read_link(&link).is_ok_and(|existing| existing == target) {
-                    return Ok(());
-                }
-                return Err(Error::Config(format!(
-                    "{} is already present in the release, so {} cannot be linked from the \
-                     checkout. The usual cause is a build output that git ignores and \
-                     `.shepignore` does not: this dog gives each sheep its own build cache and \
-                     links it in first, and the operator's own build artifacts must not be \
-                     shared into a release at all, because the next release's build would write \
-                     through the link and replace what the current one is serving. Add {} to \
-                     `.shepignore` in the checkout.",
-                    link.display(),
-                    relative.display(),
-                    relative.display()
-                )));
-            }
-            Err(Error::Io {
-                path: link.clone(),
-                source,
-            })
-        })?;
     }
 
     Ok(())
@@ -895,6 +885,8 @@ pub fn link_cache(release: &Path, cache_target: &Path) -> Result<(), Error> {
 
     symlink(cache_target, &link).map_err(Error::at(link))
 }
+
+mod link;
 
 #[cfg(test)]
 mod link_into_tests;

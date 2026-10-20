@@ -66,6 +66,7 @@ mod flockfile;
 mod git;
 mod lock;
 mod optin;
+mod ownership;
 mod paths;
 mod poll;
 mod restore;

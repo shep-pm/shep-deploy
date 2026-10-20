@@ -435,6 +435,17 @@ Set `user` on the app and the build drops to that user's uid and primary group,
 with the shepherd's supplementary groups cleared, before it runs anything. A
 compromised build then gets that app's privileges and nothing more.
 
+Under a root shepherd the build user owns its release and its build cache
+directory (`target`, the directory only, not what is in it) and nothing else.
+The dog hands those over just before the build, through open directory handles
+and never through paths, and skips every symlink, every file with a second
+hard link, and the `.git` file at the release root. The build can still replace
+that file, since it owns the directory, so the dog writes it back after the
+build. `git/`, `deploy.toml`, the lock files, `current` and `releases/`
+stay root's. The user also needs search permission on every directory down to
+the release: a `$SHEP_HOME` of mode 700 refuses the build at its first step.
+Put `$SHEP_HOME` where that user can search, or run the shepherd as that user.
+
 shep-deploy warns when it is about to run a build as root with no `user` set.
 It does not refuse. Whether an app runs without a `user` is shep's call and the
 operator's, not a deploy dog's.
