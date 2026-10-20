@@ -9,7 +9,7 @@ use super::*;
 use crate::fixtures;
 use crate::paths::Tree;
 use crate::restore::test_support::{
-    Recording, Refuse, write_target_never_cut_over, write_target_with_full_origin,
+    Recording, Refuse, write_record, write_target_never_cut_over, write_target_with_full_origin,
     write_target_with_origin, write_target_with_origin_absent,
 };
 use crate::state::State;
@@ -87,9 +87,6 @@ async fn the_report_names_the_origins_cwd_when_the_record_carries_one() {
     let origin: AppConfig =
         toml::from_str("name = \"web\"\nscript = \"server.js\"\ncwd = \"/srv/web\"\n")
             .expect("an app");
-    let tree = Tree::for_sheep(home.path(), "web");
-    fs::create_dir_all(tree.state_file().parent().expect("has a parent"))
-        .expect("create target dir");
     let state = State {
         deployed: Some(fixtures::OTHER_SHA.to_owned()),
         origin_cwd: Some(PathBuf::from("/srv/stale")),
@@ -98,7 +95,7 @@ async fn the_report_names_the_origins_cwd_when_the_record_carries_one() {
         origin: Some(origin),
         ..fixtures::state()
     };
-    state.write(&tree.state_file()).expect("write state");
+    write_record(home.path(), "web", &state);
     let daemon = Recording::new(&["web"], Refuse::Never);
 
     let results = all(&daemon, home.path()).await;
@@ -122,9 +119,6 @@ async fn an_origin_without_a_cwd_is_put_back_at_the_legacy_one() {
     let origin: AppConfig =
         toml::from_str("name = \"web\"\nscript = \"server.js\"\n").expect("an app");
     assert!(origin.cwd.is_none());
-    let tree = Tree::for_sheep(home.path(), "web");
-    fs::create_dir_all(tree.state_file().parent().expect("has a parent"))
-        .expect("create target dir");
     let state = State {
         deployed: Some(fixtures::OTHER_SHA.to_owned()),
         origin_cwd: Some(PathBuf::from("/srv/web")),
@@ -133,7 +127,7 @@ async fn an_origin_without_a_cwd_is_put_back_at_the_legacy_one() {
         origin: Some(origin),
         ..fixtures::state()
     };
-    state.write(&tree.state_file()).expect("write state");
+    write_record(home.path(), "web", &state);
     let daemon = Recording::new(&["web"], Refuse::Never);
 
     let results = all(&daemon, home.path()).await;

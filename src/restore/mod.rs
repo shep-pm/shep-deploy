@@ -306,6 +306,7 @@ pub async fn all<D: Daemon>(daemon: &D, shep_home: &Path) -> Vec<Restored> {
     results
 }
 
+/// The report shep's hook pipes to the operator, which is the whole of what
 /// they see about this.
 #[must_use]
 pub fn report(results: &[Restored]) -> String {

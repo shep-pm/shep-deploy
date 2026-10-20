@@ -16,7 +16,7 @@ use crate::paths::Tree;
 use crate::state::State;
 
 /// Writes `state` as `sheep`'s `deploy.toml` under `home`.
-fn write_record(home: &Path, sheep: &str, state: &State) {
+pub(super) fn write_record(home: &Path, sheep: &str, state: &State) {
     let tree = Tree::for_sheep(home, sheep);
     fs::create_dir_all(tree.state_file().parent().expect("has a parent"))
         .expect("create target dir");
@@ -111,6 +111,8 @@ pub(super) struct Recording {
     starts: RefCell<Vec<AppConfig>>,
     attempts: Cell<usize>,
     delete_attempts: Cell<u32>,
+    /// Where `save_roll` writes, removed with the double.
+    roll_dir: tempfile::TempDir,
 }
 
 impl Recording {
@@ -127,6 +129,7 @@ impl Recording {
             starts: RefCell::new(Vec::new()),
             attempts: Cell::new(0),
             delete_attempts: Cell::new(0),
+            roll_dir: tempfile::tempdir().expect("tempdir"),
         }
     }
 
@@ -258,8 +261,7 @@ impl Daemon for Recording {
         Ok(())
     }
     async fn save_roll(&self) -> Result<PathBuf, Error> {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.keep().join("flock.json");
+        let path = self.roll_dir.path().join("flock.json");
         if self.unreadable_roll {
             // A field of the wrong type, which is what `AppConfig`
             // still refuses. An unknown field was the trigger until
