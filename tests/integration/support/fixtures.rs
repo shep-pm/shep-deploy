@@ -8,6 +8,7 @@ use std::process::Command;
 use super::shepherd::Shepherd;
 
 /// Runs a git subcommand for fixture setup, panicking if it fails.
+#[track_caller]
 pub fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .current_dir(dir)
