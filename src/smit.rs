@@ -53,7 +53,8 @@ fn abbreviate(sha: &str) -> &str {
 /// first verified deploy: `main@` reads as deployed at nothing, where
 /// `main@none` reads as not deployed yet.
 ///
-/// A staged sha follows the deployed one as ` +d4e5f6`.
+/// A staged sha follows the deployed one as ` +d4e5f6`, on a manual target
+/// only.
 #[must_use]
 pub fn text(state: &State) -> String {
     let mark = match state.watch {
@@ -61,10 +62,12 @@ pub fn text(state: &State) -> String {
         Watch::Manual => '⏸',
     };
     let sha = state.deployed.as_deref().map_or("none", abbreviate);
-    let staged = state
-        .staged
-        .as_deref()
-        .map_or_else(String::new, |sha| format!(" +{}", abbreviate(sha)));
+    // A watched target deploys its head on the next tick, so a sha waiting
+    // on a deploy "being asked for" only means something on a manual one.
+    let staged = match (state.watch, state.staged.as_deref()) {
+        (Watch::Manual, Some(sha)) => format!(" +{}", abbreviate(sha)),
+        _ => String::new(),
+    };
     format!("{mark} {}@{sha}{staged}", state.branch)
 }
 
@@ -211,6 +214,16 @@ mod tests {
         let mut state = target(Watch::Manual, Some("a1b2c3d4e5f6"));
         state.staged = Some("d4e5f6a7b8c9".to_owned());
         assert_eq!(text(&state), "⏸ main@a1b2c3 +d4e5f6");
+    }
+
+    /// fails if a watched target shows a staged sha. `--stage` refuses a
+    /// watched target, but `--watch auto` after staging leaves the sha in the
+    /// record, and the next tick deploys the head anyway.
+    #[test]
+    fn a_watched_target_does_not_show_a_staged_sha() {
+        let mut state = target(Watch::Auto, Some("a1b2c3d4e5f6"));
+        state.staged = Some("d4e5f6a7b8c9".to_owned());
+        assert_eq!(text(&state), "▲ main@a1b2c3");
     }
 
     /// fails if a staged sha can make the smit longer than the shepherd
