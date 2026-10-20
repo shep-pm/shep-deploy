@@ -26,7 +26,7 @@ use tokio::process::Command;
 use toml::Value;
 
 use crate::build::env;
-use crate::build::privilege::{Step, gid_for, root_warning, uid_for};
+use crate::build::privilege::{Step, root_warning};
 use crate::build::runner;
 use crate::build::{drop_to, settle_pointer};
 use crate::error::Error;
@@ -117,7 +117,9 @@ const RELEASE: &str = "release";
 ///
 /// A root dog hands the release and the cache to `as_user` first when no build
 /// ran to do it, as the build does, so a hook in an app with no build command
-/// can write in its release. After a build there is nothing left to hand over.
+/// can write in its release. Either way it pins the release's `.git` pointer
+/// and writes it back after the hook, since the hook owns the directory and
+/// runs code the build put there.
 ///
 /// # Errors
 /// [`Error::Config`] if `ctx.as_user` names a user `id` cannot resolve.
@@ -146,16 +148,9 @@ pub(crate) async fn run(spec: &HookSpec, ctx: &Context<'_>) -> Result<(), Error>
 
     let mut pointer = None;
     if let Some(user) = ctx.as_user {
-        let (uid, gid) = if ctx.built {
-            (
-                uid_for(ctx.release, user).await?,
-                gid_for(ctx.release, user).await?,
-            )
-        } else {
-            let dropped = drop_to(ctx.release, ctx.cache, user).await?;
-            pointer = dropped.pointer;
-            (dropped.uid, dropped.gid)
-        };
+        let dropped = drop_to(ctx.release, ctx.cache, user, !ctx.built).await?;
+        pointer = dropped.pointer;
+        let (uid, gid) = (dropped.uid, dropped.gid);
         child.gid(gid);
         child.uid(uid);
     }
@@ -566,34 +561,36 @@ mod tests {
         );
     }
 
-    /// fails if a hook with no build before it cannot run as the dog's own
-    /// user: the hand-over path must be a no-op there, not an error. Handing
-    /// a release to another user needs root, which `ownership`'s own tests
-    /// cover.
+    /// fails if a hook, with or without a build before it, cannot run as the
+    /// dog's own user: the hand-over and the pointer pin must be no-ops there,
+    /// not errors. Handing a release to another user needs root, which
+    /// `ownership`'s own tests cover.
     #[tokio::test]
-    async fn a_hook_without_a_build_runs_as_the_dogs_own_user() {
-        let rel = crate::fixtures::fixture_release(&[]);
-        let me = tokio::process::Command::new("id")
-            .arg("-un")
-            .output()
-            .await
-            .expect("id runs");
-        let me = String::from_utf8(me.stdout)
-            .expect("utf8")
-            .trim()
-            .to_owned();
-        let cache = rel.path().join("cache");
-        let ctx = Context {
-            sheep: "web",
-            sha: crate::fixtures::SHA,
-            release: rel.path(),
-            as_user: Some(&me),
-            passthrough: &[],
-            budget: TEST_BUDGET,
-            cache: &cache,
-            built: false,
-        };
-        run(&hook("touch ran", &[]), &ctx).await.expect("runs");
-        assert!(rel.path().join("ran").exists());
+    async fn a_hook_runs_as_the_dogs_own_user_after_a_build_or_without_one() {
+        for built in [false, true] {
+            let rel = crate::fixtures::fixture_release(&[]);
+            let me = tokio::process::Command::new("id")
+                .arg("-un")
+                .output()
+                .await
+                .expect("id runs");
+            let me = String::from_utf8(me.stdout)
+                .expect("utf8")
+                .trim()
+                .to_owned();
+            let cache = rel.path().join("cache");
+            let ctx = Context {
+                sheep: "web",
+                sha: crate::fixtures::SHA,
+                release: rel.path(),
+                as_user: Some(&me),
+                passthrough: &[],
+                budget: TEST_BUDGET,
+                cache: &cache,
+                built,
+            };
+            run(&hook("touch ran", &[]), &ctx).await.expect("runs");
+            assert!(rel.path().join("ran").exists());
+        }
     }
 }

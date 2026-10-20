@@ -221,21 +221,31 @@ pub(crate) struct Dropped {
     pub(crate) pointer: Option<ownership::GitPointer>,
 }
 
-/// Resolves `user` and, for a root dog, hands `release` and `cache` over to
-/// them, pinning the `.git` pointer first. Shared by the build and the release
-/// hook, since either may be the first command to run in a fresh release.
+/// Resolves `user` and, for a root dog, pins the release's `.git` pointer and,
+/// if `hand_over` is set, hands `release` and `cache` over to them first.
+/// Shared by the build and the release hook. The build is always the first
+/// command to run as `user`, so it hands over. A hook after a build does not,
+/// but still pins: the release belongs to `user` by then, and the hook runs
+/// code the build put there, which can replace the pointer as the build can.
 ///
 /// # Errors
 /// [`Error::Config`] if `user` cannot be resolved. [`Error::Io`] naming the
 /// path that failed if the hand-over cannot finish, see [`ownership::hand_over`].
-pub(crate) async fn drop_to(release: &Path, cache: &Path, user: &str) -> Result<Dropped, Error> {
+pub(crate) async fn drop_to(
+    release: &Path,
+    cache: &Path,
+    user: &str,
+    hand_over: bool,
+) -> Result<Dropped, Error> {
     let gid = gid_for(release, user).await?;
     let uid = uid_for(release, user).await?;
     let mut pointer = None;
     if ownership::is_due(effective_uid().await, uid) {
         let (release, cache) = (release.to_owned(), cache.to_owned());
         pointer = crate::shared::off_thread(move || {
-            ownership::hand_over(&release, &cache, uid, gid)?;
+            if hand_over {
+                ownership::hand_over(&release, &cache, uid, gid)?;
+            }
             ownership::pin_git_pointer(&release, 0)
         })
         .await?;
@@ -416,7 +426,7 @@ pub async fn run(
 
     let mut pointer = None;
     if let Some(user) = as_user {
-        let dropped = drop_to(release, cache, user).await?;
+        let dropped = drop_to(release, cache, user, true).await?;
         pointer = dropped.pointer;
         child.gid(dropped.gid);
         child.uid(dropped.uid);
