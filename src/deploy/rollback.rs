@@ -15,7 +15,7 @@ use crate::error::Error;
 use crate::paths::Tree;
 use crate::state::State;
 use crate::swap;
-use crate::verify::{self, Generation};
+use crate::verify;
 use crate::window::dwell_for;
 
 /// Puts `current` back after a deploy that never started anything.
@@ -223,10 +223,10 @@ fn rollback_target(
 /// the flock as it was just before the reload, with a fresh `patience` and the
 /// dwell `app` asks for. The reload being accepted says the shepherd began a
 /// swap and nothing about the release coming up: one whose binary cannot be
-/// spawned is dropped from the flock after the acceptance. The generation is
-/// captured without `?`, since a capture that fails is no reason to skip the
-/// reload; it leaves nothing to verify against, and is reported as unverified
-/// once the reload is sent.
+/// spawned is dropped from the flock after the acceptance. The generation
+/// comes from [`reload_until`], taken before the attempt that was accepted.
+/// A capture that fails is no reason to skip the reload; it leaves nothing to
+/// verify against, and is reported as unverified once the reload is sent.
 ///
 /// The reload is not best-effort: a swap back that is never reloaded leaves
 /// the old code on disk and the new, unhealthy instance still running, and
@@ -272,10 +272,8 @@ async fn restore<D: Daemon>(
         write_record(tree, state)?;
     }
 
-    let before = Generation::of(daemon, sheep).await;
-
-    match reload_until(daemon, sheep, patience).await {
-        Ok(()) => {}
+    let before = match reload_until(daemon, sheep, patience).await {
+        Ok(before) => before,
         // A failure that could have cleared and did not is the split state:
         // the reload may yet be pending, so the process may be on either
         // release. A failure that could never clear is not - it is just
@@ -291,7 +289,7 @@ async fn restore<D: Daemon>(
             });
         }
         Err(source) => return Err(source),
-    }
+    };
     let reloaded_at = Instant::now();
 
     let unverified = |found: String| Error::RollbackUnverified {
