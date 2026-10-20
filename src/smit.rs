@@ -54,7 +54,7 @@ fn abbreviate(sha: &str) -> &str {
 /// `main@none` reads as not deployed yet.
 ///
 /// A staged sha follows the deployed one as ` +d4e5f6`, on a manual target
-/// only.
+/// only. A branch too long for the suffix is shortened so the suffix stays.
 #[must_use]
 pub fn text(state: &State) -> String {
     let mark = match state.watch {
@@ -64,11 +64,18 @@ pub fn text(state: &State) -> String {
     let sha = state.deployed.as_deref().map_or("none", abbreviate);
     // A watched target deploys its head on the next tick, so a sha waiting
     // on a deploy "being asked for" only means something on a manual one.
-    let staged = match (state.watch, state.staged.as_deref()) {
-        (Watch::Manual, Some(sha)) => format!(" +{}", abbreviate(sha)),
-        _ => String::new(),
-    };
-    format!("{mark} {}@{sha}{staged}", state.branch)
+    match (state.watch, state.staged.as_deref()) {
+        (Watch::Manual, Some(staged)) => {
+            // `fit` cuts from the end, which would drop the staged sha, the
+            // one thing this suffix is there to show. Shorten the branch so
+            // the suffix always fits.
+            let suffix = format!("@{sha} +{}", abbreviate(staged));
+            let room = Smit::MAX_CHARS.saturating_sub(2 + suffix.chars().count());
+            let branch: String = state.branch.chars().take(room).collect();
+            format!("{mark} {branch}{suffix}")
+        }
+        _ => format!("{mark} {}@{sha}", state.branch),
+    }
 }
 
 /// Shorten `text` to [`Smit::MAX_CHARS`] and drop any control character, so
@@ -226,9 +233,10 @@ mod tests {
         assert_eq!(text(&state), "▲ main@a1b2c3");
     }
 
-    /// fails if a staged sha can make the smit longer than the shepherd
-    /// accepts. The branch is the variable part, so a long one has to lose
-    /// its own tail, and the smit that is published must still parse.
+    /// fails if a long branch costs the staged sha its place. The branch is
+    /// the variable part, so it has to lose its own tail, and what is
+    /// published must still parse and still end in the deployed and staged
+    /// shas.
     #[test]
     fn a_staged_sha_cannot_push_the_smit_past_the_shepherds_limit() {
         let mut state = target(Watch::Manual, Some("a1b2c3d4e5f6"));
@@ -236,6 +244,7 @@ mod tests {
         state.staged = Some("d4e5f6a7b8c9".to_owned());
         let shortened = fit(text(&state));
         assert_eq!(shortened.chars().count(), Smit::MAX_CHARS);
+        assert!(shortened.ends_with("@a1b2c3 +d4e5f6"), "{shortened}");
         assert!(shortened.parse::<Smit>().is_ok(), "{shortened}");
     }
 
