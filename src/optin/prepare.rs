@@ -329,7 +329,8 @@ pub async fn prepare_with<D: Daemon>(
     // worktree"), so every run that died anywhere from here onward left a
     // release directory that made the next run fail on git rather than
     // resume, which is the opposite of what the doc above promises.
-    let (app, spec) = {
+    // Setup runs no hook: a cutover must not touch the app's database.
+    let (app, spec, _hooks) = {
         let (tree, checkout, sha) = (tree.clone(), state.checkout.clone(), sha.clone());
         shared::off_thread(move || crate::deploy::stage_release(&tree, &checkout, &sha)).await?
     };

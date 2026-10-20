@@ -13,6 +13,8 @@ use std::time::Duration;
 use shep_client::shep_core::protocol::{RpcErrorCode, SmitError};
 use shep_client::{ConnectError, RequestError};
 
+use crate::hook::Ending;
+
 /// Anything that can go wrong in one deploy.
 ///
 /// Deliberately `#[derive(Debug)]` rather than a hand-written impl: nothing
@@ -344,6 +346,18 @@ pub enum Error {
         /// signal instead of exiting.
         status: Option<i32>,
     },
+    /// A hook ran and did not succeed: it exited non-zero, was killed by a
+    /// signal, or ran past `build_timeout` and was abandoned.
+    ///
+    /// Its own variant rather than [`Self::Build`] because the two need
+    /// different words: a failed hook has already begun to act on the app's
+    /// own database, and the operator has to know that was the step.
+    Hook {
+        /// The hook's name in the Flockfile, such as `release`.
+        name: &'static str,
+        /// How it ended.
+        ending: Ending,
+    },
     /// Another process is already deploying this sheep.
     AlreadyDeploying {
         /// The sheep whose tree is held.
@@ -451,6 +465,7 @@ impl core::error::Error for Error {
             | Self::RollbackUnverified { .. }
             | Self::Stranded { .. }
             | Self::Panicked { .. }
+            | Self::Hook { .. }
             | Self::Build { .. } => None,
         }
     }
@@ -747,6 +762,38 @@ mod tests {
     fn a_build_error_names_a_nonzero_exit_status() {
         let err = Error::Build { status: Some(3) };
         assert!(err.to_string().contains('3'));
+    }
+
+    /// fails if a hook's failure stops saying which hook it was and how it
+    /// ended: the exit status, the signal, or the knob for a timeout.
+    #[test]
+    fn a_hook_error_names_the_hook_and_how_it_ended() {
+        let exited = Error::Hook {
+            name: "release",
+            ending: Ending::Exited(Some(3)),
+        }
+        .to_string();
+        assert!(
+            exited.contains("release hook") && exited.contains("status 3"),
+            "{exited}"
+        );
+
+        let killed = Error::Hook {
+            name: "release",
+            ending: Ending::Exited(None),
+        }
+        .to_string();
+        assert!(killed.contains("signal"), "{killed}");
+
+        let timed_out = Error::Hook {
+            name: "release",
+            ending: Ending::TimedOut(Duration::from_secs(90)),
+        }
+        .to_string();
+        assert!(
+            timed_out.contains("release hook") && timed_out.contains("build_timeout"),
+            "{timed_out}"
+        );
     }
 
     /// fails if the signal-killed branch collapses into the exit-status

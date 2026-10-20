@@ -74,9 +74,19 @@ pub(super) async fn effective_uid() -> Option<u32> {
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
-/// The warning to print before running `sheep`'s build, or `None` when
+/// Which step of a deploy is about to run a command, for the words of the
+/// root warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// The release's build, whose command the deployed repository chose.
+    Build,
+    /// A release hook, whose command the operator chose.
+    ReleaseHook,
+}
+
+/// The warning to print before running `sheep`'s `step`, or `None` when
 /// there is nothing to warn about: [`effective_uid`] and
-/// [`root_build_warning`] composed, which is everything [`run`] does with
+/// [`root_step_warning`] composed, which is everything [`run`] does with
 /// them besides printing.
 ///
 /// The split is where testability runs out and it is worth being exact
@@ -88,23 +98,23 @@ pub(super) async fn effective_uid() -> Option<u32> {
 /// gate: delete the call and this function has no callers, which
 /// `-D warnings` refuses. That is weaker than a test and it is the reason
 /// this is one function rather than two lines inline.
-pub(super) async fn root_warning(sheep: &str, as_user: Option<&str>) -> Option<String> {
+pub(crate) async fn root_warning(sheep: &str, as_user: Option<&str>, step: Step) -> Option<String> {
     // A build that drops to a user has nothing to warn about, so the `id`
     // spawn is skipped rather than made and then thrown away, which it was
     // on every deploy of every correctly configured app.
     if as_user.is_some() {
         return None;
     }
-    root_build_warning(sheep, effective_uid().await?, as_user)
+    root_step_warning(sheep, effective_uid().await?, as_user, step)
 }
 
-/// The warning to print before running `sheep`'s build, or `None` when
+/// The warning to print before running `sheep`'s `step`, or `None` when
 /// there is nothing to warn about.
 ///
 /// Fires only when both halves are true: this process is root, and the app
-/// sets no `user` for the build to drop to. Then the build - a command the
-/// deployed repository chose - runs with the shepherd's own privilege,
-/// which is the exposure the module doc describes.
+/// sets no `user` for the command to drop to. Then the command runs with the
+/// shepherd's own privilege, which for a build - a command the deployed
+/// repository chose - is the exposure the module doc describes.
 ///
 /// It warns and never refuses, which is this project owner's explicit
 /// decision. An app with no `user` is a configuration shep itself accepts,
@@ -113,21 +123,28 @@ pub(super) async fn root_warning(sheep: &str, as_user: Option<&str>) -> Option<S
 /// Split out from [`run`] so the decision can be tested at every
 /// combination without the test having to be root, which is the one thing a
 /// test of this cannot arrange.
-fn root_build_warning(sheep: &str, euid: u32, as_user: Option<&str>) -> Option<String> {
+fn root_step_warning(sheep: &str, euid: u32, as_user: Option<&str>, step: Step) -> Option<String> {
     const ROOT: u32 = 0;
 
-    (euid == ROOT && as_user.is_none()).then(|| {
-        format!(
+    (euid == ROOT && as_user.is_none()).then(|| match step {
+        Step::Build => format!(
             "shep-deploy: warning: {sheep}'s build is about to run as root, because its app sets \
              no `user`. The build command comes from the deployed repository, so whatever that \
              repository can be made to run, it runs as root. Set `user` on the app to build as \
              that user instead."
-        )
+        ),
+        Step::ReleaseHook => format!(
+            "shep-deploy: warning: {sheep}'s release hook is about to run as root, because its \
+             app sets no `user`. The hook runs inside a release the deployed repository's build \
+             has just written, so whatever that build left there, the hook runs with root's \
+             privilege and the hook's own credentials. Set `user` on the app to run it as that \
+             user instead."
+        ),
     })
 }
 
 /// Resolves `user` to a uid. See [`resolve_id`].
-pub(super) async fn uid_for(release: &Path, user: &str) -> Result<u32, Error> {
+pub(crate) async fn uid_for(release: &Path, user: &str) -> Result<u32, Error> {
     resolve_id(release, user, "-u", "uid").await
 }
 
@@ -140,7 +157,7 @@ pub(super) async fn uid_for(release: &Path, user: &str) -> Result<u32, Error> {
 /// field, so an explicit group is available upstream if a later task wants
 /// to thread one through - this just doesn't guess at it from `as_user`
 /// alone.
-pub(super) async fn gid_for(release: &Path, user: &str) -> Result<u32, Error> {
+pub(crate) async fn gid_for(release: &Path, user: &str) -> Result<u32, Error> {
     resolve_id(release, user, "-g", "gid").await
 }
 
@@ -206,14 +223,39 @@ mod tests {
     /// to be root.
     #[test]
     fn only_a_rootless_build_as_root_is_warned_about() {
-        assert!(root_build_warning("web", 0, None).is_some());
+        assert!(root_step_warning("web", 0, None, Step::Build).is_some());
 
         // Root, but the build drops to somebody: this is the configuration
         // the warning exists to ask for.
-        assert!(root_build_warning("web", 0, Some("reactmap")).is_none());
+        assert!(root_step_warning("web", 0, Some("reactmap"), Step::Build).is_none());
         // Not root: there is no shepherd privilege to hand a build.
-        assert!(root_build_warning("web", 501, None).is_none());
-        assert!(root_build_warning("web", 501, Some("reactmap")).is_none());
+        assert!(root_step_warning("web", 501, None, Step::Build).is_none());
+        assert!(root_step_warning("web", 501, Some("reactmap"), Step::Build).is_none());
+    }
+
+    /// fails if the build's warning text changes: it is what operators already
+    /// grep for.
+    #[test]
+    fn the_build_warning_text_is_pinned() {
+        assert_eq!(
+            root_step_warning("web", 0, None, Step::Build).as_deref(),
+            Some(
+                "shep-deploy: warning: web's build is about to run as root, because its app \
+                 sets no `user`. The build command comes from the deployed repository, so \
+                 whatever that repository can be made to run, it runs as root. Set `user` on \
+                 the app to build as that user instead."
+            )
+        );
+    }
+
+    /// fails if the hook's warning stops naming the sheep, the step and the
+    /// way out, or reuses the build's claim about where its command came from.
+    #[test]
+    fn the_hook_warning_names_the_step_and_the_way_out() {
+        let warning = root_step_warning("web", 0, None, Step::ReleaseHook).expect("warns");
+        assert!(warning.contains("web's release hook"), "{warning}");
+        assert!(warning.contains("`user`"), "{warning}");
+        assert!(!warning.contains("command comes from"), "{warning}");
     }
 
     /// fails if the warning stops naming the sheep, what the exposure is,
@@ -222,7 +264,7 @@ mod tests {
     /// which knob is one they learn to skip.
     #[test]
     fn the_root_warning_names_the_sheep_and_the_way_out() {
-        let warning = root_build_warning("bpm", 0, None).expect("warns");
+        let warning = root_step_warning("bpm", 0, None, Step::Build).expect("warns");
         assert!(warning.contains("bpm"), "{warning}");
         assert!(warning.contains("root"), "{warning}");
         assert!(warning.contains("repository"), "{warning}");
@@ -247,9 +289,13 @@ mod tests {
     async fn the_warning_reads_this_process_and_agrees_with_the_decision() {
         let euid = effective_uid().await.expect("a uid");
 
-        assert!(root_warning("web", Some("reactmap")).await.is_none());
+        assert!(
+            root_warning("web", Some("reactmap"), Step::Build)
+                .await
+                .is_none()
+        );
         assert_eq!(
-            root_warning("web", None).await.is_some(),
+            root_warning("web", None, Step::Build).await.is_some(),
             euid == 0,
             "warned about as uid {euid}"
         );

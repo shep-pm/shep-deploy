@@ -8,6 +8,7 @@ use shep_client::shep_core::config::AppConfig;
 
 use crate::build::BuildSpec;
 use crate::error::Error;
+use crate::hook::Hooks;
 use crate::paths::Tree;
 use crate::state::Verify;
 use crate::{flockfile, git, linkcheck, shared};
@@ -18,19 +19,20 @@ use crate::{flockfile, git, linkcheck, shared};
 /// One function because two callers, [`super::attempt`] and
 /// [`crate::optin::prepare_with`], had the same seven lines, and because all of
 /// it is blocking work (git, symlinks, file reads) that both run through
-/// [`shared::off_thread`]. Answers the app to register and the build to
-/// run.
+/// [`shared::off_thread`]. Answers the app to register, the build to
+/// run and the hooks to run after it.
 ///
 /// # Errors
 /// Whatever [`checkout_release`], [`shared::link_cache`],
 /// [`shared::to_link`], [`shared::link_into`] and [`flockfile::read`]
 /// return, plus the app-selection and schema failures of
-/// [`flockfile::Merged::app_config`] and [`flockfile::Merged::build_spec`].
+/// [`flockfile::Merged::app_config`], [`flockfile::Merged::build_spec`] and
+/// [`flockfile::Merged::hooks`].
 pub(crate) fn stage_release(
     tree: &Tree,
     checkout: &Path,
     sha: &str,
-) -> Result<(AppConfig, BuildSpec), Error> {
+) -> Result<(AppConfig, BuildSpec, Hooks), Error> {
     let release = tree.release(sha);
     checkout_release(tree, sha)?;
     shared::link_cache(&release, &tree.cache_target())?;
@@ -43,12 +45,13 @@ pub(crate) fn stage_release(
     let flockfiles = flockfile::read(&release, &shared_paths)?;
     let app = flockfiles.app_config(tree.sheep())?;
     let spec = flockfiles.build_spec()?;
+    let hooks = flockfiles.hooks()?;
     // Printed here rather than returned, as `build::root_warning` is: nothing
     // is refused, and `deploy` and `setup` both come through this function.
     for warning in linkcheck::warnings(tree.sheep(), &shared_paths, &spec.artifacts) {
         eprintln!("{warning}");
     }
-    Ok((app, spec))
+    Ok((app, spec, hooks))
 }
 
 /// Checks `sha` out at `release`, unless a FINISHED checkout is already there.

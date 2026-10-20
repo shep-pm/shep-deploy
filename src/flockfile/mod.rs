@@ -32,6 +32,11 @@
 //! restriction: it is the operator's own file, and pinning `user` or a log
 //! path there is exactly the "pin it so upstream can never change it"
 //! mechanism every other field already gets.
+//!
+//! The release hook tables, `[dog.deploy.release]` and `[dog.deploy.after]`,
+//! are held to the same line for a different reason: their `env` holds the
+//! operator's secrets, so only an override the dog linked in from the
+//! operator's checkout may carry them. See [`crate::hook`].
 
 mod read;
 mod refuse;
@@ -44,6 +49,7 @@ use toml::{Table, Value};
 
 use crate::build::BuildSpec;
 use crate::error::Error;
+use crate::hook::{self, Hooks};
 use crate::shared::{FromCheckout, printable};
 
 pub(crate) use read::OVERRIDE;
@@ -76,7 +82,9 @@ pub struct Merged {
 /// committed file names one app twice; or if it sets, on any app, `user`,
 /// `group`, `out_file`, `err_file`, `watch`, an `exec` probe, a probe whose
 /// target is off loopback, or a probe spelled as anything but a table. See
-/// [`refuse_repo_privilege`] for why each is on the list.
+/// [`refuse_repo_privilege`] for why each is on the list. Also if the committed
+/// file, or an override the operator did not link in, carries
+/// `[dog.deploy.release]` or `[dog.deploy.after]`: see [`hook::refuse_repo_hooks`].
 pub fn read(release: &Path, shared: &FromCheckout) -> Result<Merged, Error> {
     Ok(Merged {
         doc: merged_document(release, shared)?,
@@ -147,6 +155,19 @@ impl Merged {
                 printable(source.message())
             ))
         })
+    }
+
+    /// The release hooks, or the default (no command, which
+    /// [`crate::hook::run`] treats as a no-op) if neither file declares one.
+    ///
+    /// Read from the same merged document as [`Merged::build_spec`].
+    ///
+    /// # Errors
+    /// [`Error::Config`] if `[dog.deploy.release]` does not match
+    /// [`crate::hook::HookSpec`]'s schema - an unknown key, or a value of the
+    /// wrong type.
+    pub fn hooks(&self) -> Result<Hooks, Error> {
+        hook::parse(&self.doc, &self.release)
     }
 }
 
@@ -225,6 +246,7 @@ fn merged_document(release: &Path, shared: &FromCheckout) -> Result<Value, Error
     // this host the dog reads. See `read_flockfile`.
     let committed = read_required(&release.join("Flockfile.toml"), Follow::Never)?;
     refuse_repo_privilege(&committed)?;
+    hook::refuse_repo_hooks(&committed, "Flockfile.toml")?;
     refuse_duplicate_apps(&committed)?;
 
     // The override is exempt from the privilege refusal only because it is the
@@ -255,6 +277,7 @@ fn merged_document(release: &Path, shared: &FromCheckout) -> Result<Value, Error
     )?;
     if !operators {
         refuse_repo_privilege(&override_doc)?;
+        hook::refuse_repo_hooks(&override_doc, OVERRIDE)?;
     }
 
     Ok(deep_merge(committed, override_doc))

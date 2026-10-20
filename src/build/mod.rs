@@ -70,8 +70,8 @@
 
 mod artifacts;
 mod contain;
-mod env;
-mod privilege;
+pub(crate) mod env;
+pub(crate) mod privilege;
 pub(crate) mod runner;
 #[cfg(test)]
 mod test_support;
@@ -91,7 +91,7 @@ use crate::shared::printable;
 
 use artifacts::copy_artifact;
 use contain::artifact_roots;
-use privilege::{effective_uid, gid_for, root_warning, uid_for};
+use privilege::{Step, effective_uid, gid_for, root_warning, uid_for};
 
 /// What to run to turn a freshly checked-out release into something its
 /// declared script can execute, and what to salvage from wherever that run
@@ -213,6 +213,80 @@ impl fmt::Debug for BuildSpec {
     }
 }
 
+/// What a command run as `user` needs: the ids to drop to, and the release's
+/// `.git` pointer if a root dog pinned it.
+pub(crate) struct Dropped {
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+    pub(crate) pointer: Option<ownership::GitPointer>,
+}
+
+/// Resolves `user` and, for a root dog, pins the release's `.git` pointer and,
+/// if `hand_over` is set, hands `release` and `cache` over to them first.
+/// Shared by the build and the release hook. The build is always the first
+/// command to run as `user`, so it hands over. A hook after a build does not,
+/// but still pins: the release belongs to `user` by then, and the hook runs
+/// code the build put there, which can replace the pointer as the build can.
+///
+/// # Errors
+/// [`Error::Config`] if `user` cannot be resolved. [`Error::Io`] naming the
+/// path that failed if the hand-over cannot finish, see [`ownership::hand_over`].
+pub(crate) async fn drop_to(
+    release: &Path,
+    cache: &Path,
+    user: &str,
+    hand_over: bool,
+) -> Result<Dropped, Error> {
+    let gid = gid_for(release, user).await?;
+    let uid = uid_for(release, user).await?;
+    let mut pointer = None;
+    if ownership::is_due(effective_uid().await, uid) {
+        let (release, cache) = (release.to_owned(), cache.to_owned());
+        pointer = crate::shared::off_thread(move || {
+            if hand_over {
+                ownership::hand_over(&release, &cache, uid, gid)?;
+            }
+            ownership::pin_git_pointer(&release, 0)
+        })
+        .await?;
+    }
+    Ok(Dropped { uid, gid, pointer })
+}
+
+/// Puts a pinned `.git` pointer back, however the command `ran` ended: a
+/// release that fails is still reclaimed by retention later, and git must
+/// still recognise its pointer. A failed restore is an error only when the
+/// command itself succeeded; otherwise it is printed, naming `what`.
+///
+/// # Errors
+/// [`Error::Io`] if the pointer cannot be restored after a command that
+/// succeeded.
+pub(crate) async fn settle_pointer<T>(
+    sheep: &str,
+    release: &Path,
+    pointer: Option<ownership::GitPointer>,
+    ran: &Result<T, Error>,
+    what: &str,
+) -> Result<(), Error> {
+    let Some(pointer) = pointer else {
+        return Ok(());
+    };
+    let path = release.to_owned();
+    let restored =
+        crate::shared::off_thread(move || ownership::restore_git_pointer(&path, &pointer)).await;
+    match (ran, restored) {
+        (Ok(_), restored) => restored,
+        (Err(_), Err(error)) => {
+            eprintln!(
+                "shep-deploy: {sheep}: could not restore the release's .git pointer after \
+                 {what}: {error}"
+            );
+            Ok(())
+        }
+        (Err(_), Ok(())) => Ok(()),
+    }
+}
+
 /// Runs `spec.command` inside `release`, as `as_user` if given, then copies
 /// every declared artifact back into the release.
 ///
@@ -325,7 +399,7 @@ pub async fn run(
     // Once, here, rather than at parse time or per instance: this is the
     // moment the exposure becomes real, and an absent command never reaches
     // it because there is nothing to run.
-    if let Some(warning) = root_warning(sheep, as_user).await {
+    if let Some(warning) = root_warning(sheep, as_user, Step::Build).await {
         eprintln!("{warning}");
     }
 
@@ -352,39 +426,17 @@ pub async fn run(
 
     let mut pointer = None;
     if let Some(user) = as_user {
-        let gid = gid_for(release, user).await?;
-        let uid = uid_for(release, user).await?;
-        if ownership::is_due(effective_uid().await, uid) {
-            let (release, cache) = (release.to_owned(), cache.to_owned());
-            pointer = crate::shared::off_thread(move || {
-                ownership::hand_over(&release, &cache, uid, gid)?;
-                ownership::pin_git_pointer(&release, 0)
-            })
-            .await?;
-        }
-        child.gid(gid);
-        child.uid(uid);
+        let dropped = drop_to(release, cache, user, true).await?;
+        pointer = dropped.pointer;
+        child.gid(dropped.gid);
+        child.uid(dropped.uid);
     }
 
     let built = runner::run_in_group(child, release, budget)
         .await
         .map_err(|error| ownership::explain_spawn_failure(error, as_user, release));
 
-    // However the build ended: a release that fails its build is still
-    // reclaimed by retention later, and git must still recognise its pointer.
-    if let Some(pointer) = pointer {
-        let (path, saved) = (release.to_owned(), pointer);
-        let restored =
-            crate::shared::off_thread(move || ownership::restore_git_pointer(&path, &saved)).await;
-        match (&built, restored) {
-            (Ok(()), restored) => restored?,
-            (Err(_), Err(error)) => eprintln!(
-                "shep-deploy: {sheep}: could not restore the release's .git pointer after the \
-                 build: {error}"
-            ),
-            (Err(_), Ok(())) => {}
-        }
-    }
+    settle_pointer(sheep, release, pointer, &built, "the build").await?;
     built?;
 
     // Resolved once for every artifact rather than once per artifact:

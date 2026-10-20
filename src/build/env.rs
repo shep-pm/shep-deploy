@@ -22,12 +22,12 @@ use tokio::process::Command;
 /// and keeps its own environment, so a private repository still clones; it
 /// is only the build that loses the socket, and an operator who genuinely
 /// needs it during a build can name it in `passthrough`.
-pub(super) const BASE_ENV: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TZ"];
+pub(crate) const BASE_ENV: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TZ"];
 
 /// Replaces `child`'s environment with [`BASE_ENV`], then whatever the
 /// operator's `passthrough` names, then `spec_env`, and nothing this process
 /// itself inherited beyond those.
-pub(super) fn apply(
+pub(crate) fn apply(
     child: &mut Command,
     sheep: &str,
     passthrough: &[String],
