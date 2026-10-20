@@ -25,18 +25,21 @@ const WALK_DIRECTORY: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
-/// What a visit acts on, always by a descriptor the walk already holds.
+/// What a visit acts on, always a descriptor the walk already holds.
 pub(crate) enum Handle<'a> {
     /// A directory the walk has open.
     Dir(&'a OwnedFd),
-    /// An entry that is not a directory, named in the directory `parent`.
-    Entry {
-        /// The open directory the entry lives in.
-        parent: &'a OwnedFd,
-        /// The entry's name within `parent`.
-        name: &'a OsStr,
-    },
+    /// A file the walk has open, never a symlink and never shared with another
+    /// name.
+    File(&'a OwnedFd),
 }
+
+/// How an entry that is not a directory is opened: a symlink is refused by
+/// the kernel, and `O_NONBLOCK` keeps a FIFO from holding the walk.
+const WALK_FILE: OFlags = OFlags::RDONLY
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::NONBLOCK)
+    .union(OFlags::CLOEXEC);
 
 /// Visits the release root and everything under it that is not a symlink.
 ///
@@ -45,8 +48,8 @@ pub(crate) enum Handle<'a> {
 /// open is refused by the kernel and skipped, never followed. Symlinks are
 /// never visited: the shared ones point into the operator's checkout. A file
 /// with another hard link is skipped too, since changing its owner changes
-/// the other name's. The `.git` pointer at the release root is left out so the build cannot re-aim
-/// it at a repository of its own.
+/// the other name's. The `.git` pointer at the release root is left out, which
+/// does not stop the build replacing it: see [`pin_git_pointer`].
 ///
 /// `visit` gets the path relative to `release`, empty for the root itself.
 fn walk_release(
@@ -105,23 +108,22 @@ fn walk_dir(
                     Err(errno) => return Err(io_error(&base.join(&below), errno)),
                 }
             }
-            _ => {
-                // A name that shares its inode with another is left alone: the
-                // other name may be outside the release, and the owner is the
-                // inode's.
-                match rustix::fs::statat(dir, &name, AtFlags::SYMLINK_NOFOLLOW) {
+            _ => match rustix::fs::openat(dir, &name, WALK_FILE, Mode::empty()) {
+                // A name that shares its inode with another is left alone:
+                // the other name may be outside the release, and the owner is
+                // the inode's. Checked on the descriptor that is then changed,
+                // so the name cannot be swapped between the two.
+                Ok(file) => match rustix::fs::fstat(&file) {
                     Ok(stat) if stat.st_nlink > 1 => {}
-                    Ok(_) => visit(
-                        &below,
-                        Handle::Entry {
-                            parent: dir,
-                            name: &name,
-                        },
-                    )?,
-                    Err(Errno::NOENT) => {}
+                    Ok(_) => visit(&below, Handle::File(&file))?,
                     Err(errno) => return Err(io_error(&base.join(&below), errno)),
-                }
-            }
+                },
+                // Became a link, went away, or is a socket, which cannot be
+                // opened.
+                Err(errno)
+                    if errno == Errno::LOOP || errno == Errno::NOENT || errno == Errno::NXIO => {}
+                Err(errno) => return Err(io_error(&base.join(&below), errno)),
+            },
         }
     }
     Ok(())
@@ -158,7 +160,9 @@ pub(crate) fn is_due(euid: Option<u32>, uid: u32) -> bool {
 /// walk holds and never through a path: on a retried release, a process the
 /// previous build left behind can swap a directory for a link between two
 /// steps, and a path chown by root would follow it. Symlinks are skipped, and
-/// so is the `.git` pointer at the release root; see [`walk_release`].
+/// so is the `.git` pointer at the release root, which the build can still
+/// replace because it owns the directory; see [`walk_release`] and
+/// [`pin_git_pointer`].
 /// `cache_target` is changed itself and not what is in it.
 ///
 /// Everything else in the tree, including `releases/` above the release,
@@ -193,13 +197,91 @@ fn chown_under(
     let (owner, group) = (Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid)));
     move |relative, handle| {
         match handle {
-            Handle::Dir(dir) => rustix::fs::fchown(dir, owner, group),
-            Handle::Entry { parent, name } => {
-                rustix::fs::chownat(parent, name, owner, group, AtFlags::SYMLINK_NOFOLLOW)
-            }
+            Handle::Dir(fd) | Handle::File(fd) => rustix::fs::fchown(fd, owner, group),
         }
         .map_err(|errno| io_error(&base.join(relative), errno))
     }
+}
+
+/// The `.git` pointer file at a release root, as the dog wrote it.
+pub(crate) struct GitPointer(Vec<u8>);
+
+const GIT_POINTER: &str = ".git";
+
+/// The longest pointer that is read; a real one is a line naming a directory.
+const GIT_POINTER_LIMIT: u64 = 64 * 1024;
+
+/// Reads the release's `.git` pointer so it can be put back after the build.
+///
+/// The build user owns the release root and so can delete the pointer and
+/// write another, which leaving the file itself unchowned does not stop. A
+/// pointer re-aimed at a directory git did not make for the release fails
+/// git's validation when retention removes the worktree, on every cycle.
+///
+/// `None` when there is nothing to pin: no pointer, or one that is not a
+/// regular file owned by `dog_uid`. The dog wrote the pointer and never hands
+/// it over, so any other owner means an earlier build replaced it, and this
+/// does not vouch for that one.
+///
+/// # Errors
+/// [`Error::Io`] naming the release if it cannot be opened or the pointer
+/// cannot be read.
+pub(crate) fn pin_git_pointer(release: &Path, dog_uid: u32) -> Result<Option<GitPointer>, Error> {
+    use std::io::Read as _;
+
+    let path = release.join(GIT_POINTER);
+    let root = rustix::fs::open(release, WALK_DIRECTORY, Mode::empty())
+        .map_err(|errno| io_error(release, errno))?;
+    let file = match rustix::fs::openat(&root, GIT_POINTER, WALK_FILE, Mode::empty()) {
+        Ok(file) => file,
+        Err(errno) if errno == Errno::NOENT || errno == Errno::LOOP || errno == Errno::NXIO => {
+            return Ok(None);
+        }
+        Err(errno) => return Err(io_error(&path, errno)),
+    };
+    let stat = rustix::fs::fstat(&file).map_err(|errno| io_error(&path, errno))?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile || stat.st_uid != dog_uid {
+        return Ok(None);
+    }
+    let mut content = Vec::new();
+    std::fs::File::from(file)
+        .take(GIT_POINTER_LIMIT)
+        .read_to_end(&mut content)
+        .map_err(Error::at(&path))?;
+    Ok(Some(GitPointer(content)))
+}
+
+/// Puts the pinned `.git` pointer back at the release root, whatever the
+/// build left at that name.
+///
+/// The name is unlinked and made again with `O_EXCL | O_NOFOLLOW` against the
+/// release's own descriptor, so nothing is written through a link. A process
+/// the build left behind outside its group can still race this; it can do no
+/// more than the build could.
+///
+/// # Errors
+/// [`Error::Io`] naming the pointer if the name cannot be cleared or made.
+pub(crate) fn restore_git_pointer(release: &Path, pointer: &GitPointer) -> Result<(), Error> {
+    use std::io::Write as _;
+
+    let path = release.join(GIT_POINTER);
+    let root = rustix::fs::open(release, WALK_DIRECTORY, Mode::empty())
+        .map_err(|errno| io_error(release, errno))?;
+    match rustix::fs::unlinkat(&root, GIT_POINTER, AtFlags::empty()) {
+        Ok(()) => {}
+        Err(errno) if errno == Errno::NOENT => {}
+        Err(errno) => return Err(io_error(&path, errno)),
+    }
+    let file = rustix::fs::openat(
+        &root,
+        GIT_POINTER,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o644),
+    )
+    .map_err(|errno| io_error(&path, errno))?;
+    std::fs::File::from(file)
+        .write_all(&pointer.0)
+        .map_err(Error::at(&path))
 }
 
 /// Rewords a build that could not even start as `user`, when the cause is
@@ -443,5 +525,75 @@ mod tests {
 
         let invalid = hand_over(release.path(), cache.path(), u32::MAX, me.gid());
         assert!(matches!(invalid, Err(Error::Config(_))));
+    }
+
+    fn my_uid(path: &Path) -> u32 {
+        use std::os::unix::fs::MetadataExt as _;
+        fs::metadata(path).expect("stat").uid()
+    }
+
+    /// fails if a build that deletes and recreates the `.git` pointer, which
+    /// owning the release root allows, leaves the re-aimed one in place.
+    #[test]
+    fn a_re_aimed_git_pointer_is_put_back_after_the_build() {
+        let release =
+            fixtures::fixture_release(&[(".git", "gitdir: /srv/tree/git/worktrees/abc\n")]);
+        let pointer = pin_git_pointer(release.path(), my_uid(release.path()))
+            .expect("pins")
+            .expect("a pointer the dog owns");
+
+        fs::remove_file(release.path().join(".git")).expect("the build deletes it");
+        fs::write(release.path().join(".git"), "gitdir: /elsewhere\n").expect("and re-aims it");
+        restore_git_pointer(release.path(), &pointer).expect("restores");
+
+        assert_eq!(
+            fs::read_to_string(release.path().join(".git")).expect("reads"),
+            "gitdir: /srv/tree/git/worktrees/abc\n"
+        );
+    }
+
+    /// fails if the pointer is put back by writing through whatever the build
+    /// left at its name.
+    #[test]
+    fn restoring_the_git_pointer_does_not_write_through_a_link() {
+        let release = fixtures::fixture_release(&[(".git", "gitdir: x\n")]);
+        let outside = fixtures::fixture_release(&[("victim", "untouched")]);
+        let pointer = pin_git_pointer(release.path(), my_uid(release.path()))
+            .expect("pins")
+            .expect("a pointer the dog owns");
+
+        fs::remove_file(release.path().join(".git")).expect("removed");
+        std::os::unix::fs::symlink(outside.path().join("victim"), release.path().join(".git"))
+            .expect("link");
+        restore_git_pointer(release.path(), &pointer).expect("restores");
+
+        assert_eq!(
+            fs::read_to_string(outside.path().join("victim")).expect("reads"),
+            "untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(release.path().join(".git")).expect("reads"),
+            "gitdir: x\n"
+        );
+    }
+
+    /// fails if a pointer the dog does not own, or no pointer at all, is
+    /// pinned. A previous build that replaced it must not be vouched for.
+    #[test]
+    fn a_git_pointer_owned_by_somebody_else_is_not_pinned() {
+        let release = fixtures::fixture_release(&[(".git", "gitdir: x\n")]);
+        let other = my_uid(release.path()).wrapping_add(1);
+        assert!(
+            pin_git_pointer(release.path(), other)
+                .expect("reads")
+                .is_none()
+        );
+
+        let bare = fixtures::fixture_release(&[]);
+        assert!(
+            pin_git_pointer(bare.path(), my_uid(bare.path()))
+                .expect("reads")
+                .is_none()
+        );
     }
 }

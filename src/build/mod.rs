@@ -279,8 +279,9 @@ impl fmt::Debug for BuildSpec {
 /// whichever of the two lookups happens to run first.
 ///
 /// A root dog hands `release` and `cache` itself to `as_user` before the
-/// build, since the release was made as root. Nothing is handed over when the
-/// dog is not root or `as_user` is root.
+/// build, since the release was made as root, and puts the release's `.git`
+/// pointer back afterwards, since owning the directory lets the build replace
+/// it. Nothing is handed over when the dog is not root or `as_user` is root.
 ///
 /// ## A failing build stops everything
 ///
@@ -349,21 +350,42 @@ pub async fn run(
 
     env::apply(&mut child, sheep, passthrough, &spec.env);
 
+    let mut pointer = None;
     if let Some(user) = as_user {
         let gid = gid_for(release, user).await?;
         let uid = uid_for(release, user).await?;
         if ownership::is_due(effective_uid().await, uid) {
             let (release, cache) = (release.to_owned(), cache.to_owned());
-            crate::shared::off_thread(move || ownership::hand_over(&release, &cache, uid, gid))
-                .await?;
+            pointer = crate::shared::off_thread(move || {
+                ownership::hand_over(&release, &cache, uid, gid)?;
+                ownership::pin_git_pointer(&release, 0)
+            })
+            .await?;
         }
         child.gid(gid);
         child.uid(uid);
     }
 
-    runner::run_in_group(child, release, budget)
+    let built = runner::run_in_group(child, release, budget)
         .await
-        .map_err(|error| ownership::explain_spawn_failure(error, as_user, release))?;
+        .map_err(|error| ownership::explain_spawn_failure(error, as_user, release));
+
+    // However the build ended: a release that fails its build is still
+    // reclaimed by retention later, and git must still recognise its pointer.
+    if let Some(pointer) = pointer {
+        let (path, saved) = (release.to_owned(), pointer);
+        let restored =
+            crate::shared::off_thread(move || ownership::restore_git_pointer(&path, &saved)).await;
+        match (&built, restored) {
+            (Ok(()), restored) => restored?,
+            (Err(_), Err(error)) => eprintln!(
+                "shep-deploy: {sheep}: could not restore the release's .git pointer after the \
+                 build: {error}"
+            ),
+            (Err(_), Ok(())) => {}
+        }
+    }
+    built?;
 
     // Resolved once for every artifact rather than once per artifact:
     // `canonicalize` walks the whole chain and the two roots do not change.
