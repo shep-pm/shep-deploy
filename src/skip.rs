@@ -69,12 +69,14 @@ pub(crate) fn changed(
     to: &str,
 ) -> Result<bool, Error> {
     let flockfiles = flockfile::read(release, shared)?;
-    let mut paths = parse(&flockfiles.doc, release)?.paths;
+    let paths = parse(&flockfiles.doc, release)?.paths;
     if paths.is_empty() {
         return Ok(true);
     }
-    paths.push(FLOCKFILE.to_owned());
-    git::changed(git_dir, from, to, &paths)
+    // Asked on its own, not appended to `paths`: a pathspec of the table's
+    // (`:(exclude)Flockfile.toml`, say) would otherwise take it out of the diff.
+    Ok(git::changed(git_dir, from, to, &[FLOCKFILE.to_owned()])?
+        || git::changed(git_dir, from, to, &paths)?)
 }
 
 /// Whether `head` can be left undeployed because nothing under the live
@@ -184,6 +186,18 @@ mod tests {
     fn an_edit_to_the_flockfile_is_always_changed() {
         let (repo, from, to) = pushed(&[("Flockfile.toml", "edited")]);
         assert!(decide(&release_with(VOTING), &repo, &from, &to));
+    }
+
+    /// fails if the Flockfile is only counted as one more pathspec: an
+    /// exclusion in the table would then remove it from the diff, and an edit
+    /// to the table could be skipped by the table it replaces.
+    #[test]
+    fn an_exclusion_cannot_hide_the_flockfile() {
+        let (repo, from, to) = pushed(&[("Flockfile.toml", "edited")]);
+        let release = release_with(
+            "[dog.deploy.reload]\npaths = [\"cmd/voting\", \":(exclude)Flockfile.toml\"]\n",
+        );
+        assert!(decide(&release, &repo, &from, &to));
     }
 
     /// fails if a Flockfile that declares nothing starts skipping pushes.

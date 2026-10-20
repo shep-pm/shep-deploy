@@ -128,7 +128,8 @@ paths = ["cmd/voting", "internal/voting", "pkg", "go.mod"]
   refused by name.
 - A skipped push costs a fetch and a diff: no checkout, build or reload, and
   `deploy.toml` is not written. The log says `<sheep> skipped <sha>, nothing
-  under its reload paths changed`, once until the branch moves again.
+  under its reload paths changed`. It is said once, then again about once an
+  hour while the same push stays skipped, and at once when the branch moves.
 - The next push is compared with the last sha that was deployed, not with the
   one skipped, so a skipped push's changes still count toward it.
 - If the dog cannot tell (the deployed sha is gone from its clone, the live
