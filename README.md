@@ -106,6 +106,38 @@ after the hook ran, the old release comes back against the migrated database.
 A held sha that you retry with `shep deploy <sheep>` runs the hook again, so
 write the command to be idempotent.
 
+## Purging a cache after the swap
+
+An after hook is a command that runs once per deploy, after the new release is
+swapped in, verified and recorded. A build cannot do this work: it runs before
+the swap, so a purge from the build refills from the old release.
+
+```toml
+[dog.deploy.after]
+command = "nginx -s reload && ./purge-cloudflare.sh"
+env = { CLOUDFLARE_API_TOKEN = "...", CLOUDFLARE_ZONE_ID = "..." }
+```
+
+- It is set in `Flockfile.override.toml` and refused anywhere else, as the
+  release hook is.
+- It runs in the new release, as the app's `user`, through `sh -c`, with the
+  release hook's environment. `SHEP_DEPLOY_SHEEP`, `SHEP_DEPLOY_SHA` and
+  `SHEP_DEPLOY_RELEASE` name the sheep, the new sha and the release's absolute
+  path. `current` already points at that release and `deploy.toml` already
+  names the sha.
+- It is bounded by `build_timeout` and killed as a process group. The log gets
+  one line, `shep-deploy: <sheep>: running the after hook`, before it starts.
+- It runs inside the deploy, so no other deploy of that target starts until it
+  ends.
+- It runs only if the record write succeeded. If `deploy.toml` cannot be
+  written, the log says the hook was skipped.
+- It never runs for a deploy that is rolled back, that fails before the swap,
+  or that finds nothing new, and `setup` runs none.
+- A failure changes nothing. A non-zero exit, a signal or a timeout is logged
+  as `shep-deploy: <sheep>: deployed <sha>, but the after hook failed: ...`.
+  The release stays live, the outcome is still deployed and the sha is not
+  held. The hook is not retried; run the purge by hand if it matters.
+
 ## What one deploy does
 
 1. Fetch into a bare clone, and compare the branch head to the last deployed
@@ -132,6 +164,8 @@ write the command to be idempotent.
 8. Verify. On failure, put `current` back, reload again, and verify that the
    old release came up. A rollback that does not come up is an error, not a
    rollback.
+9. Record the sha in `deploy.toml`, then run the after hook, if your override
+   sets one. Its failure is logged and does not undo the deploy.
 
 Steps 1 to 5 never touch the running app. A build that fails costs a
 directory, not an outage. A hook acts on whatever it was written to act on,
@@ -232,7 +266,7 @@ every target and every smit refresh, with no error and no log line. Five
 minutes by default, which is generous enough for a cold clone of a large
 repository.
 
-`build_timeout` bounds the build command and the release hook, against the same failure and for the
+`build_timeout` bounds the build command and both hooks, against the same failure and for the
 same reason. A build that never finishes holds that same one-at-a-time loop, so
 no other target deploys and nothing is logged, because from the loop's point of
 view nothing has gone wrong. An hour by default, which no honest build should
@@ -507,8 +541,8 @@ compromised build then gets that app's privileges and nothing more.
 
 Under a root shepherd the build user owns its release and its build cache
 directory (`target`, the directory only, not what is in it) and nothing else.
-The dog hands those over just before the build, or before the release hook when
-the app has no build command, through open directory handles
+The dog hands those over just before the build, or before the release hook (or the
+after hook) when the app has no build command, through open directory handles
 and never through paths, and skips every symlink, every file with a second
 hard link, and the `.git` file at the release root. The build can still replace
 that file, since it owns the directory, so the dog writes it back after the
