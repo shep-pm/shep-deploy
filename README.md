@@ -275,9 +275,9 @@ with `shep deploy deploy help`.
 ## Running as a dog
 
 Adopted as a dog, `shep-deploy` takes no arguments and polls instead, but only
-when `SHEP_DOG_NAME` is set, as shep does when it starts the dog. Every 30
-seconds by default, it deploys any `watch = "auto"` target whose branch has
-moved. Configure it in `$SHEP_HOME/dogs.toml`:
+when shep starts it. Every 30 seconds by default, it deploys any
+`watch = "auto"` target whose branch has moved. Configure it in
+`$SHEP_HOME/dogs.toml`:
 
 ```toml
 [deploy]
@@ -392,11 +392,12 @@ Run by hand, `shep-deploy deploy web` announces no name at all. It is not a
 dog, and a command claiming to be one would have shep restart the real dog when
 the command's own handshake was refused.
 
-A bare `shep-deploy` run by hand, with `SHEP_DOG_NAME` unset, prints usage and
-exits `2` rather than polling, because a second loop beside the adopted dog
-would deploy the same targets twice. Setting `SHEP_DOG_NAME` yourself starts
-the loop and names its handshake. shep sets it for a bare `shep deploy` typed at
-a terminal too, so that command still starts a second loop.
+A bare `shep-deploy` run by hand prints usage and exits `2` rather than
+polling, because a second loop beside the adopted dog would deploy the same
+targets twice. `shep deploy` typed with nothing after it prints the same usage
+and exits `2`: shep sets `SHEP_DOG_NAME` for that command too, and the dog is
+told apart from it by `SHEP_NAME`, which only the daemon puts into a process it
+spawns. Only the shepherd runs the loop.
 
 ## A commit that fails is held
 
