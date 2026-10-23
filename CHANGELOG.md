@@ -5,6 +5,18 @@ All notable changes to this crate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-23
+
+### Added
+
+- Read build, reload and hooks from the sheep's [app.dogs.deploy] **(BREAKING)**
+
+### Fixed
+
+- Keep the deploy table through cutover and out of error text
+- Register the table the shepherd holds at cutover, not the one prepare read
+
+
 ## [0.3.17] - 2026-10-20
 
 ### Added
