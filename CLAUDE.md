@@ -43,10 +43,10 @@ green against an installed 0.1.8 while CI, which installs the current release,
 failed.
 
 The floor moves with `shep-client`, too, and in both directions. The lockfile
-pins shep-client 0.10.0, which speaks protocol 9, so a shep that does not
-accept 9 fails every integration test at connect with `protocol mismatch
-(this client speaks 9)`. `shep --version` prints both halves of that
-question, as `speaks protocol 9, accepts 8 and newer`.
+pins shep-client 0.16.1, which speaks protocol 11, so a shep that does not
+accept 11 fails every integration test at connect with `protocol mismatch
+(this client speaks 11)`. `shep --version` prints both halves of that
+question, as `speaks protocol 11, accepts 8 and newer`.
 
 The other direction bit on 2026-09-04: the lockfile spoke 2, shep 0.2.0
 shipped speaking 3 within the hour, and CI, which installs the current
@@ -62,12 +62,15 @@ you are behind.** Ask by name, and keep asking until it stops moving. On
 0.4.3 made the same command answer "latest 0.7.2", which was the real one.
 Two rounds, and a caret bump to `"0.4.3"` would have quietly landed on 0.4.6
 and looked deliberate. `cargo info shep-client@<version>` and
-`cargo info shep` are the cross-checks.
+`cargo info shep` are the cross-checks. The 2026-09-22 bump to 0.16.1 needed
+one round: a 0.10.0 lockfile made `cargo info shep-client` answer "latest
+0.16.1", and `cargo info shep-client@0.16.1` stopped moving there.
 
-shep 0.7.2 also raised MIN_SUPPORTED to 8, so this is a floor rather than a
-preference: `shep --version` says `speaks protocol 8, accepts 8 and newer`,
-and every shep-deploy built before 2026-09-08 is refused at the handshake by
-it. Check `shep --version` before trusting either a green or a red
+shep 0.7.2 also raised MIN_SUPPORTED to 8, still 8 in shep-core 0.16.1, so
+this is a floor rather than a preference: `shep --version` says
+`speaks protocol 11, accepts 8 and newer`, and every shep-deploy built before
+2026-09-08 is refused at the handshake by it. Check `shep --version` before
+trusting either a green or a red
 integration run. To test against the current release without touching the
 machine's own shep, install one into a scratch root and point `SHEP_BIN` at
 it:
@@ -196,9 +199,10 @@ class rather than the instances.
   reaches a renamed property and a nested one, and the old runtime failure
   it could produce is gone: `dogs::config_schema` no longer returns a
   `Result`.
-- **shep-client is floored at 0.10.0 for `dogs::dog_config`, and at 0.7.3
-  under that for its `schema` feature. Neither floor is a protocol
-  number.** 0.10.0 replaced the `DogConfig` derive with the `dog_config`
+- **shep-client is pinned at 0.16.1, and floored at 0.10.0 for
+  `dogs::dog_config`, and at 0.7.3 under that for its `schema` feature.
+  Neither floor is a protocol number.** 0.10.0 replaced the `DogConfig` derive
+  with the `dog_config`
   attribute (shep-pm/shep#594), and `dogs::probe` is bounded on the trait
   the attribute implements, so a dog cannot answer `--schema` without it.
   The attribute belongs ABOVE the derives, since it rewrites the fields it
@@ -213,6 +217,12 @@ class rather than the instances.
   and the dependency is gone. shep-core is reached through
   `shep_client::shep_core::` only, `tests/probe.rs` included; naming it at
   the crate root is what quietly makes that dependency load-bearing again.
+  0.16.1 added `channel` to `DogSource::Adopted`, for whether the adopted
+  binary asked for the shepherd channel when it was adopted. It is
+  `#[serde(default)]` on the wire, so an older peer's row still decodes as
+  no channel, and the only place this crate names the variant is the
+  `daemon.rs` test fixture, which says `channel: false`: this dog does not
+  ask for one.
 - **The dog's section is `[deploy]` in `$SHEP_HOME/dogs.toml`**, since shep
   0.1.32; before that it was `[dog.deploy]` in `shep.toml`, and a shepherd
   migrates the old spelling only at boot. A test that writes the section
