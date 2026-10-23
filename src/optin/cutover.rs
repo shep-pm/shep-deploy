@@ -99,6 +99,15 @@ pub async fn cut_over<D: Daemon>(daemon: &D, prepared: Prepared) -> Result<Strin
     if registering.interpreter.is_none() {
         registering.interpreter = previous_config.interpreter.clone();
     }
+    // The sheep's `dogs` tables are the operator's, and the deploy settings
+    // among them are what every later deploy builds and hooks from. A
+    // Flockfile cannot supply them: whatever it carries under `dogs` is a
+    // commit's choice, so the registered ones replace it outright. Left out,
+    // the registration would drop the table and the sheep would deploy with
+    // no build and no hooks from then on. Asked of the shepherd now rather
+    // than taken from `previous_config`, which predates the build: an edit
+    // the operator made while it ran would be registered over.
+    registering.dogs = daemon.sheep_config(&sheep).await?.dogs;
 
     match attempt(daemon, &sheep, registering, &generation, &previous).await {
         CutOver::Done => {
@@ -284,6 +293,28 @@ mod tests {
         prepared.app.interpreter = Some("none".to_owned());
         cut_over(&daemon, prepared).await.expect("cuts over");
         assert_eq!(daemon.started()[0].interpreter.as_deref(), Some("none"));
+    }
+
+    /// fails if the new registration drops the sheep's `[app.dogs.deploy]`
+    /// table, which every later deploy builds and hooks from, or takes one
+    /// from the Flockfile in its place: a commit does not choose it. The
+    /// table is the shepherd's at the cutover, not the roll's at `prepare`:
+    /// the double's `previous_config` below holds an older one, as it would
+    /// if the operator edited the table while the build ran.
+    #[tokio::test(start_paused = true)]
+    async fn the_new_registration_keeps_the_sheeps_deploy_settings() {
+        let (daemon, mut prepared, _dirs) = cutover_fixture().await;
+        let daemon = daemon.registered_as(crate::fixtures::app_with_settings(
+            "bpm",
+            "command = 'make'\n",
+        ));
+        prepared.app = crate::fixtures::app_with_settings("bpm", "command = 'from-flockfile'\n");
+        prepared.previous_config = crate::fixtures::app_with_settings("bpm", "command = 'stale'\n");
+        cut_over(&daemon, prepared).await.expect("cuts over");
+
+        let registered = daemon.started().remove(0);
+        let table = registered.dogs.get("deploy").expect("the table is carried");
+        assert_eq!(table.as_map()["command"], "make");
     }
 
     /// fails if the OLD instances are deleted by name rather than by id, or

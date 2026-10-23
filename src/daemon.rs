@@ -25,8 +25,8 @@
 //! lift this into a library and it starts firing, at which point the
 //! trade-off wants deciding rather than silencing.
 //!
-//! Do not add trait methods speculatively. These nine are the surface plan
-//! one and plan two need between them, not nine that looked useful:
+//! Do not add trait methods speculatively. These are the surface plan
+//! one and plan two need between them, not ones that looked useful:
 //! `list_flock`, `describe` and `reload` are exercised inside plan one
 //! (`adopted_name` below, probe-based verification, and the deploy
 //! sequence). `dog_config` reads the `[dog.<name>]` section that names the
@@ -36,6 +36,8 @@
 //! removes the instances that `Start` was added beside. `restart` is the
 //! one with no caller at all; Task 10 chose `Reload` for the whole deploy
 //! sequence, and it stays because plan one's own brief named it up front.
+//! `sheep_config` is the tenth, added for `crate::settings`: a deploy reads
+//! the sheep's `[app.dogs.deploy]` table from the shepherd's own record of it.
 //!
 //! # Self-identification
 //!
@@ -67,7 +69,7 @@ use crate::error::Error;
 
 /// Everything this dog asks the shepherd for.
 ///
-/// Narrow on purpose: nine methods cover the whole plan, and each is written
+/// Narrow on purpose: ten methods cover the whole plan, and each is written
 /// against whatever the shepherd itself calls the operation (`shep reload`,
 /// `shep restart`, ...) rather than against this crate's own vocabulary for
 /// it, so a reader who knows shep already knows what each one does.
@@ -155,6 +157,18 @@ pub trait Daemon {
     // calls in turn.
     async fn save_roll(&self) -> Result<PathBuf, Error>;
 
+    /// One sheep's config as the shepherd holds it, by exact name, with
+    /// `env` emptied.
+    ///
+    /// What a deploy reads the sheep's `[app.dogs.deploy]` table from. By
+    /// name rather than through [`Self::save_roll`], which lists every sheep
+    /// and writes a file to do it.
+    ///
+    /// # Errors
+    /// As [`Self::dog_config`]; a name no sheep has is a
+    /// [`RpcErrorCode::NotFound`](shep_client::shep_core::protocol::RpcErrorCode).
+    async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error>;
+
     /// Attach this dog's short string to `sheep`, for `shep flock` to
     /// paint.
     ///
@@ -198,7 +212,7 @@ pub struct Live(Link);
 /// a type parameter on `Live` or two `Daemon` implementations. A parameter
 /// would propagate `Live<C>` into every signature in `main` to express a
 /// distinction only the two constructors here need to make, and a second
-/// implementation would duplicate nine method bodies that differ in nothing
+/// implementation would duplicate ten method bodies that differ in nothing
 /// but which field they call `request` on.
 #[derive(Debug)]
 enum Link {
@@ -329,6 +343,16 @@ impl Daemon for Live {
         match self.0.request(Request::SaveRoll).await? {
             Response::RollSaved { path, .. } => Ok(PathBuf::from(path)),
             other => Err(unexpected("SaveRoll", &other)),
+        }
+    }
+
+    async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
+        let asked = Request::SheepConfig {
+            name: sheep.to_owned(),
+        };
+        match self.0.request(asked).await? {
+            Response::SheepConfig(view) => Ok(view.config),
+            other => Err(unexpected("SheepConfig", &other)),
         }
     }
 
@@ -465,7 +489,7 @@ mod tests {
         }
 
         crate::fixtures::daemon_methods!(unimplemented;
-            dog_config, describe, start, delete, reload, restart, save_roll, set_smit,
+            dog_config, describe, start, delete, reload, restart, save_roll, sheep_config, set_smit,
         );
     }
 
@@ -477,7 +501,7 @@ mod tests {
     impl Daemon for Unreachable {
         crate::fixtures::daemon_methods!(
             answering Err(Error::Protocol("no session".to_owned()));
-            dog_config, list_flock, describe, start, delete, reload, restart, save_roll, set_smit,
+            dog_config, list_flock, describe, start, delete, reload, restart, save_roll, sheep_config, set_smit,
         );
     }
 
@@ -556,7 +580,7 @@ mod tests {
 
     /// fails if `unexpected` stops saying which request the answer was to.
     /// "a Flock of 2" alone does not tell an operator which call went
-    /// wrong, and this dog makes nine different ones.
+    /// wrong, and this dog makes ten different ones.
     #[test]
     fn an_unexpected_answer_names_the_request_it_answered() {
         let err = unexpected("Reload", &Response::Flock(Vec::new()));

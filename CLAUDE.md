@@ -157,7 +157,7 @@ exist and each has a precise edge:
   link and the root `.git` file, which it writes back after the build because
   owning the directory lets the build replace it; every other write root makes into a release must stay handle-based too.
 - **cleared environment** (`build/env.rs`), so a build gets `BASE_ENV` plus the
-  operator's `passthrough` plus the release's `[build] env`, and nothing else.
+  operator's `passthrough`, and nothing else.
   `SSH_AUTH_SOCK` is excluded on purpose.
 - **`user` on the app**, which is the only bound that also covers what the
   build can READ. It does not cover the project's own `.env`: gitignored files
@@ -267,9 +267,11 @@ class rather than the instances.
   probes, `out_file`/`err_file`, non-loopback probe targets, and `watch`,
   because the daemon acts on all of them at its own uid (read out of
   shep-daemon on 2026-09-04; `flockfile::refuse::refuse_repo_privilege` says why per
-  field). It is also refused `[dog.deploy.release]` and `[dog.deploy.after]`,
-  because a hook's env holds the operator's secrets (`hook::refuse_repo_hooks`),
-  and so is an override the dog did not link in from the operator's checkout. Presence is checked before shape: serde builds a probe from a
+  field). It is also refused as an override the dog did not link in from the
+  operator's checkout. The build command, the reload paths and the hooks are
+  not read from a Flockfile at all: `settings::Settings` is the sheep's
+  `[app.dogs.deploy]` table, read from the shepherd once per deploy, and a
+  `[dog.deploy.*]` in a release is ignored. Presence is checked before shape: serde builds a probe from a
   TOML array too, and a walk that read only tables let one through.
 - **`Online` is a one-time verdict in shep.** A crash after it respawns under
   a new pid with the reload committed; a failed post-drain re-probe demotes

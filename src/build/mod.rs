@@ -97,17 +97,17 @@ use privilege::{Step, effective_uid, gid_for, root_warning, uid_for};
 /// declared script can execute, and what to salvage from wherever that run
 /// actually left its output.
 ///
-/// This is the `[dog.deploy.build]` block of a release's own Flockfile, parsed by
-/// [`crate::flockfile::Merged::build_spec`]:
+/// Built from the sheep's `[app.dogs.deploy]` table by
+/// [`crate::settings::Settings::build_spec`], which supplies `command` and
+/// `artifacts`:
 ///
 /// ```toml
-/// [dog.deploy.build]
+/// [app.dogs.deploy]
 /// command = "bun install && bun run build"
-/// env = { CARGO_TARGET_DIR = "/srv/cache/koji" }
 /// artifacts = ["target/release/koji"]
 /// ```
 ///
-/// Every field is optional and an absent `[dog.deploy.build]` block is the default
+/// Every field is optional and a sheep with no `command` gets the default
 /// value of this struct, which [`run`] treats as a no-op. Unknown keys are
 /// refused rather than ignored, matching `shep_core`'s own `AppConfig`: a
 /// typo in a build block would otherwise mean a build that silently never
@@ -160,7 +160,7 @@ pub struct BuildSpec {
 /// # Errors
 /// A deserialization error naming the offending path, if any entry is
 /// absolute or contains a `..` component.
-fn contained_artifacts<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Error>
+pub(crate) fn contained_artifacts<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -412,7 +412,7 @@ pub async fn run(
         && !Path::new(target_dir).is_absolute()
     {
         return Err(Error::Config(format!(
-            "[dog.deploy.build] env sets CARGO_TARGET_DIR = {target_dir:?}, which is not an \
+            "the build's env sets CARGO_TARGET_DIR = {target_dir:?}, which is not an \
              absolute path; a relative one is resolved against whatever directory this dog \
              is running in, not against the release. Name the directory in full"
         )));

@@ -115,8 +115,8 @@ remains for the builds that genuinely do put their output somewhere the release
 cannot see, including one an operator points elsewhere themselves."
 
 The words hid the problem. The operator does not point it anywhere; the
-`[dog.deploy.build]` block lives in the deployed repository, so whoever can
-land a commit points it. Those are different people, and the whole threat model
+`[dog.deploy.build]` block lived in the deployed repository, so whoever could
+land a commit pointed it. Those are different people, and the whole threat model
 of this crate turns on the difference.
 
 If a build genuinely needs to salvage output from outside the tree, the

@@ -77,6 +77,7 @@ mod retarget;
 mod retention;
 mod roll;
 mod route;
+mod settings;
 mod shared;
 mod skip;
 mod smit;
@@ -476,8 +477,8 @@ async fn promote_once(sheep: &str) -> Result<u8, Error> {
 
 /// Builds `sheep`'s branch head and records it as staged, without swapping.
 ///
-/// Reads the dog's config through the shepherd, as a deploy does, but never
-/// asks it to start or reload anything.
+/// Reads the dog's config and the sheep's settings through the shepherd, as a
+/// deploy does, but never asks it to start or reload anything.
 ///
 /// # Errors
 /// Whatever [`stage::stage`] returns, plus [`Error::Io`] if the target's
@@ -488,8 +489,10 @@ async fn stage_once(sheep: &str) -> Result<u8, Error> {
     let mut state = State::read(&tree.state_file())?;
 
     let client = Client::connect(&socket()?).await?;
-    let config = config::read(&Live::command(client)).await?;
-    match stage::stage(&tree, &mut state, &config).await? {
+    let daemon = Live::command(client);
+    let config = config::read(&daemon).await?;
+    let settings = settings::read(&daemon, sheep).await?;
+    match stage::stage(&tree, &mut state, &settings, &config).await? {
         Staged::Built { sha } => println!(
             "{sheep} staged {sha}, still deployed at {}",
             deployed(&state)

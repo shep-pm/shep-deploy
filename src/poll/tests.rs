@@ -134,12 +134,23 @@ const FIRST_PID: u32 = 12835;
 /// anything could pass for one that did.
 struct Ready {
     reloads: Cell<u32>,
+    /// The sheep's `[app.dogs.deploy]` table, in TOML, if it has one.
+    settings: Option<&'static str>,
 }
 
 impl Ready {
     const fn new() -> Self {
         Self {
             reloads: Cell::new(0),
+            settings: None,
+        }
+    }
+
+    /// As [`Self::new`], for a sheep whose `[app.dogs.deploy]` is `settings`.
+    const fn declaring(settings: &'static str) -> Self {
+        Self {
+            reloads: Cell::new(0),
+            settings: Some(settings),
         }
     }
 }
@@ -155,6 +166,12 @@ impl Daemon for Ready {
     async fn reload(&self, _sheep: &str) -> Result<(), Error> {
         self.reloads.set(self.reloads.get() + 1);
         Ok(())
+    }
+    async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
+        Ok(match self.settings {
+            Some(settings) => fixtures::app_with_settings(sheep, settings),
+            None => fixtures::app_named(sheep),
+        })
     }
     async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), Error> {
         Ok(())
@@ -215,6 +232,9 @@ impl Daemon for Counting {
         fixtures::run_git(&self.origin, &["add", "."]);
         fixtures::run_git(&self.origin, &["commit", "-q", "-m", "another"]);
         Err(Error::Protocol("the shepherd stopped answering".to_owned()))
+    }
+    async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
+        Ok(fixtures::app_named(sheep))
     }
     async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), Error> {
         Ok(())
@@ -492,11 +512,8 @@ async fn a_deploy_is_written_to_the_log_it_belongs_in() {
 #[tokio::test(start_paused = true)]
 async fn a_skip_is_said_once() {
     let home = tempfile::tempdir().expect("tempdir");
-    let declared = format!(
-        "{}\n[dog.deploy.reload]\npaths = [\"cmd/web\"]\n",
-        flockfile("quiet")
-    );
-    let origin = write_target_with_flockfile(home.path(), "quiet", Watch::Auto, &declared);
+    let origin =
+        write_target_with_flockfile(home.path(), "quiet", Watch::Auto, &flockfile("quiet"));
     let head = fixtures::head_of(origin.path());
     let (mut out, mut err) = (Vec::new(), Vec::new());
 
@@ -504,7 +521,7 @@ async fn a_skip_is_said_once() {
     let _ = tokio::time::timeout(
         Duration::from_secs(305),
         run_with(
-            &Ready::new(),
+            &Ready::declaring("reload = ['cmd/web']\n"),
             home.path(),
             Reader::primed(
                 None,

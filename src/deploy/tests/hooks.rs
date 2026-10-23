@@ -1,28 +1,15 @@
-//! The release and after hooks, through a whole deploy.
+//! The release and after hooks of the sheep's `[app.dogs.deploy]` table,
+//! through a whole deploy.
 
 use std::fs;
 
 use crate::config::DogConfig;
-use crate::deploy::test_support::{
-    FLOCKFILE, Fixture, Shepherd, commit_on_origin, fixture_with_previous_release,
-};
+use crate::deploy::test_support::{Shepherd, commit_on_origin, fixture_with_previous_release};
 use crate::deploy::{Outcome, deploy};
 use crate::error::Error;
-use crate::flockfile::OVERRIDE;
 use crate::hook::Ending;
 use crate::state::State;
 use crate::{fixtures, swap};
-
-/// Puts `text` in the operator's checkout as a gitignored override, which is
-/// how the dog comes to link it into every release.
-fn operators_override(fixture: &Fixture, text: &str) {
-    fs::write(
-        fixture.origin.path().join(".gitignore"),
-        format!("{OVERRIDE}\n"),
-    )
-    .expect("write .gitignore");
-    fs::write(fixture.origin.path().join(OVERRIDE), text).expect("write override");
-}
 
 /// fails if the hook runs before the build has finished, or after the swap.
 ///
@@ -35,20 +22,15 @@ fn operators_override(fixture: &Fixture, text: &str) {
 async fn a_release_hook_runs_after_the_build_and_before_the_swap() {
     let mut fixture = fixture_with_previous_release();
     let previous = fixture.state.deployed.clone().expect("a previous release");
-    fs::write(
-        fixture.origin.path().join("Flockfile.toml"),
-        format!("{FLOCKFILE}\n[dog.deploy.build]\ncommand = 'touch built'\n"),
-    )
-    .expect("write Flockfile");
-    operators_override(
-        &fixture,
-        "[dog.deploy.release]\ncommand = 'readlink ../../current > current-at-hook.txt; \
+    let second = commit_on_origin(&fixture, "second.txt");
+    let daemon = Shepherd::ready().with_settings(
+        "command = 'touch built'\n\
+         [release]\ncommand = 'readlink ../../current > current-at-hook.txt; \
          ls built > build-seen-by-hook.txt'\n",
     );
-    let second = commit_on_origin(&fixture, "second.txt");
 
     let outcome = deploy(
-        &Shepherd::ready(),
+        &daemon,
         &fixture.tree,
         &mut fixture.state,
         &fixtures::dog_config(),
@@ -85,9 +67,8 @@ async fn a_release_hook_runs_after_the_build_and_before_the_swap() {
 async fn a_failing_release_hook_never_moves_current_and_holds_the_sha() {
     let mut fixture = fixture_with_previous_release();
     let previous = fixture.state.deployed.clone().expect("a previous release");
-    operators_override(&fixture, "[dog.deploy.release]\ncommand = 'exit 4'\n");
     let second = commit_on_origin(&fixture, "second.txt");
-    let daemon = Shepherd::ready();
+    let daemon = Shepherd::ready().with_settings("[release]\ncommand = 'exit 4'\n");
 
     let err = deploy(
         &daemon,
@@ -121,19 +102,12 @@ async fn a_failing_release_hook_never_moves_current_and_holds_the_sha() {
 #[tokio::test]
 async fn a_failing_build_runs_no_release_hook() {
     let mut fixture = fixture_with_previous_release();
-    fs::write(
-        fixture.origin.path().join("Flockfile.toml"),
-        format!("{FLOCKFILE}\n[dog.deploy.build]\ncommand = 'exit 3'\n"),
-    )
-    .expect("write Flockfile");
-    operators_override(
-        &fixture,
-        "[dog.deploy.release]\ncommand = 'touch hook-ran'\n",
-    );
     let second = commit_on_origin(&fixture, "second.txt");
+    let daemon = Shepherd::ready()
+        .with_settings("command = 'exit 3'\n[release]\ncommand = 'touch hook-ran'\n");
 
     let err = deploy(
-        &Shepherd::ready(),
+        &daemon,
         &fixture.tree,
         &mut fixture.state,
         &fixtures::dog_config(),
@@ -156,15 +130,13 @@ async fn a_failing_build_runs_no_release_hook() {
 #[tokio::test]
 async fn an_after_hook_runs_once_the_release_is_verified_and_recorded() {
     let mut fixture = fixture_with_previous_release();
-    operators_override(
-        &fixture,
-        "[dog.deploy.after]\ncommand = 'cp ../../deploy.toml record-at-hook.toml; \
+    let second = commit_on_origin(&fixture, "second.txt");
+    let daemon = Shepherd::ready().with_settings(
+        "[after]\ncommand = 'cp ../../deploy.toml record-at-hook.toml; \
          readlink ../../current > current-at-hook.txt; \
          printenv SHEP_DEPLOY_SHEEP > sheep.txt; printenv SHEP_DEPLOY_SHA > sha.txt; \
          printenv SHEP_DEPLOY_RELEASE > release.txt; echo ran >> runs.txt'\n",
     );
-    let second = commit_on_origin(&fixture, "second.txt");
-    let daemon = Shepherd::ready();
 
     let outcome = deploy(
         &daemon,
@@ -204,14 +176,11 @@ async fn an_after_hook_runs_once_the_release_is_verified_and_recorded() {
 #[tokio::test(start_paused = true)]
 async fn an_after_hook_does_not_run_when_the_release_is_rolled_back() {
     let mut fixture = fixture_with_previous_release();
-    operators_override(
-        &fixture,
-        "[dog.deploy.after]\ncommand = 'touch after-ran'\n",
-    );
     let second = commit_on_origin(&fixture, "second.txt");
+    let daemon = Shepherd::never_ready().with_settings("[after]\ncommand = 'touch after-ran'\n");
 
     let outcome = deploy(
-        &Shepherd::never_ready(),
+        &daemon,
         &fixture.tree,
         &mut fixture.state,
         &fixtures::dog_config(),
@@ -231,9 +200,8 @@ async fn an_after_hook_does_not_run_when_the_release_is_rolled_back() {
 #[tokio::test]
 async fn a_failing_after_hook_still_reports_deployed_and_writes_no_hold() {
     let mut fixture = fixture_with_previous_release();
-    operators_override(&fixture, "[dog.deploy.after]\ncommand = 'exit 5'\n");
     let second = commit_on_origin(&fixture, "second.txt");
-    let daemon = Shepherd::ready();
+    let daemon = Shepherd::ready().with_settings("[after]\ncommand = 'exit 5'\n");
 
     let outcome = deploy(
         &daemon,
@@ -270,24 +238,17 @@ async fn a_failing_after_hook_still_reports_deployed_and_writes_no_hold() {
 #[tokio::test]
 async fn an_after_hook_that_never_finishes_is_abandoned_and_the_deploy_is_still_deployed() {
     let mut fixture = fixture_with_previous_release();
-    operators_override(
-        &fixture,
-        "[dog.deploy.after]\ncommand = 'sleep 600 & echo $! > descendant.pid; wait'\n",
-    );
     let second = commit_on_origin(&fixture, "second.txt");
+    let daemon = Shepherd::ready()
+        .with_settings("[after]\ncommand = 'sleep 600 & echo $! > descendant.pid; wait'\n");
     let config = DogConfig {
         build_timeout: std::time::Duration::from_secs(2),
         ..fixtures::dog_config()
     };
 
-    let outcome = deploy(
-        &Shepherd::ready(),
-        &fixture.tree,
-        &mut fixture.state,
-        &config,
-    )
-    .await
-    .expect("a timed-out after hook is not a failed deploy");
+    let outcome = deploy(&daemon, &fixture.tree, &mut fixture.state, &config)
+        .await
+        .expect("a timed-out after hook is not a failed deploy");
 
     assert_eq!(
         outcome,
@@ -304,17 +265,14 @@ async fn an_after_hook_that_never_finishes_is_abandoned_and_the_deploy_is_still_
 #[tokio::test]
 async fn an_after_hook_does_not_run_when_the_record_cannot_be_written() {
     let mut fixture = fixture_with_previous_release();
-    operators_override(
-        &fixture,
-        "[dog.deploy.after]\ncommand = 'touch after-ran'\n",
-    );
     let second = commit_on_origin(&fixture, "second.txt");
+    let daemon = Shepherd::ready().with_settings("[after]\ncommand = 'touch after-ran'\n");
     let record = fixture.tree.state_file();
     fs::remove_file(&record).expect("drop the record");
     fs::create_dir(&record).expect("a directory where the record goes");
 
     let outcome = deploy(
-        &Shepherd::ready(),
+        &daemon,
         &fixture.tree,
         &mut fixture.state,
         &fixtures::dog_config(),

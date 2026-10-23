@@ -10,13 +10,15 @@ use crate::build::BuildSpec;
 use crate::error::Error;
 use crate::hook::Hooks;
 use crate::paths::Tree;
+use crate::settings::Settings;
 use crate::shared::run_git;
 use crate::state::Verify;
 use crate::{flockfile, git, linkcheck, shared};
 
 /// What [`stage_release`] hands its callers: the app to register, the build
-/// to run, the hooks to run after it, and the paths linked in from the
-/// operator's checkout, which [`linkcheck::Snapshot`] needs around the build.
+/// to run and the hooks to run after it (both from the sheep's
+/// [`Settings`]), and the paths linked in from the operator's checkout,
+/// which [`linkcheck::Snapshot`] needs around the build.
 pub(crate) struct Staged {
     pub(crate) app: AppConfig,
     pub(crate) spec: BuildSpec,
@@ -30,15 +32,20 @@ pub(crate) struct Staged {
 /// One function because two callers, [`super::attempt`] and
 /// [`crate::optin::prepare_with`], had the same seven lines, and because all of
 /// it is blocking work (git, symlinks, file reads) that both run through
-/// [`shared::off_thread`]. Answers a [`Staged`].
+/// [`shared::off_thread`]. Answers a [`Staged`], whose build and hooks are
+/// `settings`' and whose app is the release's.
 ///
 /// # Errors
 /// Whatever [`checkout_release`], [`shared::link_cache`],
 /// [`shared::to_link`], [`shared::link_into`] and [`flockfile::read`]
 /// return, plus the app-selection and schema failures of
-/// [`flockfile::Merged::app_config`], [`flockfile::Merged::build_spec`] and
-/// [`flockfile::Merged::hooks`].
-pub(crate) fn stage_release(tree: &Tree, checkout: &Path, sha: &str) -> Result<Staged, Error> {
+/// [`flockfile::Merged::app_config`].
+pub(crate) fn stage_release(
+    tree: &Tree,
+    checkout: &Path,
+    sha: &str,
+    settings: &Settings,
+) -> Result<Staged, Error> {
     let release = tree.release(sha);
     checkout_release(tree, sha)?;
     shared::link_cache(&release, &tree.cache_target())?;
@@ -48,7 +55,7 @@ pub(crate) fn stage_release(tree: &Tree, checkout: &Path, sha: &str) -> Result<S
     let shared_paths = shared::to_link(checkout)?;
     shared::link_into(&release, checkout, &shared_paths)?;
 
-    let staged = read_release(tree, &release, shared_paths)?;
+    let staged = read_release(tree, &release, shared_paths, settings)?;
     // Printed here rather than returned, as `build::root_warning` is: nothing
     // is refused, and `deploy` and `setup` both come through this function.
     for warning in linkcheck::warnings(tree.sheep(), &staged.linked, &staged.spec.artifacts) {
@@ -69,20 +76,25 @@ pub(crate) fn stage_release(tree: &Tree, checkout: &Path, sha: &str) -> Result<S
 ///
 /// # Errors
 /// As [`stage_release`], less the checkout and the cache link.
-pub(crate) fn read_staged(tree: &Tree, checkout: &Path, sha: &str) -> Result<Staged, Error> {
+pub(crate) fn read_staged(
+    tree: &Tree,
+    checkout: &Path,
+    sha: &str,
+    settings: &Settings,
+) -> Result<Staged, Error> {
     let release = tree.release(sha);
     let shared_paths = shared::to_link(checkout)?;
     shared::link_into(&release, checkout, &shared_paths)?;
     refuse_rewritten(tree, sha, &shared_paths)?;
-    read_release(tree, &release, shared_paths)
+    read_release(tree, &release, shared_paths, settings)
 }
 
 /// Refuses a release whose committed Flockfile, or a committed or planted
 /// override, is not what the commit carries.
 ///
 /// A build runs as `user` over a directory it owns, so after the stage the
-/// files in the release are whatever the build left, and the app and the
-/// hooks of a promote would come from them. The operator's own override is
+/// files in the release are whatever the build left, and the app of a promote
+/// would come from them. The operator's own override is
 /// exempt: it is a link into their checkout, and [`shared::link_into`]
 /// has just refused anything else at that path. Compared by git's own hash of
 /// the file against the commit's blob, so a link, a missing file or a changed
@@ -126,7 +138,7 @@ fn refuse_rewritten(
         if committed != on_disk {
             return Err(Error::Config(format!(
                 "{name} in {} is not what {sha} commits: a build can rewrite it after the stage, \
-                 and a promote reads the app and the hooks from it. Remove the release and run \
+                 and a promote reads the app from it. Remove the release and run \
                  `shep-deploy deploy {} --stage` again.",
                 release.display(),
                 tree.sheep()
@@ -136,20 +148,19 @@ fn refuse_rewritten(
     Ok(())
 }
 
-/// The Flockfiles of a release whose files are already linked in.
+/// The Flockfiles of a release whose files are already linked in, and the
+/// build and hooks `settings` describe.
 fn read_release(
     tree: &Tree,
     release: &Path,
     shared_paths: shared::FromCheckout,
+    settings: &Settings,
 ) -> Result<Staged, Error> {
-    let flockfiles = flockfile::read(release, &shared_paths)?;
-    let app = flockfiles.app_config(tree.sheep())?;
-    let spec = flockfiles.build_spec()?;
-    let hooks = flockfiles.hooks()?;
+    let app = flockfile::read(release, &shared_paths)?.app_config(tree.sheep())?;
     Ok(Staged {
         app,
-        spec,
-        hooks,
+        spec: settings.build_spec(),
+        hooks: settings.hooks(),
         linked: shared_paths,
     })
 }
