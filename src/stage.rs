@@ -52,17 +52,19 @@ pub enum Staged {
 /// Builds the head of `state.branch` into its release and records it as
 /// `state.staged`, without swapping it in.
 ///
-/// The build is `settings`' command, which the caller reads from the sheep's
-/// stored config. Reclaims old releases afterwards, sparing `deployed` and `staged`, and
+/// The build is the command in the sheep's `[app.dogs.deploy]` table, read
+/// once the tree is held. Reclaims old releases afterwards, sparing `deployed` and `staged`, and
 /// reports a failure to do so rather than returning it: the stage itself is
 /// already decided.
 ///
-/// `state` is replaced by the record as it is on disk once the tree is held.
+/// `state` is replaced by the record as it is on disk, with the table's
+/// `branch`, `watch` and `verify` adopted, once the tree is held.
 ///
 /// # Errors
 /// [`Error::AlreadyDeploying`] if another process holds the tree, and
 /// [`Error::Io`] if the lock file cannot be created. [`Error::Io`] or
-/// [`Error::Config`] if `deploy.toml` cannot be read or fails validation. [`Error::NotCutOver`] if
+/// [`Error::Config`] if `deploy.toml` cannot be read or fails validation, or
+/// the sheep's table cannot be read or adopted. [`Error::NotCutOver`] if
 /// the record names no released sha, as for a deploy. [`Error::Config`] if
 /// the target is `watch = auto`: the next poll tick would deploy the same
 /// head, so a stage there promises something it cannot keep.
@@ -73,10 +75,10 @@ pub enum Staged {
 /// against the sha: `failed` is the poll loop's and a stage is not its
 /// attempt. [`Error::Io`] or [`Error::Config`] if the record cannot be
 /// written, in which case `state.staged` is as it was.
-pub async fn stage(
+pub async fn stage<D: Daemon>(
+    daemon: &D,
     tree: &Tree,
     state: &mut State,
-    settings: &Settings,
     config: &DogConfig,
 ) -> Result<Staged, Error> {
     let sheep = tree.sheep();
@@ -85,7 +87,8 @@ pub async fn stage(
     // The caller read `state` before the lock, and a deploy or another stage
     // may have written the record since. Answering from the older copy would
     // rebuild a head that is already staged or call a landed one new.
-    *state = State::read(&tree.state_file())?;
+    let (fresh, settings) = settings::adopted(daemon, tree).await?;
+    *state = fresh;
 
     if state.deployed.is_none() {
         return Err(Error::NotCutOver {
@@ -121,7 +124,7 @@ pub async fn stage(
         return Ok(Staged::AlreadyStaged { sha: head });
     }
 
-    let built = build_and_record(tree, state, &head, settings, config).await;
+    let built = build_and_record(daemon, tree, state, &head, &settings, config).await;
 
     let spared: Vec<String> = [state.deployed.as_deref(), state.staged.as_deref()]
         .into_iter()
@@ -177,7 +180,7 @@ pub async fn promote<D: Daemon>(
 
     // The caller read `state` before the lock, and a deploy or a stage may
     // have written the record since.
-    *state = State::read(&tree.state_file())?;
+    *state = settings::adopted(daemon, tree).await?.0;
 
     if state.deployed.is_none() {
         return Err(Error::NotCutOver {
@@ -198,7 +201,7 @@ pub async fn promote<D: Daemon>(
     }
 
     let outcome = land_staged(daemon, tree, state, &head, config).await;
-    record(tree, state, &head, &outcome, config.retention).await;
+    record(daemon, tree, state, &head, &outcome, config.retention).await;
     outcome
 }
 
@@ -222,7 +225,8 @@ async fn land_staged<D: Daemon>(
 }
 
 /// The release, its build, and the record write, for one sha.
-async fn build_and_record(
+async fn build_and_record<D: Daemon>(
+    daemon: &D,
     tree: &Tree,
     state: &mut State,
     head: &str,
@@ -255,15 +259,15 @@ async fn build_and_record(
     }
     built?;
 
-    record_staged(tree, state, head)
+    record_staged(daemon, tree, state, head).await
 }
 
 /// Writes `head` as `staged` into the record on disk, under the record lock,
 /// and makes `state` that record.
 ///
-/// Built from the disk, not from `state`: the build took as long as it took,
-/// and `--branch`, `--watch` or a hand edit may have written the record
-/// since. Writing `state` whole put back a `failed` that `--branch` had just
+/// Built from the disk and the sheep's table, not from `state`: the build took
+/// as long as it took, and `--branch`, `--watch` or a hand edit may have
+/// written either since. Writing `state` whole put back a `failed` that `--branch` had just
 /// cleared, beside a `staged` from the branch the target no longer follows.
 ///
 /// # Errors
@@ -271,11 +275,18 @@ async fn build_and_record(
 /// from: nothing is written, and `state` becomes the record as it is, so the
 /// operator's move stands and the next stage builds the new branch's head.
 /// [`Error::Io`] if the record lock cannot be taken, and whatever
-/// [`State::read`] and [`State::write`] return, in which case `state` is as
-/// it was.
-fn record_staged(tree: &Tree, state: &mut State, head: &str) -> Result<(), Error> {
+/// [`settings::read`], [`State::read`], [`State::adopt`] and [`State::write`]
+/// return, in which case `state` is as it was.
+async fn record_staged<D: Daemon>(
+    daemon: &D,
+    tree: &Tree,
+    state: &mut State,
+    head: &str,
+) -> Result<(), Error> {
+    let held = settings::read(daemon, tree.sheep()).await?;
     let _record = lock::hold_record(tree)?;
-    let on_disk = State::read(&tree.state_file())?;
+    let mut on_disk = State::read(&tree.state_file())?;
+    on_disk.adopt(tree.sheep(), &held)?;
     if on_disk.branch != state.branch {
         let message = format!(
             "{}: the branch changed from {} to {} while {head} was building, so it was not \
@@ -308,16 +319,13 @@ mod tests {
 
     use super::*;
 
-    /// The sheep's settings with a build that runs `command`.
-    fn building(command: &str) -> Settings {
-        Settings {
-            command: Some(command.to_owned()),
-            ..Settings::default()
-        }
+    /// A shepherd whose sheep builds by running `command`.
+    fn building(command: &str) -> Shepherd {
+        Shepherd::ready().with_settings(&format!("command = {command:?}\n"))
     }
 
     /// A build that leaves `built.marker` in the release.
-    fn touching_marker() -> Settings {
+    fn touching_marker() -> Shepherd {
         building("touch built.marker")
     }
 
@@ -329,9 +337,9 @@ mod tests {
     ) -> String {
         let second = commit_on_origin(fixture, "second.txt");
         stage(
+            &building(command),
             &fixture.tree,
             &mut fixture.state,
-            &building(command),
             &fixtures::dog_config(),
         )
         .await
@@ -540,9 +548,9 @@ mod tests {
         // No build command: the paused clock would time a real one out.
         let second = commit_on_origin(&fixture, "second.txt");
         stage(
+            &Shepherd::ready(),
             &fixture.tree,
             &mut fixture.state,
-            &Settings::default(),
             &fixtures::dog_config(),
         )
         .await
@@ -583,9 +591,9 @@ mod tests {
         let second = commit_on_origin(&fixture, "second.txt");
 
         let staged = stage(
+            &touching_marker(),
             &fixture.tree,
             &mut fixture.state,
-            &touching_marker(),
             &fixtures::dog_config(),
         )
         .await
@@ -620,9 +628,9 @@ mod tests {
         let live = fixture.state.deployed.clone().expect("a previous release");
 
         let staged = stage(
+            &Shepherd::ready(),
             &fixture.tree,
             &mut fixture.state,
-            &Settings::default(),
             &fixtures::dog_config(),
         )
         .await
@@ -639,9 +647,9 @@ mod tests {
         let mut fixture = fixture_with_previous_release();
         let second = commit_on_origin(&fixture, "second.txt");
         stage(
+            &touching_marker(),
             &fixture.tree,
             &mut fixture.state,
-            &touching_marker(),
             &fixtures::dog_config(),
         )
         .await
@@ -650,9 +658,9 @@ mod tests {
         fs::remove_file(&marker).expect("marker");
 
         let again = stage(
+            &touching_marker(),
             &fixture.tree,
             &mut fixture.state,
-            &touching_marker(),
             &fixtures::dog_config(),
         )
         .await
@@ -674,9 +682,9 @@ mod tests {
 
         fs::remove_file(fixture.tree.completion(&second)).expect("marker");
         let again = stage(
+            &touching_marker(),
             &fixture.tree,
             &mut fixture.state,
-            &touching_marker(),
             &fixtures::dog_config(),
         )
         .await
@@ -691,9 +699,9 @@ mod tests {
 
         fs::remove_dir_all(&release).expect("release");
         let again = stage(
+            &touching_marker(),
             &fixture.tree,
             &mut fixture.state,
-            &touching_marker(),
             &fixtures::dog_config(),
         )
         .await
@@ -715,9 +723,9 @@ mod tests {
         let mut fixture = fixture_with_previous_release();
         commit_on_origin(&fixture, "second.txt");
         stage(
+            &Shepherd::ready(),
             &fixture.tree,
             &mut fixture.state,
-            &Settings::default(),
             &fixtures::dog_config(),
         )
         .await
@@ -725,9 +733,9 @@ mod tests {
         let third = commit_on_origin(&fixture, "third.txt");
 
         let staged = stage(
+            &Shepherd::ready(),
             &fixture.tree,
             &mut fixture.state,
-            &Settings::default(),
             &fixtures::dog_config(),
         )
         .await
@@ -754,9 +762,9 @@ mod tests {
         commit_on_origin(&fixture, "second.txt");
 
         let err = stage(
+            &building("exit 3"),
             &fixture.tree,
             &mut fixture.state,
-            &building("exit 3"),
             &fixtures::dog_config(),
         )
         .await
@@ -777,17 +785,12 @@ mod tests {
     async fn a_watched_target_is_refused_and_nothing_is_fetched() {
         let mut fixture = fixture_with_previous_release();
         let previous = fixture.state.deployed.clone().expect("a previous release");
-        fixture.state.watch = Watch::Auto;
-        fixture
-            .state
-            .write(&fixture.tree.state_file())
-            .expect("write deploy.toml");
         commit_on_origin(&fixture, "second.txt");
 
         let err = stage(
+            &Shepherd::ready().with_setting("watch", "auto"),
             &fixture.tree,
             &mut fixture.state,
-            &Settings::default(),
             &fixtures::dog_config(),
         )
         .await
@@ -811,9 +814,9 @@ mod tests {
         let mut fixture = fixture_before_any_release();
 
         let err = stage(
+            &Shepherd::ready(),
             &fixture.tree,
             &mut fixture.state,
-            &Settings::default(),
             &fixtures::dog_config(),
         )
         .await
@@ -843,9 +846,9 @@ mod tests {
         fs::write(fixture.tree.completion(&second), b"").expect("marker");
 
         let staged = stage(
+            &touching_marker(),
             &fixture.tree,
             &mut fixture.state,
-            &touching_marker(),
             &fixtures::dog_config(),
         )
         .await
@@ -868,8 +871,8 @@ mod tests {
     /// while it built. The stale copy still holds the old branch and the
     /// `failed` that `--branch` clears; writing it whole recorded a `staged`
     /// from the branch the target no longer follows.
-    #[test]
-    fn a_branch_set_while_a_stage_builds_is_not_overwritten() {
+    #[tokio::test]
+    async fn a_branch_set_while_a_stage_builds_is_not_overwritten() {
         let mut fixture = fixture_with_previous_release();
         fixture.state.failed = Some(fixtures::OTHER_SHA.to_owned());
         fixture
@@ -877,25 +880,30 @@ mod tests {
             .write(&fixture.tree.state_file())
             .expect("write deploy.toml");
         let mut in_flight = fixture.state.clone();
+        let daemon = Shepherd::ready();
 
-        crate::retarget::set_branch(&fixture.tree, "release").expect("--branch release");
-        let err = record_staged(&fixture.tree, &mut in_flight, fixtures::SHA)
+        crate::retarget::set_branch(&daemon, &fixture.tree, "release")
+            .await
+            .expect("--branch release");
+        let err = record_staged(&daemon, &fixture.tree, &mut in_flight, fixtures::SHA)
+            .await
             .expect_err("the branch moved");
 
         assert!(matches!(err, Error::Config(_)), "{err:?}");
         let shown = err.to_string();
         assert!(shown.contains("main to release"), "{shown}");
         let written = State::read(&fixture.tree.state_file()).expect("deploy.toml");
-        assert_eq!(written.branch, "release");
         assert_eq!(written.failed, None);
         assert_eq!(written.staged, None);
-        assert_eq!(in_flight, written, "memory follows the disk");
+        assert_eq!(in_flight.branch, "release", "memory follows the table");
+        assert_eq!(in_flight.failed, None);
+        assert_eq!(in_flight.staged, None);
     }
 
     /// fails if a stage records its own stale copy of `failed`. A hold put
     /// on the record while the build ran is not the stage's to drop.
-    #[test]
-    fn a_stage_leaves_the_record_fields_it_does_not_own() {
+    #[tokio::test]
+    async fn a_stage_leaves_the_record_fields_it_does_not_own() {
         let fixture = fixture_with_previous_release();
         let mut in_flight = fixture.state.clone();
         State {
@@ -905,11 +913,19 @@ mod tests {
         .write(&fixture.tree.state_file())
         .expect("a hold written meanwhile");
 
-        record_staged(&fixture.tree, &mut in_flight, fixtures::SHA).expect("records");
+        record_staged(
+            &Shepherd::ready(),
+            &fixture.tree,
+            &mut in_flight,
+            fixtures::SHA,
+        )
+        .await
+        .expect("records");
 
         let written = State::read(&fixture.tree.state_file()).expect("deploy.toml");
         assert_eq!(written.staged.as_deref(), Some(fixtures::SHA));
         assert_eq!(written.failed.as_deref(), Some(fixtures::OTHER_SHA));
-        assert_eq!(in_flight, written);
+        assert_eq!(in_flight.failed, written.failed);
+        assert_eq!(in_flight.staged, written.staged);
     }
 }

@@ -59,6 +59,7 @@ async fn an_unattended_deploy_skips_a_push_outside_the_paths() {
     let mut fixture = fixture_declaring_reload_paths();
     let live = swap::resolve(&fixture.tree.current()).expect("resolves");
     let before = State::read(&fixture.tree.state_file()).expect("reads");
+    let in_memory = fixture.state.clone();
     let pushed = push(&fixture, &[("cmd/bot/main.go", "2")]);
     let shepherd = declaring_reload_paths();
 
@@ -85,7 +86,7 @@ async fn an_unattended_deploy_skips_a_push_outside_the_paths() {
         before,
         "the record is untouched"
     );
-    assert_eq!(fixture.state, before, "and so is the copy in memory");
+    assert_eq!(fixture.state, in_memory, "and so is the copy in memory");
 }
 
 /// fails if `deploy <sheep>` by name skips. An operator asking for a deploy

@@ -13,6 +13,7 @@ use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::paths::{self, Tree};
 use crate::roll;
+use crate::settings;
 use crate::state::{State, Watch};
 
 /// Where one sheep stands with respect to this dog.
@@ -121,7 +122,14 @@ pub fn classify(shep_home: &Path, app: &AppConfig) -> Standing {
         Err(Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Standing::Unreadable(err.to_string()),
     };
-    if let Some(state) = state {
+    if let Some(mut state) = state {
+        // The roll carries the sheep's `dogs` table, which is where `branch`
+        // and `watch` live now.
+        if let Err(err) =
+            settings::from_app(&app.name, app).and_then(|held| state.adopt(&app.name, &held))
+        {
+            return Standing::Unreadable(err.to_string());
+        }
         let (branch, sha, staged) = (state.branch, state.deployed, state.staged);
         // A hold is only reported for a target something polls. `failed`
         // is written by an operator's own deploy too, and for a manual
@@ -442,7 +450,7 @@ mod tests {
         std::fs::create_dir_all(tree.root()).expect("tree");
         std::fs::write(
             tree.state_file(),
-            "remote = \"https://example.com/x\"\nbranch = \"main\"\ncheckout = \"/srv/x\"\n\
+            "remote = \"https://example.com/x\"\ncheckout = \"/srv/x\"\n\
              newer_key = true\n",
         )
         .expect("a record from the future");
@@ -466,7 +474,7 @@ mod tests {
     #[test]
     fn a_tree_with_no_registered_sheep_is_a_row_of_its_own() {
         let home = tempfile::tempdir().expect("tempdir");
-        write_target(home.path(), "gone", Watch::Auto, None, None);
+        write_target(home.path(), "gone", None, None);
         let registered: std::collections::BTreeMap<String, AppConfig> =
             [("web".to_owned(), app("web", None))].into_iter().collect();
         let targets = paths::targets(home.path()).expect("lists");
@@ -510,10 +518,20 @@ mod tests {
         );
     }
 
-    /// An `AppConfig` with just the two fields this module reads.
+    /// An `AppConfig` with just the fields this module reads, whose
+    /// `[app.dogs.deploy]` table follows `main` and is watched.
     fn app(name: &str, cwd: Option<&str>) -> AppConfig {
-        let mut app: AppConfig =
-            toml::from_str(&format!("name = {name:?}\nscript = \"./run.sh\"")).expect("parses");
+        app_watching(name, cwd, Watch::Auto)
+    }
+
+    /// As [`app`], with `watch` in the table.
+    fn app_watching(name: &str, cwd: Option<&str>, watch: Watch) -> AppConfig {
+        let watch = match watch {
+            Watch::Auto => "auto",
+            Watch::Manual => "manual",
+        };
+        let mut app =
+            fixtures::app_with_settings(name, &format!("branch = 'main'\nwatch = '{watch}'"));
         app.cwd = cwd.map(str::to_owned);
         app
     }
@@ -533,20 +551,13 @@ mod tests {
     /// Writes `<home>/deploy/<sheep>/deploy.toml` through `State::write`, so
     /// the fixture and the real reader agree by construction rather than by
     /// a hand-written string that can drift.
-    fn write_target(
-        home: &Path,
-        sheep: &str,
-        watch: Watch,
-        sha: Option<&str>,
-        failed: Option<&str>,
-    ) {
+    fn write_target(home: &Path, sheep: &str, sha: Option<&str>, failed: Option<&str>) {
         let tree = Tree::for_sheep(home, sheep);
         std::fs::create_dir_all(tree.state_file().parent().expect("has a parent"))
             .expect("create target dir");
         let state = State {
             deployed: sha.map(str::to_owned),
             failed: failed.map(str::to_owned),
-            watch,
             ..crate::fixtures::state()
         };
         state.write(&tree.state_file()).expect("write state");
@@ -559,7 +570,6 @@ mod tests {
         let state = State {
             deployed: Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_owned()),
             staged: Some(staged.to_owned()),
-            watch: Watch::Manual,
             ..crate::fixtures::state()
         };
         state.write(&tree.state_file()).expect("write state");
@@ -634,12 +644,14 @@ mod tests {
         write_target(
             home.path(),
             "bpm",
-            Watch::Manual,
             Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
             None,
         );
 
-        let standing = classify(home.path(), &app("bpm", current.path().to_str()));
+        let standing = classify(
+            home.path(),
+            &app_watching("bpm", current.path().to_str(), Watch::Manual),
+        );
         assert!(matches!(standing, Standing::Manual { .. }), "{standing:?}");
     }
 
@@ -697,7 +709,6 @@ mod tests {
         write_target(
             home.path(),
             "bpm",
-            Watch::Auto,
             Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
             Some("d4e5f6a7b8c9d4e5f6a7b8c9d4e5f6a7b8c9d4e5"),
         );
@@ -730,14 +741,16 @@ mod tests {
         write_target(
             home.path(),
             "bpm",
-            Watch::Manual,
             Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
             Some("d4e5f6a7b8c9d4e5f6a7b8c9d4e5f6a7b8c9d4e5"),
         );
 
         let row = render(&[(
             "bpm".to_owned(),
-            classify(home.path(), &app("bpm", current.path().to_str())),
+            classify(
+                home.path(),
+                &app_watching("bpm", current.path().to_str(), Watch::Manual),
+            ),
         )]);
 
         assert!(row.contains("only when asked"), "{row}");
@@ -760,7 +773,10 @@ mod tests {
 
         let row = render(&[(
             "bpm".to_owned(),
-            classify(home.path(), &app("bpm", current.path().to_str())),
+            classify(
+                home.path(),
+                &app_watching("bpm", current.path().to_str(), Watch::Manual),
+            ),
         )]);
 
         assert!(row.contains("manual"), "{row}");
@@ -779,14 +795,16 @@ mod tests {
         write_target(
             home.path(),
             "bpm",
-            Watch::Manual,
             Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
             None,
         );
 
         let row = render(&[(
             "bpm".to_owned(),
-            classify(home.path(), &app("bpm", current.path().to_str())),
+            classify(
+                home.path(),
+                &app_watching("bpm", current.path().to_str(), Watch::Manual),
+            ),
         )]);
 
         assert!(

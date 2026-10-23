@@ -183,12 +183,10 @@ async fn run(args: &[&str]) -> ExitCode {
             Ok(verify) => setup_once(sheep, verify).await,
             Err(err) => Err(err),
         },
-        Route::Watch { sheep, mode } => set_watch(sheep, mode),
+        Route::Watch { sheep, mode } => set_watch(sheep, mode).await,
         Route::Stage(sheep) => stage_once(sheep).await,
         Route::Promote(sheep) => promote_once(sheep).await,
-        Route::Branch { sheep, name } => {
-            shep_home().and_then(|home| retarget::branch_once(&Tree::for_sheep(&home, sheep), name))
-        }
+        Route::Branch { sheep, name } => branch_once(sheep, name).await,
         Route::Usage => return usage(),
     };
 
@@ -433,10 +431,10 @@ fn listen(kind: SignalKind) -> Option<Signal> {
 /// socket cannot be reached.
 async fn deploy_once(sheep: &str) -> Result<u8, Error> {
     let tree = Tree::for_sheep(&shep_home()?, sheep);
-    let mut state = State::read(&tree.state_file())?;
 
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
+    let (mut state, _) = settings::adopted(&daemon, &tree).await?;
 
     let config = config::read(&daemon).await?;
     let outcome = deploy::deploy(&daemon, &tree, &mut state, &config).await?;
@@ -465,10 +463,10 @@ fn report(sheep: &str, state: &State, outcome: &Outcome) -> u8 {
 /// socket cannot be reached.
 async fn promote_once(sheep: &str) -> Result<u8, Error> {
     let tree = Tree::for_sheep(&shep_home()?, sheep);
-    let mut state = State::read(&tree.state_file())?;
 
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
+    let (mut state, _) = settings::adopted(&daemon, &tree).await?;
 
     let config = config::read(&daemon).await?;
     let outcome = stage::promote(&daemon, &tree, &mut state, &config).await?;
@@ -486,13 +484,12 @@ async fn promote_once(sheep: &str) -> Result<u8, Error> {
 /// socket cannot be reached.
 async fn stage_once(sheep: &str) -> Result<u8, Error> {
     let tree = Tree::for_sheep(&shep_home()?, sheep);
-    let mut state = State::read(&tree.state_file())?;
 
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
+    let (mut state, _) = settings::adopted(&daemon, &tree).await?;
     let config = config::read(&daemon).await?;
-    let settings = settings::read(&daemon, sheep).await?;
-    match stage::stage(&tree, &mut state, &settings, &config).await? {
+    match stage::stage(&daemon, &tree, &mut state, &config).await? {
         Staged::Built { sha } => println!(
             "{sheep} staged {sha}, still deployed at {}",
             deployed(&state)
@@ -614,8 +611,9 @@ async fn on_remove() -> ExitCode {
 /// [`Error::Config`] if `mode` is neither `auto` nor `manual`, if `auto` was
 /// asked for on a tree the cutover never landed on, or if `deploy.toml` does
 /// not parse or fails validation - see [`deploy::set_watch`]. [`Error::Io`]
-/// if it cannot be read or written.
-fn set_watch(sheep: &str, mode: &str) -> Result<u8, Error> {
+/// if it cannot be read, and [`Error::Connect`] if the shepherd's socket
+/// cannot be reached.
+async fn set_watch(sheep: &str, mode: &str) -> Result<u8, Error> {
     let watch = match mode {
         "auto" => Watch::Auto,
         "manual" => Watch::Manual,
@@ -627,10 +625,12 @@ fn set_watch(sheep: &str, mode: &str) -> Result<u8, Error> {
     };
 
     let tree = Tree::for_sheep(&shep_home()?, sheep);
-    // Both the record before and the record after come back from the write:
+    let client = Client::connect(&socket()?).await?;
+    let daemon = Live::command(client);
+    // Both the watch before and the record after come back from the write:
     // `set_watch` reads immediately before writing, and a read made here
     // would be the older copy the "was already" line must not be true of.
-    let (was, state) = deploy::set_watch(&tree, watch)?;
+    let (was, state) = deploy::set_watch(&daemon, &tree, watch).await?;
 
     if was == watch {
         println!("{sheep} was already watch = {}", named(watch));
@@ -644,6 +644,18 @@ fn set_watch(sheep: &str, mode: &str) -> Result<u8, Error> {
     }
 
     Ok(0)
+}
+
+/// Points `sheep` at `name` and says so, without deploying.
+///
+/// # Errors
+/// [`Error::Io`] if `$SHEP_HOME` cannot be resolved, [`Error::Connect`] if
+/// the shepherd's socket cannot be reached, and whatever
+/// [`retarget::branch_once`] returns.
+async fn branch_once(sheep: &str, name: &str) -> Result<u8, Error> {
+    let tree = Tree::for_sheep(&shep_home()?, sheep);
+    let client = Client::connect(&socket()?).await?;
+    retarget::branch_once(&Live::command(client), &tree, name).await
 }
 
 /// `$SHEP_HOME`, absolute.

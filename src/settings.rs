@@ -10,6 +10,9 @@
 //!
 //! ```toml
 //! [app.dogs.deploy]
+//! branch = "main"
+//! watch = "auto"
+//! verify = "probed"
 //! command = "bun install && bun run build"
 //! artifacts = ["target/release/koji"]
 //! reload = ["cmd/voting", "assets/*.png"]
@@ -22,19 +25,27 @@
 //! command = "purge-cache"
 //! ```
 //!
-//! No table at all is a sheep with no build, no hooks and no reload paths.
+//! `branch`, `watch` and `verify` used to live in `deploy.toml`. They are
+//! filled into [`State`] by [`State::adopt`] and written back here by
+//! [`change`], so the record holds state only.
+//!
+//! No table at all is a sheep with no build, no hooks and no reload paths,
+//! and one with no `branch`, which a deploy refuses until the operator names
+//! one.
 
 use std::path::PathBuf;
 
 use serde::Deserialize;
-use serde_json::Value;
-use shep_client::shep_core::config::AppConfig;
+use serde_json::{Map, Value};
+use shep_client::shep_core::config::{AppConfig, DogTable};
 
 use crate::build::{BuildSpec, contained_artifacts};
 use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::hook::{HookSpec, Hooks};
+use crate::paths::Tree;
 use crate::shared::printable;
+use crate::state::{State, Verify, Watch};
 
 /// The name this dog's table goes by under a sheep's `dogs`.
 const TABLE: &str = "deploy";
@@ -47,6 +58,14 @@ const TABLE: &str = "deploy";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
+    /// The branch polled for new commits, or a full ref beginning `refs/`.
+    /// `None` is a sheep nobody has pointed at a branch yet.
+    pub branch: Option<String>,
+    /// Whether the poll loop deploys new commits or only `shep-deploy
+    /// deploy` does.
+    pub watch: Watch,
+    /// How a freshly deployed release is judged healthy.
+    pub verify: Verify,
     /// The build command, run through `sh -c` inside the release. `None` is
     /// no build.
     pub command: Option<String>,
@@ -89,6 +108,71 @@ impl Settings {
 /// [`from_app`].
 pub(crate) async fn read<D: Daemon>(daemon: &D, sheep: &str) -> Result<Settings, Error> {
     from_app(sheep, &daemon.sheep_config(sheep).await?)
+}
+
+/// `tree`'s record with the settings it no longer holds adopted from the
+/// shepherd, and the settings they came from.
+///
+/// # Errors
+/// [`State::read`]'s, [`read`]'s and [`State::adopt`]'s.
+pub(crate) async fn adopted<D: Daemon>(
+    daemon: &D,
+    tree: &Tree,
+) -> Result<(State, Settings), Error> {
+    let mut state = State::read(&tree.state_file())?;
+    let settings = read(daemon, tree.sheep()).await?;
+    state.adopt(tree.sheep(), &settings)?;
+    Ok((state, settings))
+}
+
+/// One key of the table this dog writes, and its new value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Change {
+    /// See [`Settings::branch`].
+    Branch(String),
+    /// See [`Settings::watch`].
+    Watch(Watch),
+    /// See [`Settings::verify`].
+    Verify(Verify),
+}
+
+impl Change {
+    fn entry(self) -> (&'static str, Value) {
+        match self {
+            Self::Branch(branch) => ("branch", Value::String(branch)),
+            Self::Watch(watch) => ("watch", Value::String(watch.as_str().to_owned())),
+            Self::Verify(verify) => ("verify", Value::String(verify.as_str().to_owned())),
+        }
+    }
+}
+
+/// Sets `changes` in `sheep`'s `[app.dogs.deploy]` table and leaves every
+/// other key as the shepherd holds it.
+///
+/// The shepherd replaces a dog's table whole, so this reads the table, edits
+/// it and writes it back: an edit another client lands between the two is
+/// lost, the window shep's own settings pane has.
+///
+/// # Errors
+/// As [`Daemon::sheep_config`] and [`Daemon::set_sheep_dog_settings`].
+pub(crate) async fn change<D: Daemon>(
+    daemon: &D,
+    sheep: &str,
+    changes: impl IntoIterator<Item = Change>,
+) -> Result<(), Error> {
+    let app = daemon.sheep_config(sheep).await?;
+    let mut table: Map<String, Value> = app
+        .dogs
+        .get(TABLE)
+        .map(|held| held.as_map().clone())
+        .unwrap_or_default();
+    for change in changes {
+        let (key, value) = change.entry();
+        table.insert(key.to_owned(), value);
+    }
+    daemon
+        .set_sheep_dog_settings(sheep, TABLE, DogTable::from(table))
+        .await
 }
 
 /// The settings in `app`'s `[app.dogs.deploy]`, or none if it has no such
@@ -241,7 +325,8 @@ mod tests {
 
         assert_eq!(
             format!("{settings:?}"),
-            "Settings { command: Some(\"make\"), artifacts: [], reload: [], \
+            "Settings { branch: None, watch: Auto, verify: Probed, \
+             command: Some(\"make\"), artifacts: [], reload: [], \
              release: HookSpec { command: Some(\"migrate\"), env: <1 vars> }, \
              after: HookSpec { command: None, env: <0 vars> } }"
         );

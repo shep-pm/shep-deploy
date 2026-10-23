@@ -13,6 +13,7 @@ use crate::git;
 use crate::lock;
 use crate::paths::Tree;
 use crate::roll;
+use crate::settings::Change;
 use crate::shared;
 use crate::state::{State, Verify, Watch};
 use crate::swap;
@@ -297,13 +298,19 @@ pub async fn prepare_with<D: Daemon>(
     // than found out by the record write at the very end. Neither value was
     // typed by the operator: `remote` is what `git remote get-url origin`
     // answered in the checkout and `checkout` is the cwd shep registered.
-    state.validate(Path::new("deploy.toml")).map_err(|err| {
+    let unrecordable = |err: Error| {
         Error::Config(format!(
             "{sheep} cannot be recorded as it is registered ({err}). `remote` is the \
                  checkout's `origin`, `branch` is the checkout's HEAD, and `checkout` is the cwd \
                  shep has for {sheep}; fix whichever is named and run setup again"
         ))
-    })?;
+    };
+    state
+        .validate(Path::new("deploy.toml"))
+        .map_err(unrecordable)?;
+    if let Some(why) = crate::state::branch_refusal(&state.branch) {
+        return Err(unrecordable(Error::Config(format!("`branch` {why}"))));
+    }
 
     // The registered config already holds the table, so setup asks the
     // shepherd for nothing more. Before the lock, so a typo costs no tree.
@@ -366,6 +373,20 @@ pub async fn prepare_with<D: Daemon>(
     }
     built?;
 
+    // Before the swap, so a failure here leaves nothing but a table the next
+    // run writes again. `watch` is `manual` for the reason given where the
+    // record is built, and the cutover promotes it.
+    crate::settings::change(
+        daemon,
+        sheep,
+        [
+            Change::Branch(state.branch.clone()),
+            Change::Watch(state.watch),
+            Change::Verify(state.verify),
+        ],
+    )
+    .await?;
+
     // `current` now points through a real release carrying the operator's
     // shared files - the whole deliverable of part one. `state.write` comes
     // AFTER the swap, not before: a run that dies between them leaves
@@ -418,7 +439,7 @@ mod tests {
             Some("0123456789abcdef0123456789abcdef01234567"),
         );
         let entries = [("bpm", checkout.path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let err = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
@@ -438,7 +459,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         let checkout = checkout_with_commit();
         let entries = [("bpm", checkout.path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let prepared = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
@@ -459,12 +480,44 @@ mod tests {
         let checkout = checkout_with_commit();
         fixtures::run_git(checkout.path(), &["checkout", "-q", "-b", "stable"]);
         let entries = [("bpm", checkout.path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let prepared = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
             .expect("prepares");
         assert_eq!(prepared.state.branch, "stable");
+        assert_eq!(daemon.settings().branch.as_deref(), Some("stable"));
+    }
+
+    /// fails if setup leaves the settings out of the sheep's table, or
+    /// writes them to the record. The table is where lookout shows them,
+    /// and `manual` is what keeps the loop off a tree nothing has served
+    /// from yet.
+    #[tokio::test]
+    async fn prepare_writes_the_settings_to_the_table_and_not_the_record() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let checkout = checkout_with_commit();
+        let entries = [("bpm", checkout.path())];
+        let daemon = RollOf::new(&entries);
+
+        let prepared = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
+            .await
+            .expect("prepares");
+
+        let held = daemon.settings();
+        assert_eq!(held.branch.as_deref(), Some("main"));
+        assert_eq!(held.watch, Watch::Manual);
+        assert_eq!(held.verify, Verify::Probed);
+        let on_disk: toml::Table = std::fs::read_to_string(prepared.tree.state_file())
+            .expect("reads")
+            .parse()
+            .expect("a table");
+        for key in ["branch", "watch", "verify"] {
+            assert!(
+                !on_disk.contains_key(key),
+                "{key} in the record: {on_disk:?}"
+            );
+        }
     }
 
     /// fails if a run that died before writing its record cannot simply be
@@ -485,7 +538,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         let checkout = checkout_with_commit();
         let entries = [("bpm", checkout.path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let first = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
@@ -517,7 +570,7 @@ mod tests {
         std::fs::write(checkout.path().join(".gitignore"), "local.json\n").expect("write");
         std::fs::write(checkout.path().join("local.json"), "{}").expect("write");
         let entries = [("bpm", checkout.path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let prepared = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
@@ -543,7 +596,7 @@ mod tests {
         let head = fixtures::head_of(checkout.path());
         fixtures::run_git(checkout.path(), &["checkout", "-q", &head]);
         let entries = [("bpm", checkout.path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let err = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
@@ -559,7 +612,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         let checkout = checkout_with_commit();
         let entries = [("bpm", checkout.path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let prepared = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
@@ -586,7 +639,7 @@ mod tests {
         write_target(home.path(), "bpm", Watch::Manual, None);
         let current = tree.current();
         let entries = [("bpm", current.as_path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let err = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
@@ -629,7 +682,7 @@ mod tests {
         write_target(&home, "bpm", Watch::Manual, None);
         let spelled_through_link = link.join("deploy/bpm/current");
         let entries = [("bpm", spelled_through_link.as_path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let err = prepare(&daemon, &home, "bpm", &fixtures::dog_config())
             .await
@@ -655,7 +708,7 @@ mod tests {
         swap::point_at(&tree.current(), &release).expect("current");
         let current = tree.current();
         let entries = [("bpm", current.as_path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let err = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
@@ -690,7 +743,7 @@ mod tests {
         let tree = Tree::for_sheep(home.path(), "bpm");
         std::fs::write(tree.state_file(), "this is not toml = = =").expect("corrupt the record");
         let entries = [("bpm", checkout.path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let err = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
@@ -726,7 +779,7 @@ mod tests {
         let checkout = checkout_with_commit();
         write_target(home.path(), "bpm", Watch::Auto, None);
         let entries = [("bpm", checkout.path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let err = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
@@ -756,7 +809,7 @@ mod tests {
         let marker = scratch.path().join("built");
         let checkout = ungated_checkout();
         let entries = [("bpm", checkout.path())];
-        let daemon = RollBuilding(&entries, &marker);
+        let daemon = RollBuilding::new(&entries, &marker);
 
         let err = prepare_with(
             &daemon,
@@ -794,7 +847,7 @@ mod tests {
         let checkout = ungated_checkout();
         let entries = [("bpm", checkout.path())];
         let built = scratch.path().join("built");
-        let daemon = RollBuilding(&entries, &built);
+        let daemon = RollBuilding::new(&entries, &built);
         let config = fixtures::dog_config();
         prepare_with(&daemon, home.path(), "bpm", &config, Verify::Probed)
             .await
@@ -815,7 +868,7 @@ mod tests {
         let checkout = ungated_checkout();
         let entries = [("bpm", checkout.path())];
         let built = scratch.path().join("built");
-        let daemon = RollBuilding(&entries, &built);
+        let daemon = RollBuilding::new(&entries, &built);
 
         let prepared = prepare_with(
             &daemon,
@@ -828,8 +881,7 @@ mod tests {
         .expect("prepares");
 
         assert_eq!(prepared.state.verify, Verify::Alive);
-        let on_disk = State::read(&prepared.tree.state_file()).expect("reads");
-        assert_eq!(on_disk.verify, Verify::Alive);
+        assert_eq!(daemon.settings().verify, Verify::Alive);
     }
 
     /// fails if the check refuses an app that does have a gate, which would
@@ -841,7 +893,7 @@ mod tests {
             "[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\nwait_ready = true\n",
         );
         let entries = [("bpm", checkout.path())];
-        let daemon = RollOf(&entries);
+        let daemon = RollOf::new(&entries);
 
         let prepared = prepare_with(
             &daemon,

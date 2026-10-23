@@ -35,6 +35,7 @@ async fn an_unnameable_target_is_a_row_that_cannot_forge_a_line() {
 
 use core::time::Duration;
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -45,7 +46,6 @@ use shep_client::shep_core::protocol::{ProcessInfo, RpcError, RpcErrorCode};
 use shep_client::shep_core::status::ProcStatus;
 use tempfile::TempDir;
 
-use crate::state::Verify;
 use crate::swap;
 
 /// The fixture app, named per sheep so `flockfile::app_config` finds
@@ -58,6 +58,12 @@ fn flockfile(sheep: &str) -> String {
     )
 }
 
+/// The table every sheep a [`Ready`] serves has, unless it is given another.
+const BASE_TABLE: &str = "branch = 'main'\nverify = 'probed'\n";
+
+/// The table of a sheep the loop does not deploy.
+const PAUSED: &str = "branch = 'main'\nwatch = 'manual'\n";
+
 /// A target's record, for the one function that reads nothing else.
 fn target(watch: Watch) -> State {
     State {
@@ -69,10 +75,10 @@ fn target(watch: Watch) -> State {
 
 /// Writes `<home>/deploy/<sheep>/deploy.toml` and nothing else: a
 /// target with a record and no repository under it at all.
-fn write_target(home: &Path, sheep: &str, watch: Watch, sha: Option<&str>) {
+fn write_target(home: &Path, sheep: &str, sha: Option<&str>) {
     let tree = Tree::for_sheep(home, sheep);
     fs::create_dir_all(tree.root()).expect("create the tree");
-    let mut state = target(watch);
+    let mut state = target(Watch::Auto);
     state.deployed = sha.map(str::to_owned);
     state.write(&tree.state_file()).expect("write deploy.toml");
 }
@@ -83,12 +89,12 @@ fn write_target(home: &Path, sheep: &str, watch: Watch, sha: Option<&str>) {
 ///
 /// The returned [`TempDir`] is the origin, and dropping it deletes the
 /// repository the deploy fetches from, so tests hold it.
-fn write_target_ready(home: &Path, sheep: &str, watch: Watch) -> TempDir {
-    write_target_with_flockfile(home, sheep, watch, &flockfile(sheep))
+fn write_target_ready(home: &Path, sheep: &str) -> TempDir {
+    write_target_with_flockfile(home, sheep, &flockfile(sheep))
 }
 
 /// [`write_target_ready`], with the live release's Flockfile given.
-fn write_target_with_flockfile(home: &Path, sheep: &str, watch: Watch, flockfile: &str) -> TempDir {
+fn write_target_with_flockfile(home: &Path, sheep: &str, flockfile: &str) -> TempDir {
     let origin = fixtures::checkout(&[("Flockfile.toml", flockfile)]);
 
     let tree = Tree::for_sheep(home, sheep);
@@ -104,8 +110,6 @@ fn write_target_with_flockfile(home: &Path, sheep: &str, watch: Watch, flockfile
     let state = State {
         remote,
         deployed: Some(first),
-        verify: Verify::Probed,
-        watch,
         checkout: origin.path().to_owned(),
         ..fixtures::state()
     };
@@ -134,24 +138,37 @@ const FIRST_PID: u32 = 12835;
 /// anything could pass for one that did.
 struct Ready {
     reloads: Cell<u32>,
-    /// The sheep's `[app.dogs.deploy]` table, in TOML, if it has one.
-    settings: Option<&'static str>,
+    /// Keys, in TOML, added to [`BASE_TABLE`] for every sheep.
+    extra: &'static str,
+    /// The tables, in TOML, of the sheep that have one of their own.
+    tables: RefCell<BTreeMap<String, String>>,
 }
 
 impl Ready {
     const fn new() -> Self {
+        Self::declaring("")
+    }
+
+    /// As [`Self::new`], for sheep whose `[app.dogs.deploy]` also holds `extra`.
+    const fn declaring(extra: &'static str) -> Self {
         Self {
             reloads: Cell::new(0),
-            settings: None,
+            extra,
+            tables: RefCell::new(BTreeMap::new()),
         }
     }
 
-    /// As [`Self::new`], for a sheep whose `[app.dogs.deploy]` is `settings`.
-    const fn declaring(settings: &'static str) -> Self {
-        Self {
-            reloads: Cell::new(0),
-            settings: Some(settings),
-        }
+    /// The same shepherd, holding `table` as `sheep`'s whole `[app.dogs.deploy]`.
+    fn with_table(self, sheep: &str, table: &str) -> Self {
+        self.set_table(sheep, table);
+        self
+    }
+
+    /// Replaces `sheep`'s `[app.dogs.deploy]` as an operator's edit would.
+    fn set_table(&self, sheep: &str, table: &str) {
+        self.tables
+            .borrow_mut()
+            .insert(sheep.to_owned(), table.to_owned());
     }
 }
 
@@ -168,17 +185,20 @@ impl Daemon for Ready {
         Ok(())
     }
     async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
-        Ok(match self.settings {
-            Some(settings) => fixtures::app_with_settings(sheep, settings),
-            None => fixtures::app_named(sheep),
-        })
+        let table = self
+            .tables
+            .borrow()
+            .get(sheep)
+            .cloned()
+            .unwrap_or_else(|| format!("{BASE_TABLE}{}", self.extra));
+        Ok(fixtures::app_with_settings(sheep, &table))
     }
     async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), Error> {
         Ok(())
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, start, delete, restart, save_roll,
+        dog_config, list_flock, start, delete, restart, save_roll, set_sheep_dog_settings,
     );
 }
 
@@ -234,14 +254,14 @@ impl Daemon for Counting {
         Err(Error::Protocol("the shepherd stopped answering".to_owned()))
     }
     async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
-        Ok(fixtures::app_named(sheep))
+        Ok(fixtures::app_with_settings(sheep, BASE_TABLE))
     }
     async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), Error> {
         Ok(())
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, start, delete, reload, restart, save_roll,
+        dog_config, list_flock, start, delete, reload, restart, save_roll, set_sheep_dog_settings,
     );
 }
 
@@ -263,13 +283,14 @@ async fn a_manual_target_is_never_polled() {
 #[tokio::test(start_paused = true)]
 async fn a_manual_target_is_left_alone_by_a_whole_tick() {
     let home = tempfile::tempdir().expect("tempdir");
-    let _origin = write_target_ready(home.path(), "paused", Watch::Manual);
+    let _origin = write_target_ready(home.path(), "paused");
+    let paused = Ready::new().with_table("paused", PAUSED);
     let before = State::read(&Tree::for_sheep(home.path(), "paused").state_file())
         .expect("reads")
         .deployed;
 
     assert!(
-        tick(&Ready::new(), home.path(), &fixtures::dog_config())
+        tick(&paused, home.path(), &fixtures::dog_config())
             .await
             .results
             .is_empty()
@@ -293,8 +314,8 @@ async fn one_targets_failure_does_not_stop_the_others() {
     // A record naming a release, with no repository under it at all:
     // the fetch is what fails, which is the shape of a remote nobody
     // can reach.
-    write_target(home.path(), "broken", Watch::Auto, Some(fixtures::SHA));
-    let _origin = write_target_ready(home.path(), "fine", Watch::Auto);
+    write_target(home.path(), "broken", Some(fixtures::SHA));
+    let _origin = write_target_ready(home.path(), "fine");
 
     let results = tick(&Ready::new(), home.path(), &fixtures::dog_config())
         .await
@@ -319,7 +340,7 @@ async fn one_targets_failure_does_not_stop_the_others() {
 #[tokio::test(start_paused = true)]
 async fn a_tick_holds_a_sha_that_already_failed() {
     let home = tempfile::tempdir().expect("tempdir");
-    let origin = write_target_ready(home.path(), "held", Watch::Auto);
+    let origin = write_target_ready(home.path(), "held");
     let tree = Tree::for_sheep(home.path(), "held");
     let mut state = State::read(&tree.state_file()).expect("reads");
     state.failed = Some(fixtures::head_of(origin.path()));
@@ -414,7 +435,7 @@ async fn a_record_that_cannot_be_read_is_reported_rather_than_skipped() {
 #[tokio::test(start_paused = true)]
 async fn ticks_are_spaced_by_the_configured_interval() {
     let home = tempfile::tempdir().expect("tempdir");
-    let origin = write_target_ready(home.path(), "quiet", Watch::Auto);
+    let origin = write_target_ready(home.path(), "quiet");
     let counter = Counting::new(origin.path());
     let began = tokio::time::Instant::now();
 
@@ -446,7 +467,7 @@ async fn ticks_are_spaced_by_the_configured_interval() {
 #[tokio::test(start_paused = true)]
 async fn the_first_tick_happens_at_once() {
     let home = tempfile::tempdir().expect("tempdir");
-    let origin = write_target_ready(home.path(), "quiet", Watch::Auto);
+    let origin = write_target_ready(home.path(), "quiet");
     let counter = Counting::new(origin.path());
 
     let _ = tokio::time::timeout(
@@ -476,7 +497,7 @@ async fn the_first_tick_happens_at_once() {
 #[tokio::test(start_paused = true)]
 async fn a_deploy_is_written_to_the_log_it_belongs_in() {
     let home = tempfile::tempdir().expect("tempdir");
-    let origin = write_target_ready(home.path(), "fine", Watch::Auto);
+    let origin = write_target_ready(home.path(), "fine");
     let head = fixtures::head_of(origin.path());
     let (mut out, mut err) = (Vec::new(), Vec::new());
 
@@ -512,8 +533,7 @@ async fn a_deploy_is_written_to_the_log_it_belongs_in() {
 #[tokio::test(start_paused = true)]
 async fn a_skip_is_said_once() {
     let home = tempfile::tempdir().expect("tempdir");
-    let origin =
-        write_target_with_flockfile(home.path(), "quiet", Watch::Auto, &flockfile("quiet"));
+    let origin = write_target_with_flockfile(home.path(), "quiet", &flockfile("quiet"));
     let head = fixtures::head_of(origin.path());
     let (mut out, mut err) = (Vec::new(), Vec::new());
 
@@ -550,7 +570,7 @@ async fn a_skip_is_said_once() {
 #[tokio::test(start_paused = true)]
 async fn a_failure_is_written_once_however_many_ticks_repeat_it() {
     let home = tempfile::tempdir().expect("tempdir");
-    write_target(home.path(), "broken", Watch::Auto, Some(fixtures::SHA));
+    write_target(home.path(), "broken", Some(fixtures::SHA));
     let (mut out, mut err) = (Vec::new(), Vec::new());
 
     // Three ticks' worth, as the interval test above.

@@ -8,6 +8,11 @@
 //! unrelated things. Kept here, it survives rehoming and makes the tree
 //! self-describing on its own.
 //!
+//! The file holds state only. What an operator chooses, the branch followed,
+//! `watch` and `verify`, lives in the sheep's `[app.dogs.deploy]` table (see
+//! [`crate::settings`]) and is filled into the matching fields of [`State`]
+//! by [`State::adopt`]; those fields are never written here.
+//!
 //! [`State::origin_cwd`] and [`State::origin_script`] are why removing the
 //! dog can put a sheep back where its operator will look for it: they are
 //! the `cwd` and script the sheep ran with *before* adoption, captured once
@@ -22,6 +27,10 @@ use shep_client::shep_core::atomic_file::{create_staging_file, sync_dir};
 use shep_client::shep_core::config::AppConfig;
 
 use crate::error::Error;
+use crate::settings::Settings;
+
+/// The keys `deploy.toml` used to carry and the sheep's table holds now.
+const MOVED: [&str; 3] = ["branch", "watch", "verify"];
 
 /// How a freshly deployed release is judged healthy before traffic (or the
 /// old release) is torn down.
@@ -36,6 +45,16 @@ pub enum Verify {
     /// Skip the probe; a release that stays running for the grace period is
     /// good enough.
     Alive,
+}
+
+impl Verify {
+    /// The word `[app.dogs.deploy]` spells this mode.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Probed => "probed",
+            Self::Alive => "alive",
+        }
+    }
 }
 
 /// Whether this sheep is polled for new commits automatically, or only
@@ -56,9 +75,27 @@ pub enum Watch {
     Manual,
 }
 
-/// `deploy.toml`'s full contents.
+impl Watch {
+    /// The word `[app.dogs.deploy]` spells this mode.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// `deploy.toml`'s full contents, plus the three settings a deploy holds in
+/// memory beside it.
 ///
-/// Every field here is load-bearing for restoring the sheep if the dog is
+/// [`Self::branch`], [`Self::watch`] and [`Self::verify`] are the sheep's
+/// `[app.dogs.deploy]` table as of the last [`Self::adopt`]. They are skipped
+/// by serde, so they are neither written nor accepted: a record carrying one
+/// is refused by [`Self::read`], and `deny_unknown_fields` is what keeps an
+/// older reader of this file from silently dropping a key a newer one wrote.
+/// A `State` fresh from [`Self::read`] holds the defaults until adopted.
+///
+/// Every other field here is load-bearing for restoring the sheep if the dog is
 /// ever removed: losing `origin_cwd` or `origin_script` means removal
 /// cannot put the app back where its operator will look for it, and it is
 /// left running from a path under `$SHEP_HOME` they have no reason to know
@@ -81,9 +118,9 @@ pub struct State {
     /// such as `refs/pull/1/head`, to follow that ref instead.
     ///
     /// A ref outside `refs/heads/` is fetched by name alongside the branch
-    /// mirror, so only that one ref is. The field keeps its name so an older
-    /// shep-deploy still reads the record and fails with "no branch named"
-    /// rather than refusing the file.
+    /// mirror, so only that one ref is. From the sheep's table, empty until
+    /// [`Self::adopt`]; never serialised.
+    #[serde(skip)]
     pub branch: String,
     /// The sha currently live under `current`, or `None` before the first
     /// successful deploy.
@@ -106,12 +143,13 @@ pub struct State {
     /// retries a held sha deliberately.
     #[serde(default)]
     pub failed: Option<String>,
-    /// How a freshly deployed release is judged healthy.
-    #[serde(default)]
+    /// How a freshly deployed release is judged healthy. From the sheep's
+    /// table; never serialised.
+    #[serde(skip)]
     pub verify: Verify,
     /// Whether this sheep is polled automatically or only deploys on
-    /// request.
-    #[serde(default)]
+    /// request. From the sheep's table; never serialised.
+    #[serde(skip)]
     pub watch: Watch,
     /// The working directory the sheep ran from before adoption, for
     /// restore on removal. `None` when the dog itself bootstrapped the
@@ -153,39 +191,74 @@ impl State {
     /// Read and parse the `deploy.toml` at `path`, refusing a record whose
     /// values cannot work.
     ///
+    /// The result holds the default `branch`, `watch` and `verify` until
+    /// [`Self::adopt`] fills them in from the sheep's table.
+    ///
     /// # Errors
     /// [`Error::Io`], naming `path`, if the file cannot be read - most
     /// often because this sheep is not a deploy target at all.
-    /// [`Error::Config`] if it is not valid TOML, is missing a field that
-    /// has no default, or fails [`Self::validate`].
+    /// [`Error::Config`] if it is not valid TOML, carries a key that moved to
+    /// `[app.dogs.deploy]`, is missing a field that has no default, or fails
+    /// [`Self::validate`].
     pub fn read(path: &Path) -> Result<Self, Error> {
         let text = fs::read_to_string(path).map_err(Error::at(path))?;
-        let state: Self = toml::from_str(&text)
-            .map_err(|source| Error::Config(format!("{}: {source}", path.display())))?;
+        let refuse = |source: &dyn core::fmt::Display| {
+            Error::Config(format!("{}: {source}", path.display()))
+        };
+        let table: toml::Table = toml::from_str(&text).map_err(|source| refuse(&source))?;
+        if let Some(key) = MOVED.iter().find(|key| table.contains_key(**key)) {
+            return Err(refuse(&format!(
+                "`{key}` moved to `[app.dogs.deploy]` in the sheep's settings. Set it there \
+                 and remove it from this file"
+            )));
+        }
+        let state: Self = table.try_into().map_err(|source| refuse(&source))?;
         state.validate(path)?;
         Ok(state)
+    }
+
+    /// Fills in the three settings this record no longer holds from the
+    /// sheep's `[app.dogs.deploy]` table.
+    ///
+    /// # Errors
+    /// [`Error::Config`], naming `sheep`, if the table sets no `branch`, or
+    /// one that [`branch_refusal`] refuses.
+    pub fn adopt(&mut self, sheep: &str, settings: &Settings) -> Result<(), Error> {
+        let Some(branch) = &settings.branch else {
+            return Err(Error::Config(format!(
+                "{sheep}: `[app.dogs.deploy]` sets no `branch`, and a branch used to live in \
+                 `deploy.toml`. Set the one this sheep follows"
+            )));
+        };
+        if let Some(why) = branch_refusal(branch) {
+            return Err(Error::Config(format!(
+                "{sheep}: `branch` in `[app.dogs.deploy]` {why}"
+            )));
+        }
+        self.branch.clone_from(branch);
+        self.watch = settings.watch;
+        self.verify = settings.verify;
+        Ok(())
     }
 
     /// Refuses a record that parses and still cannot be acted on, naming the
     /// field and what is wrong with it.
     ///
-    /// This file is hand-edited, and every field here is handed to git or
-    /// joined onto a path later, where a bad value fails in words that name
-    /// the mechanism rather than the mistake. An empty `branch` reaches
-    /// `git rev-parse --verify refs/heads/` and fails as "needed a single
-    /// revision". A `deployed` of `""` makes `Tree::release("")` the
+    /// Every field here is handed to git or joined onto a path later, where
+    /// a bad value fails in words that name the mechanism rather than the
+    /// mistake. A `deployed` of `""` makes `Tree::release("")` the
     /// `releases/` directory itself, which exists, so a rollback would point
     /// `current` at it. A `remote` beginning with `-` is an option to git
     /// rather than a URL, and `--upload-pack=<command>` is one it runs.
-    /// Measured 2026-09-03, all three.
+    /// Measured 2026-09-03.
+    ///
+    /// The branch is not checked here: it is not in the file, and
+    /// [`Self::adopt`] checks it with [`branch_refusal`].
     ///
     /// # Errors
     /// [`Error::Config`], naming `path` and the field, for: an empty
-    /// `remote`, `branch` or `checkout`; a `remote` or `branch` beginning
-    /// with `-` or carrying a character that would rewrite a log line; a
-    /// `branch` beginning `refs/` that git would refuse as a ref name or
-    /// that would change the meaning of the refspec built from it; a
-    /// relative `checkout`; a
+    /// `remote` or `checkout`; a `remote` beginning with `-` or carrying a
+    /// character that would rewrite a log line; a relative `checkout`; a
     /// `deployed`, `failed` or `staged` that is not a full commit sha; `deployed` and
     /// `failed` naming the same sha; or exactly one of `origin_cwd` and
     /// `origin_script` set.
@@ -193,28 +266,8 @@ impl State {
         let refuse =
             |field: &str, why: &str| Error::Config(format!("{}: `{field}` {why}", path.display()));
 
-        for (field, value) in [("remote", &self.remote), ("branch", &self.branch)] {
-            if value.trim().is_empty() {
-                return Err(refuse(field, "is empty"));
-            }
-            if value.starts_with('-') {
-                return Err(refuse(
-                    field,
-                    "begins with `-`, which git would read as an option rather than a name",
-                ));
-            }
-            if value.chars().any(crate::shared::forges_a_line) {
-                return Err(refuse(
-                    field,
-                    "carries a control or invisible character that would rewrite a log line",
-                ));
-            }
-        }
-
-        if self.branch.starts_with("refs/")
-            && let Some(why) = ref_refusal(&self.branch)
-        {
-            return Err(refuse("branch", why));
+        if let Some(why) = name_refusal(&self.remote) {
+            return Err(refuse("remote", why));
         }
 
         if self.checkout.as_os_str().is_empty() {
@@ -370,6 +423,36 @@ impl State {
     }
 }
 
+/// Why `name`, a remote or a branch, cannot be handed to git, or `None` when
+/// it can.
+fn name_refusal(name: &str) -> Option<&'static str> {
+    if name.trim().is_empty() {
+        Some("is empty")
+    } else if name.starts_with('-') {
+        Some("begins with `-`, which git would read as an option rather than a name")
+    } else if name.chars().any(crate::shared::forges_a_line) {
+        Some("carries a control or invisible character that would rewrite a log line")
+    } else {
+        None
+    }
+}
+
+/// Why `branch`, a branch name or a full ref, cannot be followed, or `None`
+/// when it can.
+///
+/// An empty one reaches `git rev-parse --verify refs/heads/` and fails as
+/// "needed a single revision". One beginning `refs/` is checked against git's
+/// own ref rules by [`ref_refusal`].
+#[must_use]
+pub(crate) fn branch_refusal(branch: &str) -> Option<&'static str> {
+    name_refusal(branch).or_else(|| {
+        branch
+            .starts_with("refs/")
+            .then(|| ref_refusal(branch))
+            .flatten()
+    })
+}
+
 /// Why `tracked`, a value beginning `refs/`, cannot be fetched as the ref it
 /// names, or `None` when it can.
 ///
@@ -435,17 +518,12 @@ mod tests {
     use super::*;
     use crate::fixtures::{self, SHA};
 
-    /// fails if a typo in `deploy.toml` is silently dropped.
+    /// fails if a key `deploy.toml` does not know is silently dropped.
     ///
-    /// This file is not ours alone: `crate::deploy` tells an operator to type
-    /// `verify = "alive"` into it by hand. `verify` is `#[serde(default)]`, so
-    /// without this a `verfiy = "alive"` parses fine, leaves the mode at
-    /// `Probed`, and the next deploy fails on the identical message with
-    /// nothing anywhere indicating the edit did nothing.
-    ///
-    /// Matches what `crate::config` already does to a `[deploy]` typo, and
-    /// for the same stated reason: a setting that silently does something
-    /// other than what it says is worse than one that is refused.
+    /// An older shep-deploy reads a record a newer one wrote, and a key it
+    /// does not know is a field the newer one relies on. Without this a
+    /// `stagd` parses fine, leaves nothing staged, and the next promote
+    /// refuses with nothing anywhere indicating the field was ignored.
     #[test]
     fn an_unknown_key_in_the_record_is_refused_and_named() {
         // `checkout` is present, and load-bearing: it has no default, so
@@ -456,47 +534,77 @@ mod tests {
         // place.
         let toml = r#"
 remote = "https://example.invalid/repo.git"
-branch = "main"
 checkout = "/srv/web"
-verfiy = "alive"
+stagd = "x"
 "#;
         let err = toml::from_str::<State>(toml).expect_err("a typo must not parse");
         assert!(
-            format!("{err}").contains("verfiy"),
-            "the refusal must name the key an operator typed: {err}"
+            format!("{err}").contains("stagd"),
+            "the refusal must name the key: {err}"
         );
     }
 
-    /// fails if state does not survive a write-then-read. This file is the
-    /// only record of how a sheep ran BEFORE the dog took over, so losing a
-    /// field means removal cannot restore the sheep and the operator is
-    /// left with an app running from a path under $SHEP_HOME they have no
-    /// reason to know about.
-    ///
-    /// `watch` is set to the non-default `Manual` deliberately (the brief's
-    /// literal for this test predates the `watch` field and omitted it,
-    /// which does not compile against the struct as specified): `verify`
-    /// below is already the default value, so setting `watch` to its
-    /// *non*-default value is what makes this test additionally prove that
-    /// an explicitly-written non-default enum value round-trips, not just
-    /// the default one. The two tests below cover the default-substitution
-    /// path on their own.
+    /// fails if a record that still carries a key that moved to the sheep's
+    /// table is read, or is refused without saying where the key went. The
+    /// copy in the file would be ignored by every deploy, so reading it is
+    /// the silent version of the mistake.
     #[test]
-    fn state_round_trips_through_toml() {
-        let original = State {
-            remote: "https://github.com/WatWowMap/ReactMap".into(),
-            branch: "main".into(),
-            deployed: Some("a1b2c3a1b2c3a1b2c3a1b2c3a1b2c3a1b2c3a1b2".into()),
-            failed: None,
-            verify: Verify::Probed,
+    fn a_record_carrying_a_moved_key_is_refused_naming_the_key_and_its_new_home() {
+        for (key, value) in [
+            ("verify", "\"alive\""),
+            ("watch", "\"manual\""),
+            ("branch", "\"main\""),
+        ] {
+            let text = format!(
+                "remote = \"https://example.com/x\"\ncheckout = \"/srv/x\"\n{key} = {value}\n"
+            );
+
+            let err = read_text(&text).expect_err(&format!("must refuse: {key}"));
+
+            assert!(matches!(err, Error::Config(_)), "{key}: {err}");
+            let shown = err.to_string();
+            assert!(shown.contains(&format!("`{key}`")), "{shown}");
+            assert!(shown.contains("[app.dogs.deploy]"), "{shown}");
+        }
+    }
+
+    /// fails if state does not survive a write-then-read, or if the write
+    /// puts a setting in the file. This file is the only record of how a
+    /// sheep ran BEFORE the dog took over, so losing a field means removal
+    /// cannot restore the sheep and the operator is left with an app running
+    /// from a path under $SHEP_HOME they have no reason to know about.
+    ///
+    /// The settings are non-defaults, so a key written or an adoption that
+    /// drops one shows.
+    #[test]
+    fn state_round_trips_through_toml_without_the_settings() {
+        let settings = Settings {
+            branch: Some("release".to_owned()),
             watch: Watch::Manual,
+            verify: Verify::Alive,
+            ..Settings::default()
+        };
+        let mut original = State {
+            remote: "https://github.com/WatWowMap/ReactMap".into(),
+            deployed: Some("a1b2c3a1b2c3a1b2c3a1b2c3a1b2c3a1b2c3a1b2".into()),
             origin_cwd: Some(PathBuf::from("/srv/reactmap")),
             origin_script: Some("bun .".into()),
             checkout: PathBuf::from("/srv/reactmap"),
             ..fixtures::state()
         };
-        let text = toml::to_string(&original).expect("serialises");
-        let back: State = toml::from_str(&text).expect("parses");
+        original.adopt("web", &settings).expect("adopts");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("deploy.toml");
+
+        original.write(&path).expect("writes");
+        let text = fs::read_to_string(&path).expect("record");
+        let mut back = State::read(&path).expect("reads");
+
+        for key in ["branch", "watch", "verify", "release", "alive", "manual"] {
+            assert!(!text.contains(key), "{key} is in the file:\n{text}");
+        }
+        assert_eq!(back.branch, "", "nothing is adopted by reading");
+        back.adopt("web", &settings).expect("adopts");
         assert_eq!(back, original);
     }
 
@@ -527,42 +635,21 @@ verfiy = "alive"
     #[test]
     fn a_record_whose_values_cannot_work_is_refused_by_field() {
         let base = |extra: &str| {
-            format!(
-                "remote = \"https://example.com/x\"\nbranch = \"main\"\ncheckout = \"/srv/x\"\n{extra}"
-            )
+            format!("remote = \"https://example.com/x\"\ncheckout = \"/srv/x\"\n{extra}")
         };
         let cases = [
+            ("remote", "remote = \"\"\ncheckout = \"/srv/x\"".to_owned()),
             (
                 "remote",
-                "remote = \"\"\nbranch = \"main\"\ncheckout = \"/srv/x\"".to_owned(),
-            ),
-            (
-                "remote",
-                "remote = \"--upload-pack=x\"\nbranch = \"main\"\ncheckout = \"/srv/x\"".to_owned(),
-            ),
-            (
-                "branch",
-                "remote = \"https://example.com/x\"\nbranch = \"\"\ncheckout = \"/srv/x\""
-                    .to_owned(),
-            ),
-            (
-                "branch",
-                "remote = \"https://example.com/x\"\nbranch = \"-x\"\ncheckout = \"/srv/x\""
-                    .to_owned(),
-            ),
-            (
-                "branch",
-                "remote = \"https://example.com/x\"\nbranch = \"ma\\nin\"\ncheckout = \"/srv/x\""
-                    .to_owned(),
+                "remote = \"--upload-pack=x\"\ncheckout = \"/srv/x\"".to_owned(),
             ),
             (
                 "checkout",
-                "remote = \"https://example.com/x\"\nbranch = \"main\"\ncheckout = \"\"".to_owned(),
+                "remote = \"https://example.com/x\"\ncheckout = \"\"".to_owned(),
             ),
             (
                 "checkout",
-                "remote = \"https://example.com/x\"\nbranch = \"main\"\ncheckout = \"srv/x\""
-                    .to_owned(),
+                "remote = \"https://example.com/x\"\ncheckout = \"srv/x\"".to_owned(),
             ),
             ("deployed", base("deployed = \"\"")),
             ("deployed", base("deployed = \"main\"")),
@@ -583,6 +670,46 @@ verfiy = "alive"
                 "must name `{field}`: {err}"
             );
         }
+    }
+
+    /// Adopts `branch` as the table's, into a fresh record.
+    fn adopt_branch(branch: Option<&str>) -> Result<State, Error> {
+        let mut state = fixtures::state();
+        state.adopt(
+            "web",
+            &Settings {
+                branch: branch.map(str::to_owned),
+                ..Settings::default()
+            },
+        )?;
+        Ok(state)
+    }
+
+    /// fails if a branch that cannot work is adopted, or is refused in words
+    /// about git's mechanism. Each of these used to reach git: an empty one as
+    /// "needed a single revision", one beginning `-` as whatever git made of
+    /// the option. The refusal has to name the table the operator typed it in.
+    #[test]
+    fn a_branch_that_cannot_work_is_refused_naming_the_table() {
+        for branch in ["", "  ", "-x", "ma\nin"] {
+            let err = adopt_branch(Some(branch)).expect_err(&format!("must refuse: {branch:?}"));
+            assert!(matches!(err, Error::Config(_)), "{branch:?}: {err}");
+            let shown = err.to_string();
+            assert!(shown.contains("`branch`"), "{branch:?}: {shown}");
+            assert!(shown.contains("[app.dogs.deploy]"), "{branch:?}: {shown}");
+        }
+    }
+
+    /// fails if a table with no `branch` is adopted as one that follows
+    /// nothing, or as `main`. A guess would deploy a branch nobody chose.
+    #[test]
+    fn a_table_with_no_branch_is_refused_naming_the_key() {
+        let err = adopt_branch(None).expect_err("no branch to follow");
+
+        let shown = err.to_string();
+        assert!(matches!(err, Error::Config(_)), "{shown}");
+        assert!(shown.contains("sets no `branch`"), "{shown}");
+        assert!(shown.contains("[app.dogs.deploy]"), "{shown}");
     }
 
     /// fails if a `refs/` value that git would refuse as a ref name, or that
@@ -609,11 +736,7 @@ verfiy = "alive"
             "refs/pull/1/head.",
             "refs/pull//1/head",
         ] {
-            let text = format!(
-                "remote = \"https://example.com/x\"\nbranch = \"{}\"\ncheckout = \"/srv/x\"\n",
-                value.replace('\\', "\\\\")
-            );
-            let err = read_text(&text).expect_err(&format!("must refuse: {value}"));
+            let err = adopt_branch(Some(value)).expect_err(&format!("must refuse: {value}"));
             assert!(matches!(err, Error::Config(_)), "{value}: {err}");
             assert!(err.to_string().contains("`branch`"), "{value}: {err}");
         }
@@ -627,10 +750,7 @@ verfiy = "alive"
             "refs/pull/1234/merge",
             "refs/tags/v1.2.3",
         ] {
-            let text = format!(
-                "remote = \"https://example.com/x\"\nbranch = \"{value}\"\ncheckout = \"/srv/x\"\n"
-            );
-            let state = read_text(&text).expect(value);
+            let state = adopt_branch(Some(value)).expect(value);
             assert_eq!(state.branch, value);
         }
     }
@@ -641,7 +761,7 @@ verfiy = "alive"
     #[test]
     fn a_sound_record_reads_and_an_empty_one_is_refused() {
         let text = format!(
-            "remote = \"https://example.com/x\"\nbranch = \"main\"\ncheckout = \"/srv/x\"\n\
+            "remote = \"https://example.com/x\"\ncheckout = \"/srv/x\"\n\
              deployed = \"{SHA}\"\norigin_cwd = \"/srv/x\"\norigin_script = \"bun .\"\n"
         );
         let state = read_text(&text).expect("a sound record");
@@ -673,10 +793,8 @@ verfiy = "alive"
         let back = State::read(&path).expect("reads");
         assert_eq!(back.origin.as_ref(), Some(&origin));
 
-        let older = read_text(
-            "remote = \"https://example.com/x\"\nbranch = \"main\"\ncheckout = \"/srv/x\"\n",
-        )
-        .expect("a record from before the field");
+        let older = read_text("remote = \"https://example.com/x\"\ncheckout = \"/srv/x\"\n")
+            .expect("a record from before the field");
         assert_eq!(older.origin, None);
     }
 
@@ -797,31 +915,30 @@ verfiy = "alive"
         assert!(err.to_string().contains("deploy.toml"));
     }
 
-    /// fails if `watch` stops defaulting to auto. A target written before
-    /// this field existed, or by hand without it, must keep being watched
-    /// rather than silently stop deploying.
+    /// fails if a table that sets neither `watch` nor `verify` adopts as
+    /// anything but auto and probed. A table written before these keys
+    /// moved there must keep being watched rather than silently stop
+    /// deploying, and an absent `verify` must mean "wait for the readiness
+    /// probe", never "deploy without checking".
     #[test]
-    fn an_absent_watch_defaults_to_auto() {
-        let text = r#"
-            remote = "https://example.com/x"
-            branch = "main"
-            checkout = "/srv/x"
-        "#;
-        let state: State = toml::from_str(text).expect("parses");
-        assert_eq!(state.watch, Watch::Auto);
-    }
+    fn a_table_that_sets_neither_adopts_auto_and_probed() {
+        let mut state = State {
+            watch: Watch::Manual,
+            verify: Verify::Alive,
+            ..fixtures::state()
+        };
 
-    /// fails if `verify` stops defaulting to the safe value. An absent
-    /// verify key must mean "wait for the readiness probe", never "deploy
-    /// without checking".
-    #[test]
-    fn an_absent_verify_defaults_to_probed() {
-        let text = r#"
-            remote = "https://example.com/x"
-            branch = "main"
-            checkout = "/srv/x"
-        "#;
-        let state: State = toml::from_str(text).expect("parses");
+        state
+            .adopt(
+                "web",
+                &Settings {
+                    branch: Some("main".to_owned()),
+                    ..Settings::default()
+                },
+            )
+            .expect("adopts");
+
+        assert_eq!(state.watch, Watch::Auto);
         assert_eq!(state.verify, Verify::Probed);
     }
 
@@ -839,7 +956,7 @@ verfiy = "alive"
             ..fixtures::state()
         };
         staged.write(&path).expect("writes");
-        assert_eq!(State::read(&path).expect("reads"), staged);
+        assert_eq!(State::read(&path).expect("reads").staged, staged.staged);
 
         fixtures::state().write(&path).expect("writes");
         let text = fs::read_to_string(&path).expect("record");
@@ -851,7 +968,7 @@ verfiy = "alive"
     /// release to land, so the refusal has to name the field.
     #[test]
     fn a_staged_value_that_is_not_a_sha_is_refused_by_field() {
-        let base = "remote = \"https://example.com/x\"\nbranch = \"main\"\ncheckout = \"/srv/x\"\n";
+        let base = "remote = \"https://example.com/x\"\ncheckout = \"/srv/x\"\n";
         for staged in ["\"\"", "\"main\"", "\"abc123\"", "\"..\""] {
             let text = format!("{base}staged = {staged}");
             let err = read_text(&text).expect_err(&format!("must refuse: {text}"));
@@ -898,6 +1015,6 @@ verfiy = "alive"
             "a second, overwriting write must also leave no .tmp file"
         );
 
-        assert_eq!(State::read(&path).expect("reads"), second);
+        assert_eq!(State::read(&path).expect("reads").deployed, second.deployed);
     }
 }

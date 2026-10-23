@@ -68,7 +68,8 @@ impl Daemon for Listings {
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, start, delete, reload, restart, save_roll, sheep_config, set_smit,
+        dog_config, list_flock, start, delete, reload, restart, save_roll, sheep_config,
+        set_sheep_dog_settings, set_smit,
     );
 }
 
@@ -92,6 +93,7 @@ impl Daemon for Blips {
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, start, delete, reload, restart, save_roll, sheep_config, set_smit,
+        dog_config, list_flock, start, delete, reload, restart, save_roll, sheep_config,
+        set_sheep_dog_settings, set_smit,
     );
 }

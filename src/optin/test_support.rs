@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use shep_client::RequestError;
-use shep_client::shep_core::config::AppConfig;
+use shep_client::shep_core::config::{AppConfig, DogTable};
 use shep_client::shep_core::protocol::{ProcessInfo, RpcError, RpcErrorCode};
 use shep_client::shep_core::status::ProcStatus;
 use tokio::time::Instant;
@@ -15,39 +15,112 @@ use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::fixtures;
 use crate::paths::Tree;
+use crate::settings::Settings;
 use crate::state::{State, Watch};
 
 /// A [`Daemon`] whose `save_roll` writes a roll JSON naming each
 /// `(sheep, cwd)` pair, with `script = "./run.sh"`, into a fresh
-/// tempdir, and answers with the path it wrote. Every other method is
+/// tempdir, and answers with the path it wrote. `sheep_config` and
+/// `set_sheep_dog_settings` act on the first sheep's config, so a test reads
+/// back what `prepare` wrote to its table. Every other method is
 /// `unimplemented!()`, since `prepare` never calls them.
-pub(super) struct RollOf<'a>(pub(super) &'a [(&'a str, &'a Path)]);
+pub(super) struct RollOf<'a> {
+    entries: &'a [(&'a str, &'a Path)],
+    held: fixtures::Sheep,
+}
+
+impl<'a> RollOf<'a> {
+    pub(super) fn new(entries: &'a [(&'a str, &'a Path)]) -> Self {
+        let (name, _) = entries.first().expect("a roll names at least one sheep");
+        Self {
+            entries,
+            held: fixtures::Sheep::holding(fixtures::app_named(name)),
+        }
+    }
+
+    /// The first sheep as the shepherd holds it after `prepare`.
+    pub(super) fn app(&self) -> AppConfig {
+        self.held.app()
+    }
+
+    /// The first sheep's `[app.dogs.deploy]` table as the shepherd holds it.
+    pub(super) fn settings(&self) -> Settings {
+        self.held.settings()
+    }
+}
 
 impl Daemon for RollOf<'_> {
     async fn save_roll(&self) -> Result<PathBuf, Error> {
-        write_roll(self.0, "")
+        write_roll(self.entries, "")
+    }
+
+    async fn sheep_config(&self, _sheep: &str) -> Result<AppConfig, Error> {
+        self.held.answer()
+    }
+
+    async fn set_sheep_dog_settings(
+        &self,
+        _sheep: &str,
+        dog: &str,
+        table: DogTable,
+    ) -> Result<(), Error> {
+        self.held.replace(dog, table)
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, describe, start, delete, reload, restart, sheep_config, set_smit,
+        dog_config, list_flock, describe, start, delete, reload, restart, set_smit,
     );
 }
 
 /// [`RollOf`], for sheep registered with an `[app.dogs.deploy]` whose build
 /// leaves `marker` behind if it ever runs.
-pub(super) struct RollBuilding<'a>(pub(super) &'a [(&'a str, &'a Path)], pub(super) &'a Path);
+pub(super) struct RollBuilding<'a> {
+    entries: &'a [(&'a str, &'a Path)],
+    marker: &'a Path,
+    held: fixtures::Sheep,
+}
+
+impl<'a> RollBuilding<'a> {
+    pub(super) fn new(entries: &'a [(&'a str, &'a Path)], marker: &'a Path) -> Self {
+        let (name, _) = entries.first().expect("a roll names at least one sheep");
+        let command = format!("touch {}", marker.display());
+        Self {
+            entries,
+            marker,
+            held: fixtures::Sheep::of(name, &format!("command = {command:?}\n")),
+        }
+    }
+
+    /// The first sheep's `[app.dogs.deploy]` table as the shepherd holds it.
+    pub(super) fn settings(&self) -> Settings {
+        self.held.settings()
+    }
+}
 
 impl Daemon for RollBuilding<'_> {
     async fn save_roll(&self) -> Result<PathBuf, Error> {
-        let command = format!("touch {}", self.1.display());
+        let command = format!("touch {}", self.marker.display());
         write_roll(
-            self.0,
+            self.entries,
             &format!(",\"dogs\":{{\"deploy\":{{\"command\":{command:?}}}}}"),
         )
     }
 
+    async fn sheep_config(&self, _sheep: &str) -> Result<AppConfig, Error> {
+        self.held.answer()
+    }
+
+    async fn set_sheep_dog_settings(
+        &self,
+        _sheep: &str,
+        dog: &str,
+        table: DogTable,
+    ) -> Result<(), Error> {
+        self.held.replace(dog, table)
+    }
+
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, describe, start, delete, reload, restart, sheep_config, set_smit,
+        dog_config, list_flock, describe, start, delete, reload, restart, set_smit,
     );
 }
 
@@ -237,7 +310,7 @@ pub(super) struct CutOverDouble {
     /// How long after the `Start` every `describe` starts failing.
     mute_after: Option<Duration>,
     /// The sheep as the shepherd holds it, which `sheep_config` answers.
-    registered: AppConfig,
+    registered: fixtures::Sheep,
     /// Every `start` the shepherd accepted, in order.
     starts: RefCell<Vec<AppConfig>>,
     /// Every id passed to `delete`, in order.
@@ -278,7 +351,7 @@ impl CutOverDouble {
             refuses_deletes_from: None,
             deletes_seen: Cell::new(0),
             mute_after: None,
-            registered: fixtures::app_named("bpm"),
+            registered: fixtures::Sheep::holding(fixtures::app_named("bpm")),
             starts: RefCell::new(Vec::new()),
             deletes: RefCell::new(Vec::new()),
             attempts: Cell::new(0),
@@ -293,7 +366,7 @@ impl CutOverDouble {
 
     /// The same double, holding the sheep as `registered`.
     pub(super) fn registered_as(mut self, registered: AppConfig) -> Self {
-        self.registered = registered;
+        self.registered = fixtures::Sheep::holding(registered);
         self
     }
 
@@ -345,6 +418,17 @@ impl CutOverDouble {
     pub(super) fn while_the_originals(mut self, script: Vec<(Duration, Shape)>) -> Self {
         self.original_script = script;
         self
+    }
+
+    /// The same double, after an operator set `key` in the sheep's table.
+    pub(super) fn with_operator_setting(self, key: &str, value: &str) -> Self {
+        self.registered.set(key, value);
+        self
+    }
+
+    /// The sheep's `[app.dogs.deploy]` table as the shepherd holds it now.
+    pub(super) fn settings(&self) -> Settings {
+        self.registered.settings()
     }
 
     /// Every app the shepherd accepted a `Start` for, in order.
@@ -457,7 +541,15 @@ impl Daemon for CutOverDouble {
         Ok(flock)
     }
     async fn sheep_config(&self, _sheep: &str) -> Result<AppConfig, Error> {
-        Ok(self.registered.clone())
+        self.registered.answer()
+    }
+    async fn set_sheep_dog_settings(
+        &self,
+        _sheep: &str,
+        dog: &str,
+        table: DogTable,
+    ) -> Result<(), Error> {
+        self.registered.replace(dog, table)
     }
     async fn start(&self, apps: Vec<AppConfig>) -> Result<Vec<u32>, Error> {
         let attempt = self.attempts.get();
@@ -532,13 +624,13 @@ pub(super) async fn cutover_fixture_from(
 ) -> (CutOverDouble, Prepared, Dirs) {
     let home = tempfile::tempdir().expect("tempdir");
     let entries = [("bpm", checkout.path())];
-    let roll = RollOf(&entries);
+    let roll = RollOf::new(&entries);
     let prepared = prepare(&roll, home.path(), "bpm", &fixtures::dog_config())
         .await
         .expect("prepares");
 
     (
-        CutOverDouble::new(originals, script, refuses),
+        CutOverDouble::new(originals, script, refuses).registered_as(roll.app()),
         prepared,
         Dirs {
             _home: home,
