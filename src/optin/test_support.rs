@@ -236,6 +236,8 @@ pub(super) struct CutOverDouble {
     deletes_seen: Cell<usize>,
     /// How long after the `Start` every `describe` starts failing.
     mute_after: Option<Duration>,
+    /// The sheep as the shepherd holds it, which `sheep_config` answers.
+    registered: AppConfig,
     /// Every `start` the shepherd accepted, in order.
     starts: RefCell<Vec<AppConfig>>,
     /// Every id passed to `delete`, in order.
@@ -276,6 +278,7 @@ impl CutOverDouble {
             refuses_deletes_from: None,
             deletes_seen: Cell::new(0),
             mute_after: None,
+            registered: fixtures::app_named("bpm"),
             starts: RefCell::new(Vec::new()),
             deletes: RefCell::new(Vec::new()),
             attempts: Cell::new(0),
@@ -286,6 +289,12 @@ impl CutOverDouble {
             repair_stagger: None,
             late_newcomer_after: None,
         }
+    }
+
+    /// The same double, holding the sheep as `registered`.
+    pub(super) fn registered_as(mut self, registered: AppConfig) -> Self {
+        self.registered = registered;
+        self
     }
 
     /// The same double, with one newcomer the cap held back appearing
@@ -447,6 +456,9 @@ impl Daemon for CutOverDouble {
 
         Ok(flock)
     }
+    async fn sheep_config(&self, _sheep: &str) -> Result<AppConfig, Error> {
+        Ok(self.registered.clone())
+    }
     async fn start(&self, apps: Vec<AppConfig>) -> Result<Vec<u32>, Error> {
         let attempt = self.attempts.get();
         self.attempts.set(attempt + 1);
@@ -491,7 +503,7 @@ impl Daemon for CutOverDouble {
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, reload, restart, save_roll, sheep_config, set_smit,
+        dog_config, list_flock, reload, restart, save_roll, set_smit,
     );
 }
 
