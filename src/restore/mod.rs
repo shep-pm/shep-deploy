@@ -212,7 +212,7 @@ pub async fn all<D: Daemon>(daemon: &D, shep_home: &Path) -> Vec<Restored> {
 
     for sheep in names {
         let tree = Tree::for_sheep(shep_home, &sheep);
-        let state = match State::read(&tree.state_file()) {
+        let state = match State::read_for_restore(&tree.state_file()) {
             Ok(state) => state,
             Err(err) => {
                 results.push(Restored::Failed {

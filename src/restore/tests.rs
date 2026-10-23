@@ -44,6 +44,29 @@ async fn a_record_that_cannot_be_read_is_reported_rather_than_skipped() {
     );
 }
 
+/// fails if removal refuses a record written before `branch`, `watch` and
+/// `verify` moved to the sheep's table. That is the record of every target set
+/// up by an older shep-deploy, and refusing it would leave the sheep running
+/// from the deploy tree after the dog is gone.
+#[tokio::test]
+async fn a_record_that_still_carries_the_moved_keys_is_restored() {
+    let home = tempfile::tempdir().expect("tempdir");
+    write_target_with_origin(home.path(), "web", "/srv/web", "server.js");
+    let tree = Tree::for_sheep(home.path(), "web");
+    let mut text = std::fs::read_to_string(tree.state_file()).expect("reads");
+    text = format!("branch = \"main\"\nwatch = \"auto\"\nverify = \"alive\"\n{text}");
+    std::fs::write(tree.state_file(), text).expect("an older record");
+    let daemon = Recording::new(&["web"], Refuse::Never);
+
+    let results = all(&daemon, home.path()).await;
+
+    assert!(
+        matches!(&results[0], Restored::Returned { sheep, .. } if sheep == "web"),
+        "{:?}",
+        results[0]
+    );
+}
+
 /// fails if removal puts back only `cwd` and `script`. The record
 /// carries the app as the shepherd had it before adoption; a restore
 /// from the shepherd's current definition kept the deployed

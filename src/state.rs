@@ -201,16 +201,37 @@ impl State {
     /// `[app.dogs.deploy]`, is missing a field that has no default, or fails
     /// [`Self::validate`].
     pub fn read(path: &Path) -> Result<Self, Error> {
+        Self::parse(path, true)
+    }
+
+    /// As [`Self::read`], for a record that still carries a key that moved to
+    /// `[app.dogs.deploy]`: the key is dropped rather than refused.
+    ///
+    /// For removal, which puts a sheep back from `origin_cwd`, `origin_script`
+    /// and `origin` and reads none of the three. A record written before the
+    /// move is exactly the one an operator removes the dog over, and refusing
+    /// it would leave that sheep running from the tree.
+    ///
+    /// # Errors
+    /// As [`Self::read`], except for the moved keys.
+    pub fn read_for_restore(path: &Path) -> Result<Self, Error> {
+        Self::parse(path, false)
+    }
+
+    fn parse(path: &Path, refuse_moved: bool) -> Result<Self, Error> {
         let text = fs::read_to_string(path).map_err(Error::at(path))?;
         let refuse = |source: &dyn core::fmt::Display| {
             Error::Config(format!("{}: {source}", path.display()))
         };
-        let table: toml::Table = toml::from_str(&text).map_err(|source| refuse(&source))?;
-        if let Some(key) = MOVED.iter().find(|key| table.contains_key(**key)) {
-            return Err(refuse(&format!(
-                "`{key}` moved to `[app.dogs.deploy]` in the sheep's settings. Set it there \
-                 and remove it from this file"
-            )));
+        let mut table: toml::Table = toml::from_str(&text).map_err(|source| refuse(&source))?;
+        for key in MOVED {
+            if refuse_moved && table.contains_key(key) {
+                return Err(refuse(&format!(
+                    "`{key}` moved to `[app.dogs.deploy]` in the sheep's settings. Set it \
+                     there and remove it from this file"
+                )));
+            }
+            table.remove(key);
         }
         let state: Self = table.try_into().map_err(|source| refuse(&source))?;
         state.validate(path)?;

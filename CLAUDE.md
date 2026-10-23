@@ -316,7 +316,8 @@ class rather than the instances.
 - **Two locks per tree, and the order is fixed.** `lock::hold` is the deploy
   lock, non-blocking, held for a whole build. `lock::hold_record` is the
   record lock, blocking, held for one read and one write of `deploy.toml`:
-  `set_watch` and every whole-record write in `deploy` and `optin` take it.
+  every whole-record write in `deploy` and `optin`, and `retarget::set_branch`,
+  take it; `set_watch` writes only the table and takes neither lock.
   A deploy takes the tree lock first and the record lock inside; nothing
   holding the record lock waits for the tree's. A write to the sheep's table
   is one request and takes no lock; `set_watch` takes none at all. The

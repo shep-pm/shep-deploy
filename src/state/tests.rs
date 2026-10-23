@@ -27,6 +27,23 @@ stagd = "x"
     );
 }
 
+/// fails if removal cannot read a record written before the keys moved, or
+/// if it reads them back into the record.
+#[test]
+fn a_restore_read_drops_the_moved_keys_instead_of_refusing_them() {
+    let text = "remote = \"https://example.com/x\"\ncheckout = \"/srv/x\"\n\
+                branch = \"release\"\nwatch = \"manual\"\nverify = \"alive\"\n";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("deploy.toml");
+    fs::write(&path, text).expect("write record");
+
+    let state = State::read_for_restore(&path).expect("reads");
+
+    assert_eq!(state.branch, "");
+    assert_eq!(state.watch, Watch::Auto);
+    assert_eq!(state.verify, Verify::Probed);
+}
+
 /// fails if a record that still carries a key that moved to the sheep's
 /// table is read, or is refused without saying where the key went. The
 /// copy in the file would be ignored by every deploy, so reading it is

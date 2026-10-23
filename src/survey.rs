@@ -90,6 +90,12 @@ pub enum Standing {
     /// the record refuses unknown fields, so one written by a newer
     /// shep-deploy reads this way to an older binary.
     Unreadable(String),
+    /// A deploy tree whose record reads but whose sheep's
+    /// `[app.dogs.deploy]` table cannot be used, and what adopting it said.
+    ///
+    /// Apart from [`Self::Unreadable`] because the repair is in the table,
+    /// where `deploy.toml` has nothing to fix.
+    BadSettings(String),
     /// The deploy directory itself could not be listed, and what listing it
     /// said. Every target is under it, so no row alongside is complete.
     Unlisted(String),
@@ -128,7 +134,7 @@ pub fn classify(shep_home: &Path, app: &AppConfig) -> Standing {
         if let Err(err) =
             settings::from_app(&app.name, app).and_then(|held| state.adopt(&app.name, &held))
         {
-            return Standing::Unreadable(err.to_string());
+            return Standing::BadSettings(err.to_string());
         }
         let (branch, sha, staged) = (state.branch, state.deployed, state.staged);
         // A hold is only reported for a target something polls. `failed`
@@ -220,6 +226,7 @@ impl Standing {
             Self::Orphaned => "orphaned",
             Self::Unnamed => "unnamed",
             Self::Unreadable(_) => "unreadable",
+            Self::BadSettings(_) => "bad settings",
             Self::Unlisted(_) => "unlisted",
             Self::BadName => "bad name",
         }
@@ -277,6 +284,11 @@ impl Standing {
                 "has a deploy tree whose record cannot be read: {why}. Repair the record \
                  before deploying; do not run setup against it, the sheep may be running from \
                  inside that tree"
+            ),
+            Self::BadSettings(why) => format!(
+                "has a deploy tree whose sheep's settings cannot be used: {why}. Fix its \
+                 `[app.dogs.deploy]` table, not `deploy.toml`; do not run setup against it, \
+                 the sheep may be running from inside that tree"
             ),
             Self::Unlisted(why) => format!(
                 "is the deploy directory and could not be listed: {why}. Every target is \
@@ -465,6 +477,28 @@ mod tests {
         let shown = render(&[("web".to_owned(), standing)]);
         assert!(!shown.contains("needs setup"), "{shown}");
         assert!(shown.contains("do not run setup"), "{shown}");
+    }
+
+    /// fails if a table the dog cannot adopt is blamed on `deploy.toml`. The
+    /// record reads fine, and an operator told to repair it edits the wrong
+    /// file.
+    #[test]
+    fn a_table_with_no_branch_is_reported_against_the_table_not_the_record() {
+        let home = tempfile::tempdir().expect("tempdir");
+        write_target(home.path(), "web", None, None);
+        let mut app = app("web", None);
+        app.dogs = Default::default();
+
+        let standing = classify(home.path(), &app);
+
+        assert!(
+            matches!(&standing, Standing::BadSettings(why) if why.contains("branch")),
+            "{standing:?}"
+        );
+        let shown = render(&[("web".to_owned(), standing)]);
+        assert!(shown.contains("[app.dogs.deploy]"), "{shown}");
+        assert!(shown.contains("do not run setup"), "{shown}");
+        assert!(!shown.contains("record cannot be read"), "{shown}");
     }
 
     /// fails if a deploy tree whose sheep is no longer registered appears in
