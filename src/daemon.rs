@@ -452,6 +452,7 @@ mod tests {
             .pid(pid)
             .dog(Some(DogSource::Adopted {
                 path: "/usr/local/bin/shep-deploy".to_owned(),
+                channel: false,
             }))
             .build()
     }
