@@ -6,23 +6,25 @@
 //!
 //! # Two invocation modes
 //!
-//! Supervised, the dog is spawned with no argv at all and two environment
-//! entries: `SHEP_HOME`, which every path below is joined onto, and
-//! `SHEP_DOG_NAME`, which is what shep registered this process as. That mode
-//! runs [`poll::run`], which deploys every `watch = "auto"` target whose
-//! branch has moved, once an interval, until the process is asked to stop.
+//! Supervised, the dog is spawned with no argv at all and three environment
+//! entries: `SHEP_HOME`, which every path below is joined onto, `SHEP_DOG_NAME`,
+//! which is what shep registered this process as, and `SHEP_NAME`, which the
+//! daemon puts into every process it spawns and which, for a dog, is that
+//! dog's own name a second time. That mode runs [`poll::run`], which deploys
+//! every `watch = "auto"` target whose branch has moved, once an interval,
+//! until the process is asked to stop.
 //!
-//! The loop starts only when `SHEP_DOG_NAME` is set. A bare run without it is
-//! a person at a terminal, and gets usage rather than a second loop beside the
-//! adopted dog. Whoever needs the loop outside shep sets `SHEP_DOG_NAME`
-//! themselves, which also names the handshake. shep sets it for a bare
-//! `shep deploy` typed at a terminal too, and that run polls like the dog.
+//! The loop starts only in that mode, and only when the two names agree. shep
+//! sets `SHEP_DOG_NAME` for a bare `shep deploy` typed at a terminal too, and
+//! that run has no `SHEP_NAME` to agree with it: it is a person at a terminal,
+//! and gets usage rather than a second loop beside the adopted dog. Only the
+//! shepherd runs the loop.
 //!
 //! The two modes connect differently. The poll loop connects through a client
 //! that survives a daemon handover, because it is the only mode that outlives
 //! one, and announces the name shep put in `SHEP_DOG_NAME`; a verb connects
-//! through a plain client, announces nothing, and exits. See [`poll_forever`]
-//! and [`adopted_as`].
+//! through a plain client, announces nothing, and exits. See [`poll_forever`],
+//! [`adopted_as`] and [`supervised`].
 //!
 //! Run directly, it takes a verb, or `help` for usage:
 //!
@@ -161,8 +163,9 @@ fn main() -> ExitCode {
 
 /// The whole program past argument parsing, on the runtime `main` built.
 async fn run(args: &[&str]) -> ExitCode {
-    let dog = adopted_as(&|key| std::env::var(key).ok());
-    let outcome = match route(args, dog.is_some()) {
+    let env = |key: &str| std::env::var(key).ok();
+    let dog = adopted_as(&env);
+    let outcome = match route(args, supervised(&env)) {
         Route::Poll => match &dog {
             Some(name) => poll_forever(name).await,
             None => return usage(),
@@ -207,17 +210,30 @@ fn usage() -> ExitCode {
 
 /// The environment entry shep puts an adopted dog's registered name in.
 ///
-/// Set by the daemon itself when it spawns the dog, alongside `SHEP_HOME`.
-/// Its absence is the signal that this process is NOT a supervised dog, and
-/// so does not poll; see [`adopted_as`].
+/// Set by the daemon itself when it spawns the dog, alongside `SHEP_HOME`, and
+/// by shep's `shep <dog>` passthrough when a person types the dog's own command
+/// at a terminal. Its absence means this process is not a supervised dog; its
+/// presence alone does not prove one. It names the handshake either way: see
+/// [`adopted_as`], and [`supervised`] for the supervised question.
 const DOG_NAME: &str = "SHEP_DOG_NAME";
+
+/// The environment entry naming what shep spawned this process as.
+///
+/// The daemon puts it into every process it spawns, apps and dogs alike
+/// (shep-daemon `assemble/spawn_spec.rs`), and for a dog it is the dog's own
+/// name. shep-core's `normalize` refuses `SHEP_NAME` in an app's own `env`,
+/// and shep's `run_adopted_dog` never sets it, so a process that carries it
+/// was spawned by the shepherd rather than typed at a terminal. shep-core
+/// exports no constant for it, so this is the only spelling.
+const SHEP_NAME: &str = "SHEP_NAME";
 
 /// The supervised mode: connect as `name`, the dog shep registered this
 /// process as, read its own config section, and poll until the process is
 /// asked to stop.
 ///
-/// Only [`run`] reaches this, and only when shep started the process; a bare
-/// run by hand is routed to usage first.
+/// Only [`run`] reaches this, and only when [`supervised`] says the shepherd
+/// started this process as this dog; a bare run by hand is routed to usage
+/// first.
 ///
 /// Answers 0 for a stop that was asked for, which is the only way out that
 /// is not an error. [`poll::run`] itself never returns.
@@ -285,11 +301,12 @@ async fn poll_forever(name: &str) -> Result<u8, Error> {
 
 /// The name shep registered this process under, or `None` when nothing did.
 ///
-/// This is the handshake identity, and also what [`run`] reads as "supervised":
-/// it polls only when this is `Some`. shep sets the variable for a bare
-/// `shep deploy` typed at a terminal as well as for the dog it starts, so the
-/// two are not told apart here. It has exactly one source. A name reaching the daemon is a claim about which dog
-/// to restart when a handshake is refused, so a guessed one - the binary's
+/// This is the handshake identity, and it has exactly one source: this
+/// variable, and nothing else. Whether the process is supervised is a separate
+/// question, answered by [`supervised`], because shep sets this variable for a
+/// bare `shep deploy` typed at a terminal as well as for the dog it starts.
+/// A name reaching the daemon is a claim about which dog to restart when a
+/// handshake is refused, so a guessed one - the binary's
 /// own stem, the config section's key, a default - gets some other dog
 /// restarted for this process's problem. No name at all is a complete and
 /// honest answer, and it is the right one for somebody running the binary by
@@ -307,6 +324,30 @@ async fn poll_forever(name: &str) -> Result<u8, Error> {
 /// `set_var`.
 fn adopted_as(env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     env(DOG_NAME).filter(|name| !name.trim().is_empty())
+}
+
+/// Whether this process is the dog the shepherd started, rather than a run by
+/// hand.
+///
+/// `SHEP_DOG_NAME` alone cannot answer this: shep sets it for a bare
+/// `shep deploy` typed at a terminal as well as for the dog it spawns.
+/// `SHEP_NAME` is the half only the shepherd can set - it goes into every
+/// process the daemon spawns, and shep's own `shep <dog>` passthrough never
+/// sets it - so the two agreeing is the signal, and a run that lacks it gets
+/// usage rather than a second poll loop beside the adopted dog.
+///
+/// A blank on either side is not supervised, and only one side has to check:
+/// [`adopted_as`] already treats a blank `SHEP_DOG_NAME` as absent, and a
+/// process that cannot name itself to the daemon has no business polling for
+/// it.
+///
+/// Takes the same injected lookup as [`adopted_as`], so the decision is
+/// testable without a process-global `set_var`.
+fn supervised(env: &dyn Fn(&str) -> Option<String>) -> bool {
+    match (adopted_as(env), env(SHEP_NAME)) {
+        (Some(dog), Some(spawned_as)) => dog == spawned_as,
+        (Some(_), None) | (None, _) => false,
+    }
 }
 
 /// Resolves when a successor daemon has refused this dog's handshake, and
@@ -761,6 +802,74 @@ mod tests {
     fn only_shep_dog_name_is_read() {
         let env = |key: &str| (key == "SHEP_NAME").then(|| "web".to_owned());
         assert_eq!(adopted_as(&env), None);
+    }
+
+    /// fails if a bare `shep deploy` typed at a terminal starts the poll loop.
+    ///
+    /// shep sets `SHEP_DOG_NAME` for that command too, through
+    /// `run_adopted_dog`, so the variable alone cannot tell the hand run from
+    /// the dog the shepherd spawned. A second loop deploys the same targets
+    /// twice, and it connects as `deploy`, so a refused handshake restarts the
+    /// real dog.
+    #[test]
+    fn a_bare_shep_deploy_typed_at_a_terminal_is_not_supervised() {
+        let env = |key: &str| (key == DOG_NAME).then(|| "deploy".to_owned());
+        assert!(!supervised(&env));
+    }
+
+    /// fails if the dog the shepherd spawned stops being recognised as one.
+    ///
+    /// That is the supervised mode: the daemon spawned this process, so it put
+    /// the dog's own name in `SHEP_NAME` beside the `SHEP_DOG_NAME` it put in
+    /// every dog's environment.
+    #[test]
+    fn a_dog_the_shepherd_spawned_is_supervised() {
+        let env = |key: &str| match key {
+            DOG_NAME | SHEP_NAME => Some("deploy".to_owned()),
+            _ => None,
+        };
+        assert!(supervised(&env));
+    }
+
+    /// fails if a shell started from inside an app is read as the dog.
+    ///
+    /// `SHEP_NAME` there is the app's name, not a dog's, and `SHEP_DOG_NAME`
+    /// is what shep put there when this shell ran `shep deploy`. Two names that
+    /// do not agree say the shepherd did not spawn this process as the dog.
+    #[test]
+    fn a_run_from_inside_an_app_is_not_supervised() {
+        let env = |key: &str| match key {
+            DOG_NAME => Some("deploy".to_owned()),
+            SHEP_NAME => Some("web".to_owned()),
+            _ => None,
+        };
+        assert!(!supervised(&env));
+    }
+
+    /// fails if a blank name counts as a supervised one, on either side.
+    ///
+    /// A blank `SHEP_DOG_NAME` names no dog, and a blank `SHEP_NAME` says
+    /// nothing about who spawned this process. Two blanks agreeing is not a
+    /// handshake identity, and polling on one would deploy every `auto` target
+    /// from a process that cannot name itself to the daemon.
+    #[test]
+    fn a_blank_name_on_either_side_is_not_supervised() {
+        let blank_dog = |key: &str| match key {
+            DOG_NAME => Some(String::new()),
+            SHEP_NAME => Some("deploy".to_owned()),
+            _ => None,
+        };
+        assert!(!supervised(&blank_dog));
+
+        let blank_spawned = |key: &str| match key {
+            DOG_NAME => Some("deploy".to_owned()),
+            SHEP_NAME => Some(String::new()),
+            _ => None,
+        };
+        assert!(!supervised(&blank_spawned));
+
+        let both_blank = |key: &str| matches!(key, DOG_NAME | SHEP_NAME).then(String::new);
+        assert!(!supervised(&both_blank));
     }
 
     /// fails if the stop handlers stop being installed eagerly. An
