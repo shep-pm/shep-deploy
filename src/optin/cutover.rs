@@ -99,6 +99,13 @@ pub async fn cut_over<D: Daemon>(daemon: &D, prepared: Prepared) -> Result<Strin
     if registering.interpreter.is_none() {
         registering.interpreter = previous_config.interpreter.clone();
     }
+    // The sheep's `dogs` tables are the operator's, and the deploy settings
+    // among them are what every later deploy builds and hooks from. A
+    // Flockfile cannot supply them: whatever it carries under `dogs` is a
+    // commit's choice, so the registered ones replace it outright. Left out,
+    // the registration would drop the table and the sheep would deploy with
+    // no build and no hooks from then on.
+    registering.dogs = previous_config.dogs.clone();
 
     match attempt(daemon, &sheep, registering, &generation, &previous).await {
         CutOver::Done => {
@@ -284,6 +291,21 @@ mod tests {
         prepared.app.interpreter = Some("none".to_owned());
         cut_over(&daemon, prepared).await.expect("cuts over");
         assert_eq!(daemon.started()[0].interpreter.as_deref(), Some("none"));
+    }
+
+    /// fails if the new registration drops the sheep's `[app.dogs.deploy]`
+    /// table, which every later deploy builds and hooks from, or takes one
+    /// from the Flockfile in its place: a commit does not choose it.
+    #[tokio::test(start_paused = true)]
+    async fn the_new_registration_keeps_the_sheeps_deploy_settings() {
+        let (daemon, mut prepared, _dirs) = cutover_fixture().await;
+        prepared.previous_config = crate::fixtures::app_with_settings("web", "command = 'make'\n");
+        prepared.app = crate::fixtures::app_with_settings("web", "command = 'from-flockfile'\n");
+        cut_over(&daemon, prepared).await.expect("cuts over");
+
+        let registered = daemon.started().remove(0);
+        let table = registered.dogs.get("deploy").expect("the table is carried");
+        assert_eq!(table.as_map()["command"], "make");
     }
 
     /// fails if the OLD instances are deleted by name rather than by id, or

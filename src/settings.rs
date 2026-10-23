@@ -104,9 +104,26 @@ pub(crate) fn from_app(sheep: &str, app: &AppConfig) -> Result<Settings, Error> 
     serde_json::from_value(Value::Object(table.as_map().clone())).map_err(|source| {
         Error::Config(format!(
             "{sheep}: `[app.dogs.deploy]` does not match the settings schema: {}",
-            printable(source)
+            printable(without_value(&source.to_string()))
         ))
     })
+}
+
+/// `message` with the offending value cut out of a type or value error.
+///
+/// serde quotes what it could not use (`invalid type: string "hunter2",
+/// expected a map`), and a hook's `env` is where the operator keeps secrets.
+/// An unknown key is kept: naming it is the point of refusing it.
+fn without_value(message: &str) -> String {
+    for kind in ["invalid type", "invalid value"] {
+        if let Some(rest) = message.strip_prefix(kind)
+            && rest.starts_with(": ")
+            && let Some(at) = rest.rfind(", expected ")
+        {
+            return format!("{kind}{}", &rest[at..]);
+        }
+    }
+    message.to_owned()
 }
 
 #[cfg(test)]
@@ -188,6 +205,46 @@ mod tests {
         let err = from_app("web", &app).expect_err("refused");
 
         assert!(err.to_string().contains(".."), "{err}");
+    }
+
+    /// fails if a value of the wrong type is echoed into the error: a hook's
+    /// `env` holds secrets, and serde quotes what it could not use.
+    #[test]
+    fn a_wrong_typed_value_is_not_echoed() {
+        for table in [
+            "[release]\nenv = { PASSWORD = 1234567 }\n",
+            "[release]\nenv = 'hunter2'\n",
+            "release = 'hunter2'\n",
+            "reload = 'hunter2'\n",
+        ] {
+            let app = fixtures::app_with_settings("web", table);
+
+            let shown = from_app("web", &app).expect_err("refused").to_string();
+
+            assert!(!shown.contains("hunter2"), "{shown}");
+            assert!(!shown.contains("1234567"), "{shown}");
+            assert!(shown.contains("web"), "{shown}");
+        }
+    }
+
+    /// fails if `Debug` prints a hook's `env` values through `Settings`.
+    #[test]
+    fn debug_redacts_hook_env_values() {
+        let settings = Settings {
+            command: Some("make".to_owned()),
+            release: HookSpec {
+                command: Some("migrate".to_owned()),
+                env: [("PASSWORD".to_owned(), "hunter2".to_owned())].into(),
+            },
+            ..Settings::default()
+        };
+
+        assert_eq!(
+            format!("{settings:?}"),
+            "Settings { command: Some(\"make\"), artifacts: [], reload: [], \
+             release: HookSpec { command: Some(\"migrate\"), env: <1 vars> }, \
+             after: HookSpec { command: None, env: <0 vars> } }"
+        );
     }
 
     /// fails if a message carries a control character from a key the operator
