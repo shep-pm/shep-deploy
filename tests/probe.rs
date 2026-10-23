@@ -101,8 +101,8 @@ fn an_ordinary_argument_is_not_a_probe() {
     );
 }
 
-/// Runs the built binary by hand: the given arguments, no `SHEP_DOG_NAME`, and
-/// a `$SHEP_HOME` that holds no shepherd.
+/// Runs the built binary by hand: the given arguments, no `SHEP_DOG_NAME`, no
+/// `SHEP_NAME`, and a `$SHEP_HOME` that holds no shepherd.
 ///
 /// A build that still polls, or connects, reaches for the socket under that
 /// home and exits 5, so the failure is fast instead of a hang.
@@ -112,18 +112,57 @@ fn by_hand(args: &[&str]) -> Output {
         .args(args)
         .env("SHEP_HOME", home.path())
         .env_remove("SHEP_DOG_NAME")
+        .env_remove("SHEP_NAME")
+        .output()
+        .expect("the test binary's own sibling is on disk")
+}
+
+/// Runs the built binary the way shep's own passthrough does: `SHEP_DOG_NAME`
+/// set to this dog's registered name, no `SHEP_NAME`, and the given arguments.
+///
+/// `shep deploy` typed with nothing after it arrives exactly like this. shep's
+/// `run_adopted_dog` sets `SHEP_DOG_NAME` and passes no argv, which is the
+/// environment the daemon gives the dog it spawns minus the `SHEP_NAME` the
+/// daemon adds to every process it starts. That missing half is the only
+/// thing that tells the two apart from inside the process.
+fn typed_at_a_terminal(args: &[&str]) -> Output {
+    let home = tempfile::tempdir().expect("a temporary $SHEP_HOME");
+    Command::new(env!("CARGO_BIN_EXE_shep-deploy"))
+        .args(args)
+        .env("SHEP_HOME", home.path())
+        .env("SHEP_DOG_NAME", "deploy")
+        .env_remove("SHEP_NAME")
         .output()
         .expect("the test binary's own sibling is on disk")
 }
 
 /// fails if a bare `shep-deploy` typed by hand starts the poll loop.
 ///
-/// Only shep starting the dog sets `SHEP_DOG_NAME`. Without it the bare
-/// command is a person asking what this is, and a second loop beside the
-/// adopted dog deploys the same targets twice.
+/// With neither name set the bare command is a person asking what this is, and
+/// a second loop beside the adopted dog deploys the same targets twice.
 #[test]
 fn a_bare_run_by_hand_prints_usage_and_does_not_poll() {
     let output = by_hand(&[]);
+
+    assert_eq!(output.status.code(), Some(2), "{:?}", output.status);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("usage: shep-deploy"),
+        "usage goes to stderr: {:?}",
+        output.stderr
+    );
+    assert!(output.stdout.is_empty(), "nothing is printed to stdout");
+}
+
+/// fails if `shep deploy` typed at a terminal starts a second poll loop.
+///
+/// shep's passthrough sets `SHEP_DOG_NAME` for that command too, so the
+/// variable alone reads as the dog contract and the run polls beside the
+/// adopted dog: the same targets deployed twice, on a connection that claims
+/// to be `deploy` and so gets the real dog restarted when its own handshake is
+/// refused. `SHEP_NAME` is what the daemon adds to the dog and this run lacks.
+#[test]
+fn a_bare_shep_deploy_typed_at_a_terminal_prints_usage_and_does_not_poll() {
+    let output = typed_at_a_terminal(&[]);
 
     assert_eq!(output.status.code(), Some(2), "{:?}", output.status);
     assert!(

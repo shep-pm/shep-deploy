@@ -20,8 +20,8 @@ usage: shep-deploy <verb> [args]
   on-remove                              lifecycle hook; shep runs this itself
   help                                   print this
 
-With no arguments the poll loop starts only when SHEP_DOG_NAME is set, as shep
-does when it starts the dog; without it, the bare command prints this and exits.
+With no arguments the poll loop starts only when shep starts the dog; run by
+hand, the bare command prints this and exits.
 
 Adopted as `deploy`, the same verbs run as `shep deploy <verb> [args]`, and
 `shep deploy <sheep>` deploys one sheep directly. A sheep whose name is one of
@@ -35,8 +35,8 @@ the verbs above is reached with the verb spelled out: `shep deploy deploy survey
 /// and acts can only be exercised by actually running the binary.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route<'a> {
-    /// No argv, and shep started this process: the poll loop, per the dog
-    /// contract.
+    /// No argv, and the shepherd started this process as this dog: the poll
+    /// loop, per the dog contract.
     Poll,
     /// `-h`, `--help` or `help`: print [`USAGE`] on stdout and exit 0.
     Help,
@@ -72,10 +72,11 @@ pub enum Route<'a> {
 /// which is the escape hatch [`USAGE`] documents rather than a silent trap.
 /// `help` is one of those verbs.
 ///
-/// `supervised` is whether `SHEP_DOG_NAME` is set. Only then does an empty argv
-/// mean the poll loop; a person who typed the bare command gets usage. shep sets
-/// the variable when it starts the dog and also when a person types a bare
-/// `shep deploy`, and the two cannot be told apart from inside this process.
+/// `supervised` is whether the shepherd started this process as the dog it is
+/// polling for - the main file's `supervised` decides it, from the two names
+/// shep puts into a dog's environment. Only then does an empty argv mean the
+/// poll loop; a person who typed the bare command, or who typed `shep deploy`
+/// with nothing after it, gets usage.
 pub fn route<'a>(args: &[&'a str], supervised: bool) -> Route<'a> {
     let route = match args {
         [] if supervised => Route::Poll,
