@@ -305,6 +305,44 @@ async fn a_manual_target_is_left_alone_by_a_whole_tick() {
     );
 }
 
+/// fails if a tick follows the branch the record was read with rather than
+/// the one the sheep's table holds now. `--branch` and lookout both write
+/// the table while the dog sleeps, and the dog is not restarted for it.
+#[tokio::test(start_paused = true)]
+async fn a_branch_changed_in_the_table_between_ticks_is_followed_by_the_second() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let origin = write_target_ready(home.path(), "moved");
+    let daemon = Ready::new();
+    let first = tick(&daemon, home.path(), &fixtures::dog_config())
+        .await
+        .results;
+    let main_head = fixtures::head_of(origin.path());
+    assert!(
+        matches!(&first[0].1, Ok(Outcome::Deployed { sha }) if *sha == main_head),
+        "{:?}",
+        first[0].1
+    );
+    fixtures::run_git(origin.path(), &["checkout", "-q", "-b", "release"]);
+    fs::write(origin.path().join("release-only.txt"), "x").expect("write");
+    fixtures::run_git(origin.path(), &["add", "."]);
+    fixtures::run_git(origin.path(), &["commit", "-q", "-m", "release"]);
+    let release_head = fixtures::head_of(origin.path());
+    fixtures::run_git(origin.path(), &["checkout", "-q", "main"]);
+
+    daemon.set_table("moved", "branch = 'release'\nverify = 'probed'\n");
+    let second = tick(&daemon, home.path(), &fixtures::dog_config())
+        .await
+        .results;
+
+    assert!(
+        matches!(&second[0].1, Ok(Outcome::Deployed { sha }) if *sha == release_head),
+        "{:?}",
+        second[0].1
+    );
+    let on_disk = State::read(&Tree::for_sheep(home.path(), "moved").state_file()).expect("reads");
+    assert_eq!(on_disk.deployed.as_deref(), Some(release_head.as_str()));
+}
+
 /// fails if one target's failure stops the tick. A dog that gives up
 /// because one of five remotes was unreachable stops deploying the
 /// other four, and nothing restarts it with a reason anybody can read.

@@ -55,7 +55,7 @@ use crate::verify::Generation;
 /// collected rather than the first failure returned, so the error can name
 /// every one of them.
 ///
-/// [`State::write`] failing is the mild one, and it is passed through. The
+/// [`crate::state::State::write`] failing is the mild one, and it is passed through. The
 /// release is serving and only the record is missing, which the next
 /// `shep-deploy deploy` writes. The promotion failing is the same: the
 /// record is written first, and `shep-deploy deploy <sheep> --watch auto`

@@ -176,9 +176,18 @@ class rather than the instances.
 
 ## Gotchas
 
-- **`deploy.toml` is hand-edited by operators.** `deploy/prepare.rs` tells them to type
-  `verify = "alive"` into it. It denies unknown fields for that reason; keep it
-  that way.
+- **`deploy.toml` holds state only; `branch`, `watch` and `verify` live in
+  the sheep's `[app.dogs.deploy]`.** `State` keeps the three in memory, filled
+  by `State::adopt` from `Settings` (`settings::adopted` reads and adopts in one
+  call, every tick), and they are `#[serde(skip)]`, so `State::write` never
+  emits them. A record that still carries one is refused by `State::read`,
+  naming the key and `[app.dogs.deploy]`. An absent `branch` is refused rather
+  than defaulted, since a guess deploys a branch nobody chose. `--watch`,
+  `--branch` and `setup --verify` write the table through
+  `settings::change`, a read-modify-write of the whole table because
+  `SetSheepDogSettings` replaces it. The record keeps `deny_unknown_fields` so
+  an older shep-deploy refuses a record with a field it does not know instead
+  of dropping it.
 - **`Error::Config` is built at dozens of sites across ten modules.** It is
   not the dog-section variant its doc used to claim.
 - **`main` answers `--version` and `--schema` before it does anything else.**
@@ -309,10 +318,11 @@ class rather than the instances.
   record lock, blocking, held for one read and one write of `deploy.toml`:
   `set_watch` and every whole-record write in `deploy` and `optin` take it.
   A deploy takes the tree lock first and the record lock inside; nothing
-  holding the record lock waits for the tree's. The cutover's final write
-  adopts `verify` from disk and deliberately not `watch`: `prepare` wrote
-  `manual` and that write is the promotion to `auto`, so a `--watch manual`
-  typed during setup is overwritten and belongs after setup returns.
+  holding the record lock waits for the tree's. A write to the sheep's table
+  is one request and takes no lock; `set_watch` takes none at all. The
+  cutover's promotion writes `watch = auto` to the table on the clean path
+  only, over whatever `prepare` left there, so a `--watch manual` typed during
+  setup is overwritten and belongs after setup returns.
 - **A build's process group is led by a holder, not by the build.** `sh -c
   'read _'` on a pipe the dog holds, so the group id stays reserved after the
   build is reaped and `killpg` cannot land on a recycled pid. Never signal a

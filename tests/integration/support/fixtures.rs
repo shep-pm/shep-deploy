@@ -214,19 +214,17 @@ pub fn build_tree(home: &Path, sheep: &str, origin: &Path) -> String {
     sha
 }
 
-/// Writes `deploy.toml` for `sheep`, tracking `origin`'s `main` branch,
-/// already deployed at `sha`, and verifying the way `verify` says.
+/// Writes `deploy.toml` for `sheep`, tracking `origin`, already deployed at
+/// `sha`.
 ///
-/// Field order and shape matches `crate::state::State`'s own TOML. `watch`
-/// is left unset so it takes its documented default (`Auto`), the same
-/// round trip `src/state.rs`'s own tests pin.
-pub fn write_state(home: &Path, sheep: &str, origin: &Path, sha: &str, verify: &str) {
+/// State only: the branch, `watch` and `verify` live in the sheep's
+/// `[app.dogs.deploy]` table, which [`register_web`] writes.
+pub fn write_state(home: &Path, sheep: &str, origin: &Path, sha: &str) {
     let path = home.join("deploy").join(sheep).join("deploy.toml");
     fs::write(
         &path,
         format!(
-            "remote = {remote:?}\nbranch = \"main\"\ndeployed = {sha:?}\nverify = \
-             {verify:?}\ncheckout = {remote:?}\n",
+            "remote = {remote:?}\ndeployed = {sha:?}\ncheckout = {remote:?}\n",
             remote = origin.to_str().expect("utf-8 origin path"),
         ),
     )
@@ -252,25 +250,24 @@ pub fn write_state(home: &Path, sheep: &str, origin: &Path, sha: &str, verify: &
 /// reload to fail therefore cannot change the probe; it changes what the
 /// probe LOOKS at, which is why the probe points through `current` at a
 /// file a release either ships or does not.
-pub fn register_web(shepherd: &Shepherd, readiness: Readiness, extra: &str) {
-    register_web_with_settings(shepherd, readiness, extra, "");
+pub fn register_web(shepherd: &Shepherd, readiness: Readiness, verify: &str, extra: &str) {
+    register_web_with_settings(shepherd, readiness, verify, extra, "");
 }
 
-/// [`register_web`] with `settings` as the body of the sheep's
+/// [`register_web`] with `settings` added to the sheep's
 /// `[app.dogs.deploy]` table, which is where the dog reads its build command
-/// from. The release's Flockfile is not consulted for it.
+/// from. The release's Flockfile is not consulted for it. The table always
+/// follows `main` and verifies the way `verify` says; `watch` is left unset
+/// so it takes its default, `auto`.
 pub fn register_web_with_settings(
     shepherd: &Shepherd,
     readiness: Readiness,
+    verify: &str,
     extra: &str,
     settings: &str,
 ) {
     let path = shepherd.home().join("register.toml");
-    let table = if settings.is_empty() {
-        String::new()
-    } else {
-        format!("\n[app.dogs.deploy]\n{settings}")
-    };
+    let table = format!("\n[app.dogs.deploy]\nbranch = 'main'\nverify = {verify:?}\n{settings}");
     fs::write(
         &path,
         format!(

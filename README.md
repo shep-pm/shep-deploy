@@ -216,9 +216,14 @@ Everything lives under `$SHEP_HOME/deploy/<sheep>/`:
 git/                 one bare clone, shared by every release
 releases/<sha>/      a worktree per release
 current -> releases/<sha>
-deploy.toml          remote, branch, deployed sha, held sha, staged sha, verify mode,
-                     watch mode, and the app as it was before adoption (owner-only: it holds env)
+deploy.toml          remote, deployed sha, held sha, staged sha, and the app as it was
+                     before adoption (owner-only: it holds env)
 ```
+
+`branch`, `watch` and `verify` are not in `deploy.toml`. They are keys of the
+sheep's `[app.dogs.deploy]` table, which `setup`, `--watch` and `--branch` write
+and `shep lookout` edits; the dog reads them again every tick. A `deploy.toml`
+that still carries one of them is refused, naming the key.
 
 The sheep's `cwd` is `current`, permanently. Set it explicitly when you
 register the app: a Flockfile `cwd` left to default is resolved at
@@ -264,8 +269,8 @@ and it is refused when nothing is staged or the staged release is gone, with
 `--stage` as the way out. A promote that does not come up is rolled back and
 leaves `staged` set, so it can be run again. It ignores a held sha, as a
 deploy asked for by name does. `--verify` on
-`setup` records how the sheep's deploys are verified, `probed` when it is
-left out. `survey` reports
+`setup` sets how the sheep's deploys are verified in its `[app.dogs.deploy]`,
+`probed` when it is left out. `survey` reports
 where every registered sheep stands and starts, registers and writes nothing;
 a manual target with a staged sha reads `main@a1b2c3, deploys only when asked,
 staged d4e5f6`.
@@ -428,7 +433,7 @@ one the sheep already ran under: `shep start` fills that in from `shep.toml`'s
 An app with neither a `readiness_probe` nor `wait_ready`, a bot with no port
 say, is refused before anything is built, because its first deploy would be
 refused for the same reason. Take it over with `shep-deploy setup <sheep>
---verify alive`, which records `verify = "alive"` in its `deploy.toml`. A
+--verify alive`, which sets `verify = "alive"` in its `[app.dogs.deploy]`. A
 refused `setup` leaves a directory with the fetched repository and the staged
 release but no `deploy.toml` and no `current`, which is not a deploy target, so
 running it again is a retry.

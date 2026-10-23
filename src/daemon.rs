@@ -175,7 +175,7 @@ pub trait Daemon {
     ///
     /// The shepherd replaces the table rather than merging into it, so a
     /// caller changing one key reads the table first and writes it back
-    /// whole - see [`crate::settings::update`]. One request, atomic on the
+    /// whole - see [`crate::settings::change`]. One request, atomic on the
     /// shepherd's side; it needs no lock of this dog's.
     ///
     /// # Errors
