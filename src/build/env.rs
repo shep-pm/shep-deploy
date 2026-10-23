@@ -42,7 +42,7 @@ pub(crate) fn apply(
     // commit on the tracked branch.
     //
     // What survives is named in three places and nowhere else: BASE_ENV, the
-    // operator's `passthrough` list, and the release's own `[dog.deploy.build] env`.
+    // operator's `passthrough` list, and the build spec's `env`.
     //
     // `var_os` rather than `var`, because `var` reports a value that is not
     // UTF-8 as absent and a `PATH` with one such component then vanished,

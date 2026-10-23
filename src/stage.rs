@@ -20,6 +20,7 @@ use crate::deploy::{
 };
 use crate::error::Error;
 use crate::paths::Tree;
+use crate::settings::{self, Settings};
 use crate::state::{State, Watch};
 use crate::{git, linkcheck, lock, retention, shared, swap};
 
@@ -51,7 +52,8 @@ pub enum Staged {
 /// Builds the head of `state.branch` into its release and records it as
 /// `state.staged`, without swapping it in.
 ///
-/// Reclaims old releases afterwards, sparing `deployed` and `staged`, and
+/// The build is `settings`' command, which the caller reads from the sheep's
+/// stored config. Reclaims old releases afterwards, sparing `deployed` and `staged`, and
 /// reports a failure to do so rather than returning it: the stage itself is
 /// already decided.
 ///
@@ -71,7 +73,12 @@ pub enum Staged {
 /// against the sha: `failed` is the poll loop's and a stage is not its
 /// attempt. [`Error::Io`] or [`Error::Config`] if the record cannot be
 /// written, in which case `state.staged` is as it was.
-pub async fn stage(tree: &Tree, state: &mut State, config: &DogConfig) -> Result<Staged, Error> {
+pub async fn stage(
+    tree: &Tree,
+    state: &mut State,
+    settings: &Settings,
+    config: &DogConfig,
+) -> Result<Staged, Error> {
     let sheep = tree.sheep();
     let _staging = lock::hold(tree)?;
 
@@ -114,7 +121,7 @@ pub async fn stage(tree: &Tree, state: &mut State, config: &DogConfig) -> Result
         return Ok(Staged::AlreadyStaged { sha: head });
     }
 
-    let built = build_and_record(tree, state, &head, config).await;
+    let built = build_and_record(tree, state, &head, settings, config).await;
 
     let spared: Vec<String> = [state.deployed.as_deref(), state.staged.as_deref()]
         .into_iter()
@@ -204,9 +211,10 @@ async fn land_staged<D: Daemon>(
     config: &DogConfig,
 ) -> Result<Outcome, Error> {
     let started_at = swap::resolve(&tree.current())?;
+    let settings = settings::read(daemon, tree.sheep()).await?;
     let staged = {
         let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
-        shared::off_thread(move || read_staged(&tree, &checkout, &head)).await?
+        shared::off_thread(move || read_staged(&tree, &checkout, &head, &settings)).await?
     };
     refuse_ungated_verification(tree.sheep(), &staged.app, state.verify)?;
     run_release_hook(tree, head, &staged, config).await?;
@@ -218,6 +226,7 @@ async fn build_and_record(
     tree: &Tree,
     state: &mut State,
     head: &str,
+    settings: &Settings,
     config: &DogConfig,
 ) -> Result<(), Error> {
     let sheep = tree.sheep();
@@ -226,7 +235,8 @@ async fn build_and_record(
         app, spec, linked, ..
     } = {
         let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
-        shared::off_thread(move || stage_release(&tree, &checkout, &head)).await?
+        let settings = settings.clone();
+        shared::off_thread(move || stage_release(&tree, &checkout, &head, &settings)).await?
     };
     refuse_ungated_verification(sheep, &app, state.verify)?;
     let snapshot = linkcheck::Snapshot::before(sheep, &release, &linked);
@@ -292,25 +302,23 @@ mod tests {
 
     use crate::deploy::Outcome;
     use crate::deploy::test_support::{
-        FLOCKFILE, Shepherd, commit_on_origin, fixture_before_any_release,
-        fixture_with_previous_release,
+        Shepherd, commit_on_origin, fixture_before_any_release, fixture_with_previous_release,
     };
     use crate::{fixtures, swap};
 
     use super::*;
 
-    /// Commits a Flockfile whose build runs `command`, returning the sha.
-    fn commit_building(
-        fixture: &crate::deploy::test_support::Fixture,
-        command: &str,
-        name: &str,
-    ) -> String {
-        fs::write(
-            fixture.origin.path().join("Flockfile.toml"),
-            format!("{FLOCKFILE}\n[dog.deploy.build]\ncommand = \"{command}\"\n"),
-        )
-        .expect("write Flockfile");
-        commit_on_origin(fixture, name)
+    /// The sheep's settings with a build that runs `command`.
+    fn building(command: &str) -> Settings {
+        Settings {
+            command: Some(command.to_owned()),
+            ..Settings::default()
+        }
+    }
+
+    /// A build that leaves `built.marker` in the release.
+    fn touching_marker() -> Settings {
+        building("touch built.marker")
     }
 
     /// Stages the head of a new commit whose build runs `command`, returning
@@ -319,10 +327,15 @@ mod tests {
         fixture: &mut crate::deploy::test_support::Fixture,
         command: &str,
     ) -> String {
-        let second = commit_building(fixture, command, "second.txt");
-        stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect("stages");
+        let second = commit_on_origin(fixture, "second.txt");
+        stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &building(command),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("stages");
         second
     }
 
@@ -526,9 +539,14 @@ mod tests {
         let previous = fixture.state.deployed.clone().expect("a previous release");
         // No build command: the paused clock would time a real one out.
         let second = commit_on_origin(&fixture, "second.txt");
-        stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect("stages");
+        stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &Settings::default(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("stages");
 
         let outcome = promote(
             &Shepherd::never_ready(),
@@ -562,11 +580,16 @@ mod tests {
     async fn staging_builds_the_head_and_records_it_without_moving_current() {
         let mut fixture = fixture_with_previous_release();
         let previous = fixture.state.deployed.clone().expect("a previous release");
-        let second = commit_building(&fixture, "touch built.marker", "second.txt");
+        let second = commit_on_origin(&fixture, "second.txt");
 
-        let staged = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect("stages");
+        let staged = stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &touching_marker(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("stages");
 
         assert_eq!(
             staged,
@@ -596,9 +619,14 @@ mod tests {
         let mut fixture = fixture_with_previous_release();
         let live = fixture.state.deployed.clone().expect("a previous release");
 
-        let staged = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect("answers");
+        let staged = stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &Settings::default(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("answers");
 
         assert_eq!(staged, Staged::AlreadyLive { sha: live });
         assert_eq!(fixture.state.staged, None);
@@ -609,16 +637,26 @@ mod tests {
     #[tokio::test]
     async fn staging_twice_is_a_no_op_the_second_time() {
         let mut fixture = fixture_with_previous_release();
-        let second = commit_building(&fixture, "touch built.marker", "second.txt");
-        stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect("stages");
+        let second = commit_on_origin(&fixture, "second.txt");
+        stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &touching_marker(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("stages");
         let marker = fixture.tree.release(&second).join("built.marker");
         fs::remove_file(&marker).expect("marker");
 
-        let again = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect("answers");
+        let again = stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &touching_marker(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("answers");
 
         assert_eq!(again, Staged::AlreadyStaged { sha: second });
         assert!(!marker.exists(), "nothing was built");
@@ -635,9 +673,14 @@ mod tests {
         let release = fixture.tree.release(&second);
 
         fs::remove_file(fixture.tree.completion(&second)).expect("marker");
-        let again = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect("stages again");
+        let again = stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &touching_marker(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("stages again");
         assert_eq!(
             again,
             Staged::Built {
@@ -647,9 +690,14 @@ mod tests {
         assert!(fixture.tree.completion(&second).is_file());
 
         fs::remove_dir_all(&release).expect("release");
-        let again = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect("stages again");
+        let again = stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &touching_marker(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("stages again");
         assert_eq!(
             again,
             Staged::Built {
@@ -666,14 +714,24 @@ mod tests {
     async fn staging_a_newer_head_replaces_the_staged_sha() {
         let mut fixture = fixture_with_previous_release();
         commit_on_origin(&fixture, "second.txt");
-        stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect("stages");
+        stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &Settings::default(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("stages");
         let third = commit_on_origin(&fixture, "third.txt");
 
-        let staged = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect("stages again");
+        let staged = stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &Settings::default(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("stages again");
 
         assert_eq!(staged, Staged::Built { sha: third.clone() });
         assert_eq!(fixture.state.staged.as_deref(), Some(third.as_str()));
@@ -693,11 +751,16 @@ mod tests {
     #[tokio::test]
     async fn a_failing_build_records_nothing_and_does_not_hold_the_sha() {
         let mut fixture = fixture_with_previous_release();
-        commit_building(&fixture, "exit 3", "second.txt");
+        commit_on_origin(&fixture, "second.txt");
 
-        let err = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect_err("the build fails");
+        let err = stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &building("exit 3"),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect_err("the build fails");
 
         assert!(matches!(err, Error::Build { status: Some(3) }), "{err:?}");
         assert_eq!(fixture.state.staged, None);
@@ -721,9 +784,14 @@ mod tests {
             .expect("write deploy.toml");
         commit_on_origin(&fixture, "second.txt");
 
-        let err = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect_err("refuses");
+        let err = stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &Settings::default(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect_err("refuses");
 
         assert!(matches!(err, Error::Config(_)), "{err:?}");
         let shown = err.to_string();
@@ -742,9 +810,14 @@ mod tests {
     async fn a_tree_the_cutover_never_landed_on_is_refused() {
         let mut fixture = fixture_before_any_release();
 
-        let err = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect_err("refuses");
+        let err = stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &Settings::default(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect_err("refuses");
 
         assert!(matches!(err, Error::NotCutOver { .. }), "{err:?}");
         assert_eq!(fixture.state.staged, None);
@@ -757,7 +830,7 @@ mod tests {
     #[tokio::test]
     async fn a_stage_answers_from_the_record_on_disk_not_the_callers_copy() {
         let mut fixture = fixture_with_previous_release();
-        let second = commit_building(&fixture, "touch built.marker", "second.txt");
+        let second = commit_on_origin(&fixture, "second.txt");
         State {
             staged: Some(second.clone()),
             ..fixture.state.clone()
@@ -769,9 +842,14 @@ mod tests {
         fs::create_dir_all(fixture.tree.completions()).expect("markers");
         fs::write(fixture.tree.completion(&second), b"").expect("marker");
 
-        let staged = stage(&fixture.tree, &mut fixture.state, &fixtures::dog_config())
-            .await
-            .expect("answers");
+        let staged = stage(
+            &fixture.tree,
+            &mut fixture.state,
+            &touching_marker(),
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect("answers");
 
         assert_eq!(
             staged,

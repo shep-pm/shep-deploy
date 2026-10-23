@@ -4,26 +4,29 @@
 use std::fs;
 
 use crate::deploy::test_support::{
-    FLOCKFILE, Fixture, RECLAIMED, Shepherd, fixture_before_any_release, install_release,
+    Fixture, RECLAIMED, Shepherd, fixture_before_any_release, install_release,
 };
 use crate::deploy::{Outcome, deploy, unattended};
+use crate::paths::Tree;
 use crate::state::State;
 use crate::{fixtures, git, swap};
 
-const RELOAD: &str = "[dog.deploy.reload]\npaths = [\"cmd/voting\"]\n";
+/// The `reload` setting of a sheep that runs from `cmd/voting` alone.
+const RELOAD: &str = "reload = ['cmd/voting']\n";
 
-/// A target already serving a release whose Flockfile declares
-/// `cmd/voting` as the only path it runs from.
+/// A shepherd that holds [`RELOAD`] as the sheep's settings.
+fn declaring_reload_paths() -> Shepherd {
+    Shepherd::ready().with_settings(RELOAD)
+}
+
+/// A target already serving a release, in a repository with `cmd/voting` and
+/// `cmd/bot` in it.
 fn fixture_declaring_reload_paths() -> Fixture {
     let mut fixture = fixture_before_any_release();
     fixtures::commit(
         fixture.origin.path(),
-        &[
-            ("Flockfile.toml", &format!("{FLOCKFILE}\n{RELOAD}")),
-            ("cmd/voting/main.go", "1"),
-            ("cmd/bot/main.go", "1"),
-        ],
-        "declare reload paths",
+        &[("cmd/voting/main.go", "1"), ("cmd/bot/main.go", "1")],
+        "add the paths",
     );
     git::fetch(
         &fixture.tree.git(),
@@ -57,7 +60,7 @@ async fn an_unattended_deploy_skips_a_push_outside_the_paths() {
     let live = swap::resolve(&fixture.tree.current()).expect("resolves");
     let before = State::read(&fixture.tree.state_file()).expect("reads");
     let pushed = push(&fixture, &[("cmd/bot/main.go", "2")]);
-    let shepherd = Shepherd::ready();
+    let shepherd = declaring_reload_paths();
 
     let outcome = unattended(
         &shepherd,
@@ -93,7 +96,7 @@ async fn a_deploy_by_name_does_not_skip() {
     let pushed = push(&fixture, &[("cmd/bot/main.go", "2")]);
 
     let outcome = deploy(
-        &Shepherd::ready(),
+        &declaring_reload_paths(),
         &fixture.tree,
         &mut fixture.state,
         &fixtures::dog_config(),
@@ -113,7 +116,7 @@ async fn a_skipped_push_counts_toward_the_next_real_one() {
     let config = fixtures::dog_config();
     let skipped = push(&fixture, &[("cmd/bot/main.go", "2")]);
     let first = unattended(
-        &Shepherd::ready(),
+        &declaring_reload_paths(),
         &fixture.tree,
         &mut fixture.state,
         &config,
@@ -129,7 +132,7 @@ async fn a_skipped_push_counts_toward_the_next_real_one() {
 
     let real = push(&fixture, &[("cmd/voting/main.go", "2")]);
     let second = unattended(
-        &Shepherd::ready(),
+        &declaring_reload_paths(),
         &fixture.tree,
         &mut fixture.state,
         &config,
@@ -155,7 +158,7 @@ async fn a_failure_to_decide_deploys_as_before() {
     let pushed = push(&fixture, &[("cmd/bot/main.go", "2")]);
     fixture.state.deployed = Some(RECLAIMED.to_owned());
     let outcome = unattended(
-        &Shepherd::ready(),
+        &declaring_reload_paths(),
         &fixture.tree,
         &mut fixture.state,
         &fixtures::dog_config(),
@@ -164,15 +167,11 @@ async fn a_failure_to_decide_deploys_as_before() {
     .expect("completes");
     assert_eq!(outcome, Outcome::Deployed { sha: pushed });
 
-    // The live release has no Flockfile to read the paths from.
+    // A pathspec git rejects.
     let mut fixture = fixture_declaring_reload_paths();
     let pushed = push(&fixture, &[("cmd/bot/main.go", "2")]);
-    let live = swap::resolve(&fixture.tree.current())
-        .expect("resolves")
-        .expect("a live release");
-    fs::remove_file(live.join("Flockfile.toml")).expect("remove");
     let outcome = unattended(
-        &Shepherd::ready(),
+        &Shepherd::ready().with_settings("reload = [':(bogus)cmd']\n"),
         &fixture.tree,
         &mut fixture.state,
         &fixtures::dog_config(),
@@ -180,4 +179,63 @@ async fn a_failure_to_decide_deploys_as_before() {
     .await
     .expect("completes");
     assert_eq!(outcome, Outcome::Deployed { sha: pushed });
+}
+
+/// A second sheep, `name`, on the same repository and `$SHEP_HOME` as
+/// `fixture`'s, serving the same release.
+fn another_sheep(fixture: &Fixture, name: &str) -> (Tree, State) {
+    let tree = Tree::for_sheep(fixture.home.path(), name);
+    std::fs::create_dir_all(tree.git()).expect("create git dir");
+    fixtures::run_git(&tree.git(), &["init", "-q", "--bare"]);
+    git::fetch(
+        &tree.git(),
+        &fixture.state.remote,
+        "main",
+        fixtures::TEST_BUDGET,
+    )
+    .expect("fetch");
+    fixture
+        .state
+        .write(&tree.state_file())
+        .expect("deploy.toml");
+    (tree, fixture.state.clone())
+}
+
+/// fails if one sheep's `reload` list is applied to another: two sheep built
+/// from one repository each name their own paths, and a push to one's must
+/// not reload the other.
+#[tokio::test(start_paused = true)]
+async fn two_sheep_with_different_reload_lists_deploy_only_the_one_the_push_touches() {
+    let mut voting = fixture_declaring_reload_paths();
+    let (bot_tree, mut bot_state) = another_sheep(&voting, "bot");
+    let pushed = push(&voting, &[("cmd/voting/main.go", "2")]);
+    let voting_daemon = Shepherd::ready().with_settings("reload = ['cmd/voting']\n");
+    let bot_daemon = Shepherd::ready().with_settings("reload = ['cmd/bot']\n");
+
+    let voting_outcome = unattended(
+        &voting_daemon,
+        &voting.tree,
+        &mut voting.state,
+        &fixtures::dog_config(),
+    )
+    .await
+    .expect("completes");
+    let bot_outcome = unattended(
+        &bot_daemon,
+        &bot_tree,
+        &mut bot_state,
+        &fixtures::dog_config(),
+    )
+    .await
+    .expect("completes");
+
+    assert_eq!(
+        voting_outcome,
+        Outcome::Deployed {
+            sha: pushed.clone()
+        }
+    );
+    assert_eq!(bot_outcome, Outcome::Skipped { sha: pushed });
+    assert_eq!(voting_daemon.reload_count(), 1);
+    assert_eq!(bot_daemon.reload_count(), 0);
 }

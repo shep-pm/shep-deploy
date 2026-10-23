@@ -83,19 +83,13 @@ fn a_failing_build_leaves_the_previous_release_serving() {
     let first = build_tree(shepherd.home(), "web", origin.path());
     write_state(shepherd.home(), "web", origin.path(), &first, "probed");
 
-    register_web(&shepherd, Readiness::Probe, "");
+    register_web_with_settings(&shepherd, Readiness::Probe, "", "command = 'exit 3'\n");
     wait_until("the first release to come online", || {
         described_pid(&shepherd, "web").is_some()
     });
     let live_pid = described_pid(&shepherd, "web").expect("a pid");
 
-    write_committed_app(
-        origin.path(),
-        shepherd.home(),
-        Readiness::Probe,
-        "",
-        "\n[dog.deploy.build]\ncommand = 'exit 3'\n",
-    );
+    write_run_script(origin.path(), "v2");
     git(origin.path(), &["add", "."]);
     git(origin.path(), &["commit", "-q", "-m", "broken"]);
 

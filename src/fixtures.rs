@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use shep_client::shep_core::config::AppConfig;
 use tempfile::TempDir;
 
 use crate::config::DogConfig;
@@ -251,7 +252,7 @@ pub fn checkout(files: &[(&str, &str)]) -> TempDir {
 ///     async fn set_smit(&self, sheep: &str, text: &str) -> Result<(), Error> { .. }
 ///
 ///     fixtures::daemon_methods!(unimplemented;
-///         dog_config, list_flock, describe, start, delete, reload, restart, save_roll,
+///         dog_config, list_flock, describe, start, delete, reload, restart, save_roll, sheep_config,
 ///     );
 /// }
 /// ```
@@ -311,6 +312,14 @@ macro_rules! daemon_methods {
             $body
         }
     };
+    (@method sheep_config, $body:expr) => {
+        async fn sheep_config(
+            &self,
+            _sheep: &str,
+        ) -> Result<shep_client::shep_core::config::AppConfig, crate::error::Error> {
+            $body
+        }
+    };
     (@method set_smit, $body:expr) => {
         async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), crate::error::Error> {
             $body
@@ -328,6 +337,32 @@ macro_rules! daemon_methods {
 }
 
 pub(crate) use daemon_methods;
+
+/// A sheep named `sheep` as the shepherd would hold it: a script and no
+/// `[app.dogs.deploy]` table.
+///
+/// # Panics
+/// Never in practice: the JSON is written here.
+#[track_caller]
+pub fn app_named(sheep: &str) -> AppConfig {
+    serde_json::from_value(serde_json::json!({ "name": sheep, "script": "./run.sh" }))
+        .expect("an app")
+}
+
+/// [`app_named`] carrying `settings` as its `[app.dogs.deploy]` table, in TOML.
+///
+/// # Panics
+/// If `settings` is not a TOML table.
+#[track_caller]
+pub fn app_with_settings(sheep: &str, settings: &str) -> AppConfig {
+    let table: serde_json::Value = toml::from_str(settings).expect("settings are TOML");
+    serde_json::from_value(serde_json::json!({
+        "name": sheep,
+        "script": "./run.sh",
+        "dogs": { "deploy": table },
+    }))
+    .expect("an app with settings")
+}
 
 /// A bare throwaway directory, for tests that need a path rather than a
 /// populated release.
@@ -422,7 +457,7 @@ impl Daemon for Sections {
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        list_flock, describe, start, delete, reload, restart, save_roll, set_smit,
+        list_flock, describe, start, delete, reload, restart, save_roll, sheep_config, set_smit,
     );
 }
 

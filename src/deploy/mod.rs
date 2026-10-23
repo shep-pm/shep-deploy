@@ -69,8 +69,9 @@ use crate::config::DogConfig;
 use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::paths::Tree;
+use crate::settings::Settings;
 use crate::state::State;
-use crate::{git, linkcheck, lock, shared, skip, swap};
+use crate::{git, linkcheck, lock, settings, shared, skip, swap};
 
 use record::record_landing;
 
@@ -100,7 +101,7 @@ pub enum Outcome {
         /// Why the new release was rejected.
         why: String,
     },
-    /// The branch moved, but nothing under the target's `[dog.deploy.reload]`
+    /// The branch moved, but nothing under the target's the sheep's `reload`
     /// paths changed, so nothing was built or reloaded and the record is as it
     /// was. Only [`unattended`] answers this.
     Skipped {
@@ -215,7 +216,7 @@ pub async fn deploy<D: Daemon>(
 /// auto-rollback and retention - is the same code.
 ///
 /// A branch that moved without touching anything the live release's
-/// `[dog.deploy.reload]` paths name is [`Outcome::Skipped`]: nothing is
+/// the sheep's `reload` paths name is [`Outcome::Skipped`]: nothing is
 /// checked out, built or reloaded, and the record is not written, so the next
 /// comparison is still against the last sha actually deployed. See
 /// [`crate::skip`]. A failure to decide deploys as if there were no table.
@@ -312,17 +313,19 @@ async fn go<D: Daemon>(
         });
     }
 
+    // Once per deploy, as the Flockfile is, and after the two returns above so
+    // a poll that finds nothing new asks the shepherd for nothing. Returned
+    // rather than recorded: the branch will not move to repair it, so a hold
+    // on this sha would outlive the operator's fix.
+    let settings = settings::read(daemon, sheep).await?;
+
     // After the hold, so a sha that already failed is still said once rather
     // than judged again, and only for the poll loop: a hand deploy means now.
-    // `started_at` is the live release, whose Flockfile names the paths.
-    if held == Held::Hold
-        && let Some(live) = &started_at
-        && skip::nothing_changed(tree, state, live, &head).await
-    {
+    if held == Held::Hold && skip::nothing_changed(tree, state, &settings.reload, &head).await {
         return Ok(Outcome::Skipped { sha: head });
     }
 
-    let outcome = attempt(daemon, tree, state, &head, started_at, config).await;
+    let outcome = attempt(daemon, tree, state, &head, started_at, &settings, config).await;
     record(tree, state, &head, &outcome, config.retention).await;
     outcome
 }
@@ -340,13 +343,15 @@ async fn attempt<D: Daemon>(
     state: &mut State,
     head: &str,
     started_at: Option<PathBuf>,
+    settings: &Settings,
     config: &DogConfig,
 ) -> Result<Outcome, Error> {
     let sheep = tree.sheep();
     let release = tree.release(head);
     let staged = {
         let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
-        shared::off_thread(move || stage_release(&tree, &checkout, &head)).await?
+        let settings = settings.clone();
+        shared::off_thread(move || stage_release(&tree, &checkout, &head, &settings)).await?
     };
     refuse_ungated_verification(sheep, &staged.app, state.verify)?;
     let snapshot = linkcheck::Snapshot::before(sheep, &release, &staged.linked);
@@ -375,13 +380,14 @@ async fn attempt<D: Daemon>(
 mod tests {
     mod hooks;
     mod retarget;
+    mod settings;
     mod skip;
 
     use std::fs;
 
     use crate::deploy::test_support::{
-        FLOCKFILE, Shepherd, commit_on_origin, fixture_before_any_release,
-        fixture_with_previous_release, test_config_keeping,
+        Shepherd, commit_on_origin, fixture_before_any_release, fixture_with_previous_release,
+        test_config_keeping,
     };
     use crate::error::Error;
     use crate::state::State;
@@ -425,24 +431,12 @@ mod tests {
     #[tokio::test]
     async fn attempt_behaves_as_before_after_the_split() {
         let mut fixture = fixture_with_previous_release();
-        fs::write(
-            fixture.origin.path().join("Flockfile.toml"),
-            format!("{FLOCKFILE}\n[dog.deploy.build]\ncommand = 'echo build >> order.txt'\n"),
-        )
-        .expect("write Flockfile");
-        fs::write(
-            fixture.origin.path().join(".gitignore"),
-            format!("{}\n", crate::flockfile::OVERRIDE),
-        )
-        .expect("write .gitignore");
-        fs::write(
-            fixture.origin.path().join(crate::flockfile::OVERRIDE),
-            "[dog.deploy.release]\ncommand = 'echo release >> order.txt'\n\
-             [dog.deploy.after]\ncommand = 'echo after >> order.txt'\n",
-        )
-        .expect("write override");
         let second = commit_on_origin(&fixture, "second.txt");
-        let daemon = Shepherd::ready();
+        let daemon = Shepherd::ready().with_settings(
+            "command = 'echo build >> order.txt'\n\
+             [release]\ncommand = 'echo release >> order.txt'\n\
+             [after]\ncommand = 'echo after >> order.txt'\n",
+        );
 
         let outcome = deploy(
             &daemon,
@@ -681,15 +675,10 @@ mod tests {
     async fn a_failing_build_never_moves_current() {
         let mut fixture = fixture_with_previous_release();
         let previous = fixture.state.deployed.clone().expect("a previous release");
-        fs::write(
-            fixture.origin.path().join("Flockfile.toml"),
-            format!("{FLOCKFILE}\n[dog.deploy.build]\ncommand = 'exit 3'\n"),
-        )
-        .expect("write Flockfile");
         commit_on_origin(&fixture, "second.txt");
 
         let err = deploy(
-            &Shepherd::ready(),
+            &Shepherd::ready().with_settings("command = 'exit 3'\n"),
             &fixture.tree,
             &mut fixture.state,
             &fixtures::dog_config(),
@@ -772,15 +761,9 @@ mod tests {
     async fn a_current_that_moved_during_the_build_is_not_swapped_over() {
         let mut fixture = fixture_with_previous_release();
         let previous = fixture.state.deployed.clone().expect("a previous release");
-        fs::write(
-            fixture.origin.path().join("Flockfile.toml"),
-            format!(
-                "{FLOCKFILE}\n[dog.deploy.build]\ncommand = 'ln -sfn \"$PWD\" ../../current'\n"
-            ),
-        )
-        .expect("write Flockfile");
         commit_on_origin(&fixture, "second.txt");
-        let daemon = Shepherd::never_ready();
+        let daemon =
+            Shepherd::never_ready().with_settings("command = 'ln -sfn \"$PWD\" ../../current'\n");
 
         let err = deploy(
             &daemon,

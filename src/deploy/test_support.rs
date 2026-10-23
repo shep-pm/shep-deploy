@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use shep_client::RequestError;
+use shep_client::shep_core::config::AppConfig;
 use shep_client::shep_core::protocol::{ProcessInfo, RpcError, RpcErrorCode};
 use shep_client::shep_core::status::ProcStatus;
 use tempfile::TempDir;
@@ -226,6 +227,9 @@ pub(crate) struct Shepherd {
     /// Counted only so [`Self::flapping`] has something to move with.
     describes: Cell<u32>,
     reloads: Cell<u32>,
+    /// The sheep's `[app.dogs.deploy]` table, in TOML, or `None` for a sheep
+    /// registered without one.
+    settings: Option<String>,
 }
 
 /// The pid serving before any reload. Any other value would do; this
@@ -256,6 +260,16 @@ impl Shepherd {
             turnover_after: 0,
             describes: Cell::new(0),
             reloads: Cell::new(0),
+            settings: None,
+        }
+    }
+
+    /// The same shepherd, holding `settings` as the sheep's
+    /// `[app.dogs.deploy]` table.
+    pub(crate) fn with_settings(self, settings: &str) -> Self {
+        Self {
+            settings: Some(settings.to_owned()),
+            ..self
         }
     }
 
@@ -500,6 +514,12 @@ impl Shepherd {
 }
 
 impl Daemon for Shepherd {
+    async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
+        Ok(match &self.settings {
+            Some(settings) => fixtures::app_with_settings(sheep, settings),
+            None => fixtures::app_named(sheep),
+        })
+    }
     async fn describe(&self, sheep: &str) -> Result<Vec<ProcessInfo>, Error> {
         // `exists()` follows the link, and this one dangles on purpose,
         // so ask about the link itself or every poll plants it again.

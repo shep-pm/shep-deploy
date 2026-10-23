@@ -47,28 +47,32 @@ binary on disk has moved ahead of the process still running.
 
 ## Telling it how to build
 
-The build command lives in the deployed repository's own Flockfile, under the
-table shep keeps for a dog's config:
+The build command is a setting of the sheep, in the `[app.dogs.deploy]` table
+of its config. shep stores that table with the sheep when you register it and
+hands it to this dog, which asks the shepherd for it once per deploy:
 
 ```toml
 [[app]]
 name = "web"
 script = "server.js"
 
-[dog.deploy.build]
+[app.dogs.deploy]
 command = "npm ci && npm run build"
 artifacts = ["dist/bundle.js"]
 ```
 
-shep reads nothing under `dog` and validates none of it. It only had to stop
-refusing the document for carrying it, which it does as of 0.1.10, so the same
-Flockfile now registers with `shep start` and tells this dog how to build.
+- `command` runs through `sh -c` inside the release. No `command`, or no table
+  at all, is no build.
+- `artifacts` are paths, relative to the release, to copy back in after the
+  build.
+- An unknown key is refused by name, with the sheep's: a typo would otherwise
+  be a build that never runs.
 
-That is a change from earlier versions, which put the block at the top level as
-`[build]`. shep refused a Flockfile with an unknown top-level key, so an
-operator following these instructions could not register their app at all. A
-top-level `[build]` is now refused here by name, pointing at the new spelling,
-rather than ignored and silently building nothing.
+The release's own Flockfile is not consulted for any of this. Whoever can land
+a commit on the tracked branch chooses what is in it, so a `[dog.deploy.build]`
+there is ignored, and so is `[dog.deploy.reload]`, `[dog.deploy.release]` and
+`[dog.deploy.after]`. The same Flockfile can be several sheep, each with its own
+table.
 
 ## Running a migration before the swap
 
@@ -78,16 +82,15 @@ otherwise has to end the build command: its password then reaches every script
 the build runs, and its output sits unlabelled in the build log.
 
 ```toml
-[dog.deploy.release]
+[app.dogs.deploy.release]
 command = "supabase db push"
 env = { SUPABASE_DB_PASSWORD = "..." }
 ```
 
-- It belongs in `Flockfile.override.toml`, which is yours. A committed
-  `Flockfile.toml`, or an override the dog did not link in from your checkout,
-  that carries `[dog.deploy.release]` is refused by file and table: the hook's
-  `env` holds your secrets, and a commit must not choose the command that
-  receives them. `[dog.deploy.after]` is refused the same way.
+- It is a key of the sheep's `[app.dogs.deploy]` table, which is yours: the
+  hook's `env` holds your secrets, and a commit must not choose the command that
+  receives them. A release's own Flockfile cannot set it. `[app.dogs.deploy.after]`
+  is read the same way.
 - It runs in the release, as the app's `user`, through `sh -c`, with the build's
   cleared environment: the base set, the dog's `passthrough`, then the hook's
   own `env`. The dog sets `SHEP_DEPLOY_SHEEP`, `SHEP_DEPLOY_SHA` and
@@ -114,26 +117,24 @@ target that lists the paths it runs from is left alone by a push that changes
 none of them:
 
 ```toml
-[dog.deploy.reload]
-paths = ["cmd/voting", "internal/voting", "pkg", "go.mod"]
+[app.dogs.deploy]
+reload = ["cmd/voting", "internal/voting", "pkg", "go.mod"]
 ```
 
 - Entries are git pathspecs. A directory name matches everything under it, and
   a glob such as `assets/*.png` works too.
-- `Flockfile.toml` always counts, so a push that edits the table deploys.
-- The paths come from the release that is live now, not from the new commit.
-  A push that changes the table is still judged by the old one, and it deploys
-  because `Flockfile.toml` changed.
-- No table, or `paths = []`, deploys every new sha, as before. An unknown key is
-  refused by name.
+- Each sheep has its own list, so two sheep built from one repository are
+  judged separately by the same push.
+- `Flockfile.toml` is not a path unless you list it.
+- No `reload`, or `reload = []`, deploys every new sha, as before.
 - A skipped push costs a fetch and a diff: no checkout, build or reload, and
   `deploy.toml` is not written. The log says `<sheep> skipped <sha>, nothing
   under its reload paths changed`. It is said once, then again about once an
   hour while the same push stays skipped, and at once when the branch moves.
 - The next push is compared with the last sha that was deployed, not with the
   one skipped, so a skipped push's changes still count toward it.
-- If the dog cannot tell (the deployed sha is gone from its clone, the live
-  Flockfile is unreadable, git fails) it deploys and says why.
+- If the dog cannot tell (the deployed sha is gone from its clone, a pathspec
+  git refuses, git fails) it deploys and says why.
 - `shep-deploy deploy <sheep>` by hand never skips. It is you asking for a
   deploy now.
 
@@ -144,13 +145,13 @@ swapped in, verified and recorded. A build cannot do this work: it runs before
 the swap, so a purge from the build refills from the old release.
 
 ```toml
-[dog.deploy.after]
+[app.dogs.deploy.after]
 command = "nginx -s reload && ./purge-cloudflare.sh"
 env = { CLOUDFLARE_API_TOKEN = "...", CLOUDFLARE_ZONE_ID = "..." }
 ```
 
-- It is set in `Flockfile.override.toml` and refused anywhere else, as the
-  release hook is.
+- It is set in the sheep's `[app.dogs.deploy]` table and read from nowhere
+  else, as the release hook is.
 - It runs in the new release, as the app's `user`, through `sh -c`, with the
   release hook's environment. `SHEP_DEPLOY_SHEEP`, `SHEP_DEPLOY_SHA` and
   `SHEP_DEPLOY_RELEASE` name the sheep, the new sha and the release's absolute
@@ -181,7 +182,7 @@ env = { CLOUDFLARE_API_TOKEN = "...", CLOUDFLARE_ZONE_ID = "..." }
    that begins with `!`, as in `.gitignore`. A glob, a bare `!` negation, any
    other backslash escape or a `..` is refused by name rather than matched
    against nothing. A linked path that has a `node_modules`, `.output`, `dist`
-   or `.next` component, or that overlaps a `build.artifacts` entry, is named
+   or `.next` component, or that overlaps an `artifacts` entry, is named
    in a warning on stderr each deploy; add it to `.shepignore` to stop
    linking it. A linked file whose length or modified time, or a linked
    directory whose own modified time, changed during the build is named too,
@@ -585,11 +586,10 @@ its own uid: `user` and `group`, an `exec` probe (the daemon runs it through
 `sh -c`, forever, ignoring `user`), `out_file` and `err_file` (the daemon
 opens and `shep flush` truncates them), an `http` or `tcp` probe whose target
 is not loopback (the daemon makes the connection), and `watch` (the daemon
-walks the working directory as itself, following symlinks). It is also refused
-for carrying `[dog.deploy.release]` or `[dog.deploy.after]`, because a hook's
-`env` holds your secrets and a commit must not choose the command that receives
-them. Every one of them stays available in `Flockfile.override.toml`, which is
-yours.
+walks the working directory as itself, following symlinks). Every one of them
+stays available in `Flockfile.override.toml`, which is yours. The build command,
+the hooks and the reload paths are not in the release at all: they come from the
+sheep's `[app.dogs.deploy]` table, so a commit cannot choose them.
 
 Set `user` on the app and the build drops to that user's uid and primary group,
 with the shepherd's supplementary groups cleared, before it runs anything. A
@@ -613,7 +613,7 @@ operator's, not a deploy dog's.
 
 A build starts from a cleared environment, not this process's. It gets `PATH`,
 `HOME`, `LANG`, `LC_ALL` and `TZ`, whatever `passthrough` names in
-`[deploy]` in `dogs.toml`, and the release's own `[dog.deploy.build] env`.
+`[deploy]` in `dogs.toml`.
 Nothing else. Dropping uid and gid bounds what a build can touch; it does
 nothing about what it can read out of its own environment, because those values
 are copied in before the drop happens. A dog started with a registry token in
@@ -631,13 +631,12 @@ unread, and a parse error names a line number and never quotes the line. Your
 `Flockfile.override.toml` is the one file that is followed through its link,
 because this dog made that link.
 
-`build.artifacts` may only name paths that really land inside the release or
+`artifacts` may only name paths that really land inside the release or
 the dog's own build cache, resolved rather than spelled. A `..`, an absolute
 path, a committed symlink, or a `CARGO_TARGET_DIR` pointing elsewhere are all
 refused. That is narrower than it was: a build whose output genuinely lands
 outside both is no longer copyable, because the copy runs in the dog's own
-process at its own uid, and the `[dog.deploy.build]` block naming the path
-comes from the deployed repository rather than from you.
+process at its own uid.
 
 **What the allowlist does not cover, and cannot.** Your project's own secrets
 are not in the dog's environment, they are in your repository's working tree. A

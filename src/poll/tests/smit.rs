@@ -50,6 +50,9 @@ impl Daemon for SmitRecording {
     async fn save_roll(&self) -> Result<PathBuf, Error> {
         self.ready.save_roll().await
     }
+    async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
+        self.ready.sheep_config(sheep).await
+    }
     async fn set_smit(&self, sheep: &str, text: &str) -> Result<(), Error> {
         self.smits
             .borrow_mut()
@@ -69,6 +72,9 @@ impl Daemon for RefusingSmits {
     }
     async fn reload(&self, sheep: &str) -> Result<(), Error> {
         self.0.reload(sheep).await
+    }
+    async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
+        self.0.sheep_config(sheep).await
     }
     async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), Error> {
         Err(Error::Request(RequestError::Rpc(RpcError {
@@ -94,6 +100,9 @@ impl Daemon for RefusingRepaints {
     }
     async fn reload(&self, sheep: &str) -> Result<(), Error> {
         self.0.reload(sheep).await
+    }
+    async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
+        self.0.sheep_config(sheep).await
     }
     async fn set_smit(&self, sheep: &str, text: &str) -> Result<(), Error> {
         if self.0.smits().is_empty() {

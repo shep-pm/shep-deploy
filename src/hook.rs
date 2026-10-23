@@ -1,5 +1,5 @@
-//! The release and after hooks: commands the operator names in their own
-//! `Flockfile.override.toml`. The release hook runs once per deploy after the
+//! The release and after hooks: commands the operator names in the sheep's
+//! `[app.dogs.deploy]` table. The release hook runs once per deploy after the
 //! build and before `current` is swapped; the after hook runs once the new
 //! release is swapped in, verified and recorded.
 //!
@@ -9,18 +9,19 @@
 //! its own `env`, its own line in the log and its own failure.
 //!
 //! ```toml
-//! [dog.deploy.release]
+//! [app.dogs.deploy.release]
 //! command = "supabase db push"
 //! env = { SUPABASE_DB_PASSWORD = "..." }
 //! ```
 //!
 //! ```toml
-//! [dog.deploy.after]
+//! [app.dogs.deploy.after]
 //! command = "purge-cache"
 //! env = { CLOUDFLARE_API_TOKEN = "..." }
 //! ```
 //!
-//! The tables are the operator's alone, see [`refuse_repo_hooks`]. A failing
+//! The tables are the operator's alone: they are read from the shepherd's
+//! record of the sheep, never from a release. See [`crate::settings`]. A failing
 //! release hook stops the deploy before the swap exactly as a failing build
 //! does. A failing after hook changes nothing: the release is already live.
 
@@ -31,14 +32,12 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use tokio::process::Command;
-use toml::Value;
 
 use crate::build::env;
 use crate::build::privilege::{Step, root_warning};
 use crate::build::runner;
 use crate::build::{drop_to, settle_pointer};
 use crate::error::Error;
-use crate::shared::printable;
 
 /// A hook's command and the environment it alone receives.
 ///
@@ -71,10 +70,10 @@ impl fmt::Debug for HookSpec {
 /// Every hook a release's Flockfile declares.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Hooks {
-    /// Runs after the build and before the swap: `[dog.deploy.release]`.
+    /// Runs after the build and before the swap: `[app.dogs.deploy.release]`.
     pub release: HookSpec,
     /// Runs once the new release is swapped in, verified and recorded:
-    /// `[dog.deploy.after]`.
+    /// `[app.dogs.deploy.after]`.
     pub after: HookSpec,
 }
 
@@ -212,193 +211,9 @@ async fn run_named(
     })
 }
 
-/// The tables under `[dog.deploy]` that carry an operator's command.
-const OPERATOR_TABLES: [&str; 2] = ["release", "after"];
-
-/// The table `name` under `[dog.deploy]` in `doc`, whatever its shape.
-pub(crate) fn deploy_table<'a>(doc: &'a Value, name: &str) -> Option<&'a Value> {
-    doc.as_table()?
-        .get("dog")?
-        .as_table()?
-        .get("deploy")?
-        .as_table()?
-        .get(name)
-}
-
-/// Refuses a document the repository could have written that carries a hook.
-///
-/// `file` names the document for the message. Called on the committed
-/// `Flockfile.toml` always, and on `Flockfile.override.toml` unless the dog
-/// linked it in from the operator's checkout: a hook's `env` holds the
-/// operator's secrets, and a commit must not choose the command that receives
-/// them.
-///
-/// # Errors
-/// [`Error::Config`] naming `file` and the table, for the first of
-/// `[dog.deploy.release]` and `[dog.deploy.after]` that `doc` has.
-pub(crate) fn refuse_repo_hooks(doc: &Value, file: &str) -> Result<(), Error> {
-    for name in OPERATOR_TABLES {
-        if deploy_table(doc, name).is_some() {
-            return Err(Error::Config(format!(
-                "{file} sets `[dog.deploy.{name}]`: a hook's env holds the operator's secrets, \
-                 and a commit must not choose the command that receives them. Set it in the \
-                 Flockfile.override.toml in the operator's checkout instead - it is gitignored \
-                 and never comes from the repo."
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// The hooks in the merged document `doc`, read from `release`'s Flockfiles.
-///
-/// # Errors
-/// [`Error::Config`] naming `release` if `[dog.deploy.release]` or
-/// `[dog.deploy.after]` does not match [`HookSpec`]'s schema: an unknown key,
-/// or a value of the wrong type.
-pub(crate) fn parse(doc: &Value, release: &Path) -> Result<Hooks, Error> {
-    Ok(Hooks {
-        release: parse_table(doc, RELEASE, release)?,
-        after: parse_table(doc, AFTER, release)?,
-    })
-}
-
-/// The hook under `[dog.deploy.{name}]` in `doc`, or the no-op if absent.
-fn parse_table(doc: &Value, name: &str, release: &Path) -> Result<HookSpec, Error> {
-    let Some(table) = deploy_table(doc, name) else {
-        return Ok(HookSpec::default());
-    };
-    table.clone().try_into().map_err(|source: toml::de::Error| {
-        Error::Config(format!(
-            "{}: `[dog.deploy.{name}]` does not match the hook schema: {}",
-            release.display(),
-            printable(source.message())
-        ))
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-    use crate::flockfile::{self, OVERRIDE};
-    use crate::shared::FromCheckout;
-
-    const APP: &str = "[[app]]\nname = \"web\"\nscript = \"./run\"\n";
-    const RELEASE_HOOK: &str = "[dog.deploy.release]\ncommand = \"true\"\n";
-    const AFTER_HOOK: &str = "[dog.deploy.after]\ncommand = \"true\"\n";
-
-    fn release_with(committed: &str, committed_override: Option<&str>) -> tempfile::TempDir {
-        let rel = tempfile::tempdir().expect("tempdir");
-        std::fs::write(rel.path().join("Flockfile.toml"), committed).expect("committed");
-        if let Some(text) = committed_override {
-            std::fs::write(rel.path().join(OVERRIDE), text).expect("override");
-        }
-        rel
-    }
-
-    /// fails if a commit can choose the command that receives the operator's
-    /// secrets.
-    #[test]
-    fn a_committed_release_hook_is_refused() {
-        let rel = release_with(&format!("{APP}{RELEASE_HOOK}"), None);
-
-        let err = flockfile::read(rel.path(), &FromCheckout::of(vec![])).expect_err("refused");
-
-        let shown = err.to_string();
-        assert!(matches!(err, Error::Config(_)), "{shown}");
-        assert!(shown.contains("Flockfile.toml"), "{shown}");
-        assert!(shown.contains("[dog.deploy.release]"), "{shown}");
-    }
-
-    /// fails if a commit can choose the command that runs after the swap.
-    #[test]
-    fn a_committed_after_hook_is_refused() {
-        let rel = release_with(&format!("{APP}{AFTER_HOOK}"), None);
-
-        let err = flockfile::read(rel.path(), &FromCheckout::of(vec![])).expect_err("refused");
-
-        let shown = err.to_string();
-        assert!(shown.contains("Flockfile.toml"), "{shown}");
-        assert!(shown.contains("[dog.deploy.after]"), "{shown}");
-    }
-
-    /// fails if a repository can supply its own `Flockfile.override.toml` and
-    /// have a hook honoured: only a file the dog linked in from the operator's
-    /// checkout is theirs.
-    #[test]
-    fn an_override_the_dog_did_not_link_is_refused_a_hook() {
-        let rel = release_with(APP, Some(RELEASE_HOOK));
-
-        let err = flockfile::read(rel.path(), &FromCheckout::of(vec![])).expect_err("refused");
-
-        let shown = err.to_string();
-        assert!(shown.contains(OVERRIDE), "{shown}");
-        assert!(shown.contains("[dog.deploy.release]"), "{shown}");
-    }
-
-    /// fails if the operator loses the one place a hook may be set.
-    #[test]
-    fn the_operators_override_may_set_a_release_hook() {
-        let rel = release_with(APP, None);
-        let checkout = tempfile::tempdir().expect("checkout");
-        std::fs::write(
-            checkout.path().join(OVERRIDE),
-            "[dog.deploy.release]\ncommand = \"supabase db push\"\n\
-             env = { SUPABASE_DB_PASSWORD = \"hunter2\" }\n",
-        )
-        .expect("the operator's override");
-        std::os::unix::fs::symlink(checkout.path().join(OVERRIDE), rel.path().join(OVERRIDE))
-            .expect("linked in");
-
-        let merged = flockfile::read(rel.path(), &FromCheckout::of(vec![PathBuf::from(OVERRIDE)]))
-            .expect("the operator may set a hook");
-        let hooks = merged.hooks().expect("parses");
-
-        assert_eq!(hooks.release.command.as_deref(), Some("supabase db push"));
-        assert_eq!(
-            hooks
-                .release
-                .env
-                .get("SUPABASE_DB_PASSWORD")
-                .map(String::as_str),
-            Some("hunter2")
-        );
-    }
-
-    /// fails if the operator's `[dog.deploy.after]` is not read into `after`,
-    /// or leaks into `release`.
-    #[test]
-    fn an_after_hook_parses_from_the_operators_override() {
-        let doc: Value = "[dog.deploy.after]\ncommand = \"purge-cache\"\n\
-                          env = { CF_TOKEN = \"hunter2\" }\n"
-            .parse()
-            .expect("toml");
-
-        let hooks = parse(&doc, Path::new("/srv/web/releases/abc")).expect("parses");
-
-        assert_eq!(hooks.after.command.as_deref(), Some("purge-cache"));
-        assert_eq!(
-            hooks.after.env.get("CF_TOKEN").map(String::as_str),
-            Some("hunter2")
-        );
-        assert_eq!(hooks.release, HookSpec::default());
-    }
-
-    /// fails if a typo in the after hook's key becomes a hook that never runs.
-    #[test]
-    fn an_unknown_after_hook_key_is_refused() {
-        let doc: Value = "[dog.deploy.after]\ncommnd = \"true\"\n"
-            .parse()
-            .expect("toml");
-
-        let err = parse(&doc, Path::new("/srv/web/releases/abc")).expect_err("unknown key");
-
-        let shown = err.to_string();
-        assert!(shown.contains("commnd"), "{shown}");
-        assert!(shown.contains("[dog.deploy.after]"), "{shown}");
-    }
 
     const TEST_BUDGET: Duration = Duration::from_secs(60);
 
@@ -594,32 +409,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         true
-    }
-
-    /// fails if a typo in a hook's key becomes a hook that silently never
-    /// runs.
-    #[test]
-    fn an_unknown_hook_key_is_refused() {
-        let doc: Value = "[dog.deploy.release]\ncommnd = \"true\"\n"
-            .parse()
-            .expect("toml");
-
-        let err = parse(&doc, Path::new("/srv/web/releases/abc")).expect_err("unknown key");
-
-        let shown = err.to_string();
-        assert!(shown.contains("commnd"), "{shown}");
-        assert!(shown.contains("[dog.deploy.release]"), "{shown}");
-    }
-
-    /// fails if a Flockfile without a hook is anything but the no-op.
-    #[test]
-    fn an_absent_hook_block_is_the_default() {
-        let doc: Value = APP.parse().expect("toml");
-
-        let hooks = parse(&doc, Path::new("/srv/web/releases/abc")).expect("parses");
-
-        assert_eq!(hooks, Hooks::default());
-        assert_eq!(hooks.release.command, None);
     }
 
     /// fails if `Debug` prints a hook's env values.

@@ -92,16 +92,14 @@ pub fn probe_toml(home: &Path) -> String {
 /// one is refused, and the override is where an operator puts theirs. The
 /// deploy links the ignored override in from the checkout, which for these
 /// fixtures is `dir` itself, and honours the probe from there.
-///
-/// `tail` is appended after the app table, for a `[dog.deploy.build]` block.
-pub fn write_committed_app(dir: &Path, home: &Path, readiness: Readiness, extra: &str, tail: &str) {
+pub fn write_committed_app(dir: &Path, home: &Path, readiness: Readiness, extra: &str) {
     let gate = match readiness {
         Readiness::Probe => String::new(),
         Readiness::Heuristic(listen) => format!("listen_timeout = \"{listen}s\"\n"),
     };
     fs::write(
         dir.join("Flockfile.toml"),
-        format!("[[app]]\nname = \"web\"\nscript = \"./run.sh\"\n{extra}{gate}{tail}"),
+        format!("[[app]]\nname = \"web\"\nscript = \"./run.sh\"\n{extra}{gate}"),
     )
     .expect("write Flockfile");
     if matches!(readiness, Readiness::Probe) {
@@ -152,7 +150,7 @@ pub fn origin_with_app(
     git(origin.path(), &["init", "-q", "-b", "main"]);
     git(origin.path(), &["config", "user.email", "test@example.com"]);
     git(origin.path(), &["config", "user.name", "test"]);
-    write_committed_app(origin.path(), home, readiness, extra, "");
+    write_committed_app(origin.path(), home, readiness, extra);
     fs::write(origin.path().join("ready-marker"), "").expect("write ready-marker");
     write_run_script(origin.path(), version);
     git(origin.path(), &["add", "."]);
@@ -255,9 +253,32 @@ pub fn write_state(home: &Path, sheep: &str, origin: &Path, sha: &str, verify: &
 /// probe LOOKS at, which is why the probe points through `current` at a
 /// file a release either ships or does not.
 pub fn register_web(shepherd: &Shepherd, readiness: Readiness, extra: &str) {
+    register_web_with_settings(shepherd, readiness, extra, "");
+}
+
+/// [`register_web`] with `settings` as the body of the sheep's
+/// `[app.dogs.deploy]` table, which is where the dog reads its build command
+/// from. The release's Flockfile is not consulted for it.
+pub fn register_web_with_settings(
+    shepherd: &Shepherd,
+    readiness: Readiness,
+    extra: &str,
+    settings: &str,
+) {
     let path = shepherd.home().join("register.toml");
-    fs::write(&path, app_toml(shepherd.home(), true, readiness, extra))
-        .expect("write register.toml");
+    let table = if settings.is_empty() {
+        String::new()
+    } else {
+        format!("\n[app.dogs.deploy]\n{settings}")
+    };
+    fs::write(
+        &path,
+        format!(
+            "{}{table}",
+            app_toml(shepherd.home(), true, readiness, extra)
+        ),
+    )
+    .expect("write register.toml");
     shepherd.ok(&[
         "start",
         path.to_str().expect("utf-8 path"),

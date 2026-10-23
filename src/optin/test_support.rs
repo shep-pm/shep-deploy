@@ -25,30 +25,53 @@ pub(super) struct RollOf<'a>(pub(super) &'a [(&'a str, &'a Path)]);
 
 impl Daemon for RollOf<'_> {
     async fn save_roll(&self) -> Result<PathBuf, Error> {
-        let apps: Vec<String> = self
-            .0
-            .iter()
-            .map(|(name, cwd)| {
-                format!(
-                    "{{\"app\":{{\"name\":{name:?},\"script\":\"./run.sh\",\"cwd\":{:?}}}}}",
-                    cwd.to_str().expect("utf-8 cwd")
-                )
-            })
-            .collect();
-        // Written inside the first checkout rather than into a tempdir
-        // that has to be kept alive past this call and was therefore
-        // never removed, one per `prepare`. The checkout is a test's own
-        // tempdir and goes with it; an untracked file in it is not
-        // ignored, so nothing links it into a release.
-        let (_, cwd) = self.0.first().expect("a roll names at least one sheep");
-        let path = cwd.join(".flock-roll.json");
-        std::fs::write(&path, format!("{{\"apps\":[{}]}}", apps.join(","))).expect("write roll");
-        Ok(path)
+        write_roll(self.0, "")
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, describe, start, delete, reload, restart, set_smit,
+        dog_config, list_flock, describe, start, delete, reload, restart, sheep_config, set_smit,
     );
+}
+
+/// [`RollOf`], for sheep registered with an `[app.dogs.deploy]` whose build
+/// leaves `marker` behind if it ever runs.
+pub(super) struct RollBuilding<'a>(pub(super) &'a [(&'a str, &'a Path)], pub(super) &'a Path);
+
+impl Daemon for RollBuilding<'_> {
+    async fn save_roll(&self) -> Result<PathBuf, Error> {
+        let command = format!("touch {}", self.1.display());
+        write_roll(
+            self.0,
+            &format!(",\"dogs\":{{\"deploy\":{{\"command\":{command:?}}}}}"),
+        )
+    }
+
+    crate::fixtures::daemon_methods!(unimplemented;
+        dog_config, list_flock, describe, start, delete, reload, restart, sheep_config, set_smit,
+    );
+}
+
+/// Writes a roll JSON naming each `(sheep, cwd)` pair, with `extra` spliced
+/// into every app after its `cwd`, and answers with the path.
+fn write_roll(entries: &[(&str, &Path)], extra: &str) -> Result<PathBuf, Error> {
+    let apps: Vec<String> = entries
+        .iter()
+        .map(|(name, cwd)| {
+            format!(
+                "{{\"app\":{{\"name\":{name:?},\"script\":\"./run.sh\",\"cwd\":{:?}{extra}}}}}",
+                cwd.to_str().expect("utf-8 cwd")
+            )
+        })
+        .collect();
+    // Written inside the first checkout rather than into a tempdir
+    // that has to be kept alive past this call and was therefore
+    // never removed, one per `prepare`. The checkout is a test's own
+    // tempdir and goes with it; an untracked file in it is not
+    // ignored, so nothing links it into a release.
+    let (_, cwd) = entries.first().expect("a roll names at least one sheep");
+    let path = cwd.join(".flock-roll.json");
+    std::fs::write(&path, format!("{{\"apps\":[{}]}}", apps.join(","))).expect("write roll");
+    Ok(path)
 }
 
 /// A tempdir that is a git checkout, on branch `main`, with an `origin`
@@ -468,7 +491,7 @@ impl Daemon for CutOverDouble {
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, reload, restart, save_roll, set_smit,
+        dog_config, list_flock, reload, restart, save_roll, sheep_config, set_smit,
     );
 }
 

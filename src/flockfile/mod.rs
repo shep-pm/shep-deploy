@@ -32,24 +32,19 @@
 //! restriction: it is the operator's own file, and pinning `user` or a log
 //! path there is exactly the "pin it so upstream can never change it"
 //! mechanism every other field already gets.
-//!
-//! The release hook tables, `[dog.deploy.release]` and `[dog.deploy.after]`,
-//! are held to the same line for a different reason: their `env` holds the
-//! operator's secrets, so only an override the dog linked in from the
-//! operator's checkout may carry them. See [`crate::hook`].
 
 mod read;
 mod refuse;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use shep_client::shep_core::prelude::AppConfig;
 use toml::{Table, Value};
 
-use crate::build::BuildSpec;
 use crate::error::Error;
-use crate::hook::{self, Hooks};
 use crate::shared::{FromCheckout, printable};
 
 pub(crate) use read::OVERRIDE;
@@ -58,17 +53,12 @@ use refuse::{refuse_duplicate_apps, refuse_repo_privilege};
 
 /// The two Flockfiles of one release, read once and merged.
 ///
-/// [`Merged::app_config`] and [`Merged::build_spec`] used to be free functions
-/// that each read and merged both files again; a deploy calls both, so every
-/// release was parsed twice. Reading
-/// through this type parses once and answers both questions from the same
-/// document, which is also the only way the two answers cannot disagree.
+/// Reading through this type parses once and answers every question from the
+/// same document, which is also the only way two answers cannot disagree.
 #[derive(Debug)]
 pub struct Merged {
     /// The committed document with the override merged over it.
-    pub(crate) doc: Value,
-    /// The release both were read from, for messages.
-    release: PathBuf,
+    doc: Value,
 }
 
 /// Reads and merges `release`'s Flockfiles, refusing first if the committed
@@ -82,13 +72,10 @@ pub struct Merged {
 /// committed file names one app twice; or if it sets, on any app, `user`,
 /// `group`, `out_file`, `err_file`, `watch`, an `exec` probe, a probe whose
 /// target is off loopback, or a probe spelled as anything but a table. See
-/// [`refuse_repo_privilege`] for why each is on the list. Also if the committed
-/// file, or an override the operator did not link in, carries
-/// `[dog.deploy.release]` or `[dog.deploy.after]`: see [`hook::refuse_repo_hooks`].
+/// [`refuse_repo_privilege`] for why each is on the list.
 pub fn read(release: &Path, shared: &FromCheckout) -> Result<Merged, Error> {
     Ok(Merged {
         doc: merged_document(release, shared)?,
-        release: release.to_owned(),
     })
 }
 
@@ -107,67 +94,6 @@ impl Merged {
                 printable(source.message())
             ))
         })
-    }
-
-    /// The `[dog.deploy.build]` block, or the default (no command, which
-    /// [`crate::build::run`] treats as a no-op) if neither file declares
-    /// one.
-    ///
-    /// # Errors
-    /// [`Error::Config`] if the block does not match [`BuildSpec`]'s schema -
-    /// an unknown key, or a value of the wrong type - or if either file still
-    /// carries a top-level `[build]`.
-    pub fn build_spec(&self) -> Result<BuildSpec, Error> {
-        let doc = self.doc.as_table();
-
-        // Refused rather than ignored, because ignoring it builds nothing and
-        // says nothing: a release whose build never ran, swapped in and
-        // reported as deployed. The old spelling is in this crate's own
-        // published README, so whoever meets this message is following
-        // instructions that were right at the time. Both files are named
-        // because the key can be in either: the override merges over the
-        // committed file before this looks.
-        if doc.is_some_and(|doc| doc.contains_key("build")) {
-            return Err(Error::Config(format!(
-                "{}: `[build]` moved to `[dog.deploy.build]`, in Flockfile.toml or \
-                 Flockfile.override.toml, whichever carries it. shep refuses a Flockfile with \
-                 a top-level `build` key, so the old spelling could not be registered with \
-                 `shep start` at all; `[dog]` is the table shep keeps for a dog's own config. \
-                 Rename the block.",
-                self.release.display()
-            )));
-        }
-
-        let Some(build) = doc
-            .and_then(|doc| doc.get("dog"))
-            .and_then(Value::as_table)
-            .and_then(|dogs| dogs.get("deploy"))
-            .and_then(Value::as_table)
-            .and_then(|deploy| deploy.get("build"))
-        else {
-            return Ok(BuildSpec::default());
-        };
-
-        build.clone().try_into().map_err(|source: toml::de::Error| {
-            Error::Config(format!(
-                "{}: `[dog.deploy.build]` does not match the build schema: {}",
-                self.release.display(),
-                printable(source.message())
-            ))
-        })
-    }
-
-    /// The release hooks, or the default (no command, which
-    /// [`crate::hook::run`] treats as a no-op) if neither file declares one.
-    ///
-    /// Read from the same merged document as [`Merged::build_spec`].
-    ///
-    /// # Errors
-    /// [`Error::Config`] if `[dog.deploy.release]` does not match
-    /// [`crate::hook::HookSpec`]'s schema - an unknown key, or a value of the
-    /// wrong type.
-    pub fn hooks(&self) -> Result<Hooks, Error> {
-        hook::parse(&self.doc, &self.release)
     }
 }
 
@@ -195,42 +121,6 @@ pub fn app_config(release: &Path, sheep: &str, shared: &[PathBuf]) -> Result<App
     read(release, &FromCheckout::of(shared.to_vec()))?.app_config(sheep)
 }
 
-/// The release's `[dog.deploy.build]` block, or the default (no command, which
-/// [`crate::build::run`] treats as a no-op) if it declares none.
-///
-/// Read from the same merged document [`app_config`] reads, so the
-/// operator's override wins here too. That is not incidental: the block's
-/// `env` routinely names host-specific paths - a registry token or a
-/// `NODE_ENV`, say - and those are exactly the values a committed file
-/// cannot know and an operator has to pin locally.
-///
-/// Not a key on the app entry, because `AppConfig` refuses unknown fields: a
-/// `build` key inside `[[app]]` would make shep's own parser reject the
-/// entry. One block per Flockfile also matches what a release actually is,
-/// one checkout built once, even when several sheep are deployed from the
-/// same repository.
-///
-/// Under `[dog.deploy.build]` rather than a top-level `[build]`, and that move is
-/// the whole reason this doc changed. shep's `RawFlockfile` denies unknown
-/// fields at the top level too, so a Flockfile carrying `[build]` could not
-/// be registered with shep at all: `shep start Flockfile.toml` answered
-/// "unknown field `build`, expected `$schema` or `app`". An operator
-/// following this crate's own README could not complete step one. shep
-/// gained a `dog` table for exactly this in 0.1.10, and this is the key that
-/// goes in it.
-///
-/// # Errors
-/// As [`app_config`] for reading and merging the two files, plus
-/// [`Error::Config`] if the block does not match [`BuildSpec`]'s schema - an
-/// unknown key, or a value of the wrong type - or if the Flockfile still
-/// carries a top-level `[build]`.
-///
-/// As [`app_config`]: the one-question form, for the tests.
-#[cfg(test)]
-pub fn build_spec(release: &Path, shared: &[PathBuf]) -> Result<BuildSpec, Error> {
-    read(release, &FromCheckout::of(shared.to_vec()))?.build_spec()
-}
-
 /// The committed Flockfile with the operator's override merged over it,
 /// refusing first if the committed file sets anything the shepherd acts on
 /// at its own uid (see [`refuse_repo_privilege`]).
@@ -246,7 +136,6 @@ fn merged_document(release: &Path, shared: &FromCheckout) -> Result<Value, Error
     // this host the dog reads. See `read_flockfile`.
     let committed = read_required(&release.join("Flockfile.toml"), Follow::Never)?;
     refuse_repo_privilege(&committed)?;
-    hook::refuse_repo_hooks(&committed, "Flockfile.toml")?;
     refuse_duplicate_apps(&committed)?;
 
     // The override is exempt from the privilege refusal only because it is the
@@ -277,7 +166,6 @@ fn merged_document(release: &Path, shared: &FromCheckout) -> Result<Value, Error
     )?;
     if !operators {
         refuse_repo_privilege(&override_doc)?;
-        hook::refuse_repo_hooks(&override_doc, OVERRIDE)?;
     }
 
     Ok(deep_merge(committed, override_doc))
@@ -436,28 +324,6 @@ mod tests {
         assert!(app.readiness_probe.is_some());
     }
 
-    /// fails if a message quotes a repository-chosen key with its control
-    /// characters intact. serde names an unknown field in its message, and
-    /// a TOML key can be any quoted string, so a committed
-    /// `"\u001b[2J" = 1` used to write a terminal escape into the log.
-    #[test]
-    fn a_parser_message_never_carries_a_control_character() {
-        let rel = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            rel.path().join("Flockfile.toml"),
-            "[[app]]\nname = \"web\"\nscript = \"./a\"\n[dog.deploy.build]\n\"a\\u001bb\" = 1\n",
-        )
-        .expect("committed");
-
-        let err = build_spec(rel.path(), &[]).expect_err("an unknown build key");
-        let shown = err.to_string();
-        assert!(!shown.chars().any(char::is_control), "{shown:?}");
-        assert!(
-            shown.contains("a?b"),
-            "the key is still recognisable: {shown}"
-        );
-    }
-
     /// fails if the operator's own override stops being able to pin a user.
     ///
     /// The counterpart. Theirs reaches a release as a symlink into their
@@ -589,103 +455,5 @@ mod tests {
         )]);
         let err = app_config(rel.path(), "ghost", &[]).expect_err("no such app");
         assert!(err.to_string().contains("ghost"));
-    }
-
-    /// fails if the old top-level `[build]` spelling is silently ignored.
-    ///
-    /// It has to be refused rather than skipped. Skipping it builds nothing
-    /// and says nothing: the release is swapped in unbuilt and reported as
-    /// deployed. And whoever meets this is following this crate's own
-    /// published README, which documented `[build]` while that spelling made
-    /// the Flockfile unregisterable with `shep start`.
-    #[test]
-    fn the_old_top_level_build_block_is_refused_by_name() {
-        let rel = fixtures::fixture_release(&[(
-            "Flockfile.toml",
-            "[[app]]\nname='web'\nscript='x'\n\n[build]\ncommand = 'make build'\n",
-        )]);
-
-        let err = build_spec(rel.path(), &[]).expect_err("the old spelling must be refused");
-
-        let text = format!("{err}");
-        assert!(
-            text.contains("[dog.deploy.build]"),
-            "must name the new home: {text}"
-        );
-        assert!(text.contains("shep start"), "must say why it moved: {text}");
-    }
-
-    /// fails if a declared `[dog.deploy.build]` block does not reach the build step.
-    /// `env` and `artifacts` both matter to a real build - a pinned
-    /// registry token, and a binary the release can't see the build
-    /// producing - so a block that parsed its command and dropped either
-    /// of those would still break rollback.
-    #[test]
-    fn a_build_block_parses_into_a_spec() {
-        let rel = fixtures::fixture_release(&[(
-            "Flockfile.toml",
-            "[[app]]\nname='web'\nscript='x'\n\n[dog.deploy.build]\ncommand = 'make build'\nenv = {              CARGO_TARGET_DIR = '/srv/cache' }\nartifacts = ['target/release/koji']\n",
-        )]);
-        let spec = build_spec(rel.path(), &[]).expect("parses");
-        assert_eq!(spec.command.as_deref(), Some("make build"));
-        assert_eq!(
-            spec.env.get("CARGO_TARGET_DIR").map(String::as_str),
-            Some("/srv/cache")
-        );
-        assert_eq!(
-            spec.artifacts,
-            vec![std::path::PathBuf::from("target/release/koji")]
-        );
-    }
-
-    /// fails if a Flockfile with no `[dog.deploy.build]` block becomes an error
-    /// rather than the no-op spec. ReactMap run as `bun .` declares no
-    /// build at all, which is one of the three worked examples this design
-    /// has to cover.
-    #[test]
-    fn an_absent_build_block_is_the_default_spec() {
-        let rel =
-            fixtures::fixture_release(&[("Flockfile.toml", "[[app]]\nname='web'\nscript='x'\n")]);
-        assert_eq!(
-            build_spec(rel.path(), &[]).expect("parses"),
-            BuildSpec::default()
-        );
-    }
-
-    /// fails if the operator's override stops winning on the build block.
-    /// `build.env` names host-specific paths a committed file cannot know,
-    /// so pinning them locally is the whole reason the override reaches
-    /// this block at all.
-    #[test]
-    fn the_override_wins_on_the_build_block() {
-        let rel = fixtures::fixture_release(&[
-            (
-                "Flockfile.toml",
-                "[[app]]\nname='web'\nscript='x'\n\n[dog.deploy.build]\ncommand = 'make build'\n",
-            ),
-            (
-                "Flockfile.override.toml",
-                "[dog.deploy.build]\nenv = { CARGO_TARGET_DIR = '/srv/cache' }\n",
-            ),
-        ]);
-        let spec = build_spec(rel.path(), &[]).expect("parses");
-        assert_eq!(spec.command.as_deref(), Some("make build"));
-        assert_eq!(
-            spec.env.get("CARGO_TARGET_DIR").map(String::as_str),
-            Some("/srv/cache")
-        );
-    }
-
-    /// fails if a typo in the build block is ignored instead of refused. A
-    /// silently-dropped `commands` key means a build that never runs, and
-    /// a deploy that swaps in a release nothing built.
-    #[test]
-    fn an_unknown_build_key_is_refused() {
-        let rel = fixtures::fixture_release(&[(
-            "Flockfile.toml",
-            "[[app]]\nname='web'\nscript='x'\n\n[dog.deploy.build]\ncommands = 'make build'\n",
-        )]);
-        let err = build_spec(rel.path(), &[]).expect_err("refuses");
-        assert!(err.to_string().contains("commands"));
     }
 }
