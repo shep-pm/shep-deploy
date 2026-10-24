@@ -85,7 +85,7 @@ impl Prepared {
 /// [`git::remote_url`], [`git::current_branch`], [`git::init_bare`],
 /// [`git::fetch`], [`git::remote_head`], [`git::worktree_add`],
 /// [`crate::deploy::stage_release`] (the worktree, the cache link, the shared
-/// files and both Flockfiles),
+/// files),
 /// [`build::run`] or [`swap::point_at`] return.
 #[cfg_attr(
     not(test),
@@ -105,7 +105,7 @@ pub async fn prepare<D: Daemon>(
 ///
 /// The first deploy refuses a `probed` target whose app declares no readiness
 /// gate, after the cutover has already landed. That refusal is made here
-/// instead, once the release's Flockfile is staged and before it is built, so
+/// instead, once the release is staged and before it is built, so
 /// the run leaves no record and no swap and a second `setup` is a retry. A
 /// sheep with nothing to probe is taken over with [`Verify::Alive`].
 ///

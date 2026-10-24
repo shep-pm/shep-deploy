@@ -270,7 +270,9 @@ fn refuse_ungated(
 mod tests {
     use std::fs;
 
-    use crate::deploy::test_support::{Shepherd, commit_on_origin, fixture_with_previous_release};
+    use crate::deploy::test_support::{
+        FIXTURE_TABLE, Shepherd, commit_on_origin, fixture_with_previous_release,
+    };
     use crate::deploy::{Outcome, deploy};
     use crate::fixtures;
     use crate::swap;
@@ -398,10 +400,7 @@ mod tests {
         let mut fixture = fixture_with_previous_release();
         let previous = fixture.state.deployed.clone().expect("a previous release");
         commit_on_origin(&fixture, "second.txt");
-        let daemon = Shepherd::ready().with_app(fixtures::app_with_settings(
-            "web",
-            crate::deploy::test_support::FIXTURE_TABLE,
-        ));
+        let daemon = Shepherd::ready().with_app(fixtures::app_with_settings("web", FIXTURE_TABLE));
 
         let err = deploy(
             &daemon,
@@ -432,15 +431,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_probed_target_that_waits_on_its_channel_is_not_refused() {
         let mut fixture = fixture_with_previous_release();
-        fs::write(
-            fixture.origin.path().join("Flockfile.toml"),
-            "[[app]]\nname = 'web'\nscript = './run.sh'\nwait_ready = true\n",
-        )
-        .expect("write a channel-gated Flockfile");
+        let mut app = fixtures::app_with_settings("web", FIXTURE_TABLE);
+        app.wait_ready = true;
         let second = commit_on_origin(&fixture, "second.txt");
 
         let outcome = deploy(
-            &Shepherd::ready(),
+            &Shepherd::ready().with_app(app),
             &fixture.tree,
             &mut fixture.state,
             &fixtures::dog_config(),
@@ -459,15 +455,13 @@ mod tests {
     async fn an_alive_target_needs_no_readiness_probe() {
         let mut fixture = fixture_with_previous_release();
         fixture.state.verify = crate::state::Verify::Alive;
-        fs::write(
-            fixture.origin.path().join("Flockfile.toml"),
-            "[[app]]\nname = 'web'\nscript = './run.sh'\n",
-        )
-        .expect("write a probeless Flockfile");
         let second = commit_on_origin(&fixture, "second.txt");
 
         let outcome = deploy(
-            &Shepherd::ready(),
+            &Shepherd::ready().with_app(fixtures::app_with_settings(
+                "web",
+                "branch = 'main'\nwatch = 'manual'\nverify = 'alive'\n",
+            )),
             &fixture.tree,
             &mut fixture.state,
             &fixtures::dog_config(),

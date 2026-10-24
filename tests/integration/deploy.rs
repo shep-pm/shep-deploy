@@ -18,7 +18,7 @@ const ROLLED_BACK_EXIT: u8 = 12;
 #[test]
 fn a_real_deploy_swaps_reloads_and_verifies() {
     let shepherd = Shepherd::new();
-    let origin = origin_with_app(shepherd.home(), "v1", Readiness::Probe, "");
+    let origin = origin_with_app("v1", Readiness::Probe, "");
     let first = build_tree(shepherd.home(), "web", origin.path());
     write_state(shepherd.home(), "web", origin.path(), &first);
 
@@ -79,7 +79,7 @@ fn a_real_deploy_swaps_reloads_and_verifies() {
 #[test]
 fn a_failing_build_leaves_the_previous_release_serving() {
     let shepherd = Shepherd::new();
-    let origin = origin_with_app(shepherd.home(), "v1", Readiness::Probe, "");
+    let origin = origin_with_app("v1", Readiness::Probe, "");
     let first = build_tree(shepherd.home(), "web", origin.path());
     write_state(shepherd.home(), "web", origin.path(), &first);
 
@@ -153,7 +153,7 @@ fn a_failing_build_leaves_the_previous_release_serving() {
 #[test]
 fn a_release_that_cannot_come_up_is_rolled_back_and_the_old_release_serves() {
     let shepherd = Shepherd::new();
-    let origin = origin_with_app(shepherd.home(), "v1", Readiness::Probe, "");
+    let origin = origin_with_app("v1", Readiness::Probe, "");
     let first = build_tree(shepherd.home(), "web", origin.path());
     write_state(shepherd.home(), "web", origin.path(), &first);
     register_web(&shepherd, Readiness::Probe, "alive", "");

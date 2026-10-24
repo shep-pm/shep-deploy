@@ -23,11 +23,9 @@ const CHECKOUT_LISTEN: u64 = 1;
 /// it at the `current` symlink itself.
 ///
 /// The clone is separate from `origin` on purpose. This Flockfile is
-/// probeless, because the probe the committed one carries looks through a
-/// `current` symlink that does not exist yet and the sheep could never come
-/// up; leaving that edit in `origin`'s working tree would then get committed
-/// by the next `git commit -a` and ship a release the deploy path refuses
-/// for having no probe.
+/// probeless, because a probe through a `current` symlink that does not
+/// exist yet would keep the sheep from ever coming up, so the test takes the
+/// sheep over with `--verify alive`.
 ///
 /// Returns the clone, which the caller has to keep alive: it is the
 /// registered sheep's working directory until the cutover moves it.
@@ -42,15 +40,6 @@ fn register_from_checkout(shepherd: &Shepherd, origin: &Path) -> tempfile::TempD
             ".",
         ],
     );
-    // The operator's own override, with the probe, sits beside their
-    // checkout's Flockfile: the deploy links it in from here, since this
-    // clone is the checkout `setup` records. The committed `.gitignore`
-    // keeps it out of every commit, which is what makes it theirs.
-    fs::write(
-        checkout.path().join("Flockfile.override.toml"),
-        format!("[[app]]\nname = \"web\"\n{}", probe_toml(shepherd.home())),
-    )
-    .expect("write the operator's override");
     let path = checkout.path().join("Flockfile.toml");
     fs::write(
         &path,
@@ -94,7 +83,7 @@ fn register_from_checkout(shepherd: &Shepherd, origin: &Path) -> tempfile::TempD
 #[test]
 fn a_sheep_taken_over_by_setup_follows_a_later_swap() {
     let shepherd = Shepherd::new();
-    let origin = origin_with_app(shepherd.home(), "v1", Readiness::Probe, "");
+    let origin = origin_with_app("v1", Readiness::Probe, "");
 
     // The sheep as the operator already runs it: registered from their own
     // checkout, with no deploy tree anywhere. Held, because it is that
@@ -105,7 +94,7 @@ fn a_sheep_taken_over_by_setup_follows_a_later_swap() {
     });
     let before = described_pid(&shepherd, "web").expect("a pid");
 
-    let setup = shepherd.deploy_args(&["setup", "web"]);
+    let setup = shepherd.deploy_args(&["setup", "web", "--verify", "alive"]);
     assert!(
         setup.status.success(),
         "setup failed: {}{}",

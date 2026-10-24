@@ -61,7 +61,7 @@ pub enum Error {
     ///
     /// Deliberately broad, and named for the kind of mistake rather than for
     /// one file. It is built at 35 sites across ten modules: a `[dog.<name>]`
-    /// section, a `deploy.toml` record, a release's own Flockfile, an
+    /// section, a `deploy.toml` record, an
     /// unresolvable `user`, an artifact path that would escape its release,
     /// and a bad `--watch` argument, which is not TOML at all.
     ///

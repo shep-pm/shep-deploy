@@ -627,9 +627,8 @@ async fn an_alive_rollback_that_never_turns_over_is_reported_unverified() {
 
 /// fails if the rollback is timed by anything but the sheep's stored config.
 /// The stored config here has short timeouts, so its budget is a few seconds,
-/// and the release being restored takes longer than that to come up. The
-/// commit's own Flockfile asks for the ordinary timeouts and must not lengthen
-/// the wait.
+/// and the release being restored takes longer than that to come up. Timeouts
+/// read from anywhere else would lengthen the wait.
 #[tokio::test(start_paused = true)]
 async fn the_rollback_is_timed_by_the_stored_config() {
     let mut fixture = fixture_with_previous_release();

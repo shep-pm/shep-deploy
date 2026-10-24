@@ -190,14 +190,14 @@ env = { CLOUDFLARE_API_TOKEN = "...", CLOUDFLARE_ZONE_ID = "..." }
    file the running app writes, a database or a log, is named as well; leave
    those linked.
 4. Run the build, as the app's `user` if it sets one.
-5. Run the release hook, if your override sets one.
+5. Run the release hook, if the sheep's table sets one.
 6. `rename(2)` `current` onto the new release.
 7. `Reload` the sheep.
 8. Verify. On failure, put `current` back, reload again, and verify that the
    old release came up. A rollback that does not come up is an error, not a
    rollback.
-9. Record the sha in `deploy.toml`, then run the after hook, if your override
-   sets one. Its failure is logged and does not undo the deploy.
+9. Record the sha in `deploy.toml`, then run the after hook, if the sheep's
+   table sets one. Its failure is logged and does not undo the deploy.
 
 Steps 1 to 5 never touch the running app. A build that fails costs a
 directory, not an outage. A hook acts on whatever it was written to act on,
@@ -587,15 +587,10 @@ docs recommend running the shepherd as root so it can drop privileges per app.
 So the default arrangement is a repository's build script running as root, once
 per deploy.
 
-A committed Flockfile is refused for setting anything the shepherd acts on at
-its own uid: `user` and `group`, an `exec` probe (the daemon runs it through
-`sh -c`, forever, ignoring `user`), `out_file` and `err_file` (the daemon
-opens and `shep flush` truncates them), an `http` or `tcp` probe whose target
-is not loopback (the daemon makes the connection), and `watch` (the daemon
-walks the working directory as itself, following symlinks). Every one of them
-stays available in `Flockfile.override.toml`, which is yours. The build command,
-the hooks and the reload paths are not in the release at all: they come from the
-sheep's `[app.dogs.deploy]` table, so a commit cannot choose them.
+The build command, the hooks and the reload paths are not in the release at
+all: they come from the sheep's `[app.dogs.deploy]` table, so a commit cannot
+choose them. Nothing is read from a release's `Flockfile.toml` either: the app
+config is the one the shepherd holds for the sheep.
 
 Set `user` on the app and the build drops to that user's uid and primary group,
 with the shepherd's supplementary groups cleared, before it runs anything. A
@@ -630,12 +625,6 @@ a build lets the build authenticate as you anywhere that agent is trusted.
 Fetching happens in the dog's own process and keeps its own environment, so a
 private repository still clones; only the build loses the socket. Name it in
 `passthrough` if a build genuinely needs it.
-
-The release's own `Flockfile.toml` is read in the dog's process too, before
-any build drops to `user`, so a committed one that is a symlink is refused
-unread, and a parse error names a line number and never quotes the line. Your
-`Flockfile.override.toml` is the one file that is followed through its link,
-because this dog made that link.
 
 `artifacts` may only name paths that really land inside the release or
 the dog's own build cache, resolved rather than spelled. A `..`, an absolute

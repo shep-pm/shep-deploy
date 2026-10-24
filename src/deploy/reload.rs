@@ -265,19 +265,19 @@ mod tests {
         assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
     }
 
-    /// fails if the reload window is sized from the Flockfile's instance
+    /// fails if the reload window is sized from the stored config's instance
     /// count rather than the flock's. `AppConfig::instances` is what the
-    /// file ASKS for; `shep stock <sheep> <n>` changes what is running
-    /// without touching any file this crate reads, and a reload costs one
+    /// config ASKS for; `shep stock <sheep> <n>` changes what is running
+    /// without touching the stored config, and a reload costs one
     /// swap per running instance.
     ///
     /// The numbers here are the reviewer's reproduction, scaled to the
-    /// fixture: one instance in the file, two actually running, and a
+    /// fixture: one instance in the config, two actually running, and a
     /// replacement that takes about twenty seconds to appear. Sized off the
-    /// file that is a sixteen-second budget and a healthy release is rolled
+    /// config that is a sixteen-second budget and a healthy release is rolled
     /// back; sized off the flock it is thirty-two and the deploy stands.
     #[tokio::test(start_paused = true)]
-    async fn the_window_follows_the_running_flock_not_the_flockfile() {
+    async fn the_window_follows_the_running_flock_not_the_stored_count() {
         let mut fixture = fixture_with_previous_release();
         let second = commit_on_origin(&fixture, "second.txt");
         // 200 polls at 100ms apart, so the turnover lands near 20s: inside

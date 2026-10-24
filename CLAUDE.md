@@ -163,13 +163,6 @@ exist and each has a precise edge:
   build can READ. It does not cover the project's own `.env`: gitignored files
   are symlinked into every release by design, so a build reads whatever the app
   reads.
-- **The Flockfile read** (`flockfile/read.rs`) runs in the dog's own process, at its
-  own uid, BEFORE any build drops to `user`. A committed `Flockfile.toml` that
-  is a symlink is therefore refused unread (`O_NOFOLLOW`), and a parse error
-  names the line number and never quotes the line: a link at
-  `/root/.ssh/id_rsa` used to have the key's first line printed to the log
-  through the parser's own message. Found 2026-09-03. The operator's override
-  is the one file that IS followed, because `shared::link_into` made it a link.
 
 `docs/specs/deferred.md` records Landlock as the thing that would close the
 class rather than the instances.
@@ -257,8 +250,6 @@ class rather than the instances.
 - **Never derive the markers directory from `Tree::completion("")`.** The
   result has a trailing separator and its `parent()` is the tree root; a sweep
   written that way removed `current`. `Tree::completions()` is the directory.
-- **`io::ErrorKind::FilesystemLoop` is unstable.** An `O_NOFOLLOW` open that
-  meets a link answers `ELOOP`; test it with `shared::is_eloop`.
 - **`deploy.toml` carries the pre-adoption `AppConfig` as `origin`.** It
   serialises as `[origin]` plus its sub-tables at the END of the file
   whatever the field's position, because this crate's `toml` hoists every
@@ -272,16 +263,12 @@ class rather than the instances.
   fields it does not know dropped in silence. See `roll.rs`'s own module doc
   for why that trade is the right way round for `survey` and the wrong way
   round for `optin`, which persists the result and replays it on removal.
-- **A committed Flockfile is refused for more than `user`/`group`.** `exec`
-  probes, `out_file`/`err_file`, non-loopback probe targets, and `watch`,
-  because the daemon acts on all of them at its own uid (read out of
-  shep-daemon on 2026-09-04; `flockfile::refuse::refuse_repo_privilege` says why per
-  field). It is also refused as an override the dog did not link in from the
-  operator's checkout. The build command, the reload paths and the hooks are
-  not read from a Flockfile at all: `settings::Settings` is the sheep's
-  `[app.dogs.deploy]` table, read from the shepherd once per deploy, and a
-  `[dog.deploy.*]` in a release is ignored. Presence is checked before shape: serde builds a probe from a
-  TOML array too, and a walk that read only tables let one through.
+- **Nothing is read from a release's Flockfile.** The app config is the
+  sheep's stored one (`settings::held`, or `roll::registered` in `optin`), and
+  the build command, reload paths and hooks are the sheep's
+  `[app.dogs.deploy]` table, so a `Flockfile.toml` in a release, and any
+  `[dog.deploy.*]` in it, is ignored. `Flockfile.override.toml` is gone: no
+  file is read at the dog's uid from a path a commit chose.
 - **`Online` is a one-time verdict in shep.** A crash after it respawns under
   a new pid with the reload committed; a failed post-drain re-probe demotes
   to `Starting` under the same pid. Both verify modes dwell and re-check pids
@@ -291,15 +278,6 @@ class rather than the instances.
   rival deploy impossible, so `current` moving under a deploy is a hand or
   the release's build command, and an unheld build that repoints `current`
   would be rebuilt every tick.
-- **The Flockfile is parsed once per deploy, through `flockfile::read`.** The
-  free `app_config` and `build_spec` are `#[cfg(test)]` wrappers; production
-  code asks both questions of one `Merged`.
-- **`shared::FromCheckout` is minted only by `shared::to_link`.** It is the
-  list of paths linked in from the operator's checkout, and its
-  `includes_override` answer is the whole proof that `Flockfile.override.toml`
-  is the operator's file. The field is private and there is no `From` impl on
-  purpose: a trait impl is reachable from every module, which would let any
-  caller mint the proof. Tests build one with `FromCheckout::of`.
 - **An artifact is copied through a per-component walk, not through a path.**
   `build::walk::Walk` opens every directory from the release or the build cache with
   `openat` and `O_NOFOLLOW | O_DIRECTORY` against the descriptor above it, so

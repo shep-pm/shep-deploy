@@ -89,12 +89,11 @@ pub(crate) const DWELL: Duration = Duration::from_secs(10);
 /// because "how often do we ask the shepherd again" has one answer here.
 pub(crate) const POLL: Duration = Duration::from_millis(100);
 
-/// The most any wait on the shepherd may last, whatever the Flockfile says.
+/// The most any wait on the shepherd may last, whatever the app config says.
 ///
-/// An hour. Every budget in this crate is built from the release's own
-/// `listen_timeout` and `graceful_timeout`, and those come out of a file
-/// the deployed repository commits. `UpDuration` accepts values up to
-/// `u64::MAX` milliseconds, so a Flockfile could ask this dog to watch a
+/// An hour. Every budget in this crate is built from the app's
+/// `listen_timeout` and `graceful_timeout`, and `UpDuration` accepts values up to
+/// `u64::MAX` milliseconds, so an app config could ask this dog to watch a
 /// reload for half a billion years, holding the tree's lock and the poll
 /// loop with it, and a value large enough overflowed `Instant + Duration`
 /// and took the dog down instead. An hour is past any reload that could
@@ -103,7 +102,7 @@ pub(crate) const MAX_WAIT: Duration = Duration::from_secs(60 * 60);
 
 /// `budget`, held under [`MAX_WAIT`].
 ///
-/// Every budget derived from a Flockfile goes through here before it is
+/// Every budget derived from an app config goes through here before it is
 /// added to a clock. Both callers say so at the site.
 #[must_use]
 pub(crate) fn bounded(budget: Duration) -> Duration {
@@ -607,8 +606,8 @@ mod tests {
     }
 
     /// fails if a budget past [`MAX_WAIT`] reaches a clock. Added to a
-    /// `tokio::time::Instant`, `Duration::MAX` panics, and a release's
-    /// Flockfile can ask for any `listen_timeout` up to `u64::MAX`
+    /// `tokio::time::Instant`, `Duration::MAX` panics, and an
+    /// app config can ask for any `listen_timeout` up to `u64::MAX`
     /// milliseconds.
     #[test]
     fn a_budget_is_held_under_the_ceiling() {

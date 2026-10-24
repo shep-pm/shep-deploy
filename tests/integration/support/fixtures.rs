@@ -42,19 +42,14 @@ pub fn head_of(dir: &Path) -> String {
         .to_owned()
 }
 
-/// The `web` app as both Flockfiles here declare it: script, and a
-/// readiness probe that looks THROUGH the `current` symlink for a file a
-/// release either ships or does not.
+/// The `web` app as a registration declares it: script, and a readiness
+/// probe that looks THROUGH the `current` symlink for a file a release
+/// either ships or does not.
 ///
-/// `with_cwd` is the one difference between the two copies, and it is not
-/// cosmetic - see [`register_web`].
+/// `with_cwd` is not cosmetic - see [`register_web`].
 ///
-/// Every test in this tier needs a probe, because `Verify::Probed` refuses
-/// a target without one and refuses it by reading the RELEASE's Flockfile,
-/// which is the only app definition the dog can see: `describe` reports
-/// status and pid, never the config shep registered. The two copies can
-/// therefore disagree, and this fixture keeps them honest by generating
-/// both from here.
+/// A probed test needs the probe in the registration, because
+/// `Verify::Probed` refuses a sheep whose stored config has none.
 pub fn app_toml(home: &Path, with_cwd: bool, readiness: Readiness, extra: &str) -> String {
     let current = home.join("deploy/web/current");
     let cwd = if with_cwd {
@@ -81,18 +76,11 @@ pub fn probe_toml(home: &Path) -> String {
     )
 }
 
-/// Writes the app into `dir` the way an operator's repository carries it:
-/// `Flockfile.toml` with the script and nothing the dog refuses in a
-/// committed file, and, for a probed app, the probe in
-/// `Flockfile.override.toml` with a `.gitignore` that keeps it out of the
-/// commit.
-///
-/// The split is the dog's own rule, not a test convenience: an `exec` probe
-/// is run by the shepherd at its own uid and ignores `user`, so a committed
-/// one is refused, and the override is where an operator puts theirs. The
-/// deploy links the ignored override in from the checkout, which for these
-/// fixtures is `dir` itself, and honours the probe from there.
-pub fn write_committed_app(dir: &Path, home: &Path, readiness: Readiness, extra: &str) {
+/// Writes `Flockfile.toml` into `dir` the way an operator's repository
+/// carries it. The dog reads nothing from a release, so it is the app as
+/// registered, via [`register_web`], that a deploy runs; the committed file
+/// only has to be there to be ignored.
+pub fn write_committed_app(dir: &Path, readiness: Readiness, extra: &str) {
     let gate = match readiness {
         Readiness::Probe => String::new(),
         Readiness::Heuristic(listen) => format!("listen_timeout = \"{listen}s\"\n"),
@@ -102,14 +90,6 @@ pub fn write_committed_app(dir: &Path, home: &Path, readiness: Readiness, extra:
         format!("[[app]]\nname = \"web\"\nscript = \"./run.sh\"\n{extra}{gate}"),
     )
     .expect("write Flockfile");
-    if matches!(readiness, Readiness::Probe) {
-        fs::write(dir.join(".gitignore"), "Flockfile.override.toml\n").expect("write .gitignore");
-        fs::write(
-            dir.join("Flockfile.override.toml"),
-            format!("[[app]]\nname = \"web\"\n{}", probe_toml(home)),
-        )
-        .expect("write the operator's override");
-    }
 }
 
 /// How a test's app reports itself ready.
@@ -140,17 +120,12 @@ pub enum Readiness {
 /// ready and one that does not never can. That is how a test makes a real
 /// shepherd's `AwaitReady` fail on purpose, which is the only way to
 /// exercise a rollback end to end.
-pub fn origin_with_app(
-    home: &Path,
-    version: &str,
-    readiness: Readiness,
-    extra: &str,
-) -> tempfile::TempDir {
+pub fn origin_with_app(version: &str, readiness: Readiness, extra: &str) -> tempfile::TempDir {
     let origin = tempfile::tempdir().expect("tempdir");
     git(origin.path(), &["init", "-q", "-b", "main"]);
     git(origin.path(), &["config", "user.email", "test@example.com"]);
     git(origin.path(), &["config", "user.name", "test"]);
-    write_committed_app(origin.path(), home, readiness, extra);
+    write_committed_app(origin.path(), readiness, extra);
     fs::write(origin.path().join("ready-marker"), "").expect("write ready-marker");
     write_run_script(origin.path(), version);
     git(origin.path(), &["add", "."]);
@@ -231,7 +206,7 @@ pub fn write_state(home: &Path, sheep: &str, origin: &Path, sha: &str) {
     .expect("write deploy.toml");
 }
 
-/// Registers `web` with the shepherd, from a Flockfile OUTSIDE any release,
+/// Registers `web` with the shepherd, from a file OUTSIDE any release,
 /// whose `cwd` is the `current` symlink.
 ///
 /// **`cwd` is set explicitly, and to the symlink.** A Flockfile app whose
@@ -245,8 +220,7 @@ pub fn write_state(home: &Path, sheep: &str, origin: &Path, sha: &str) {
 /// design means by "the sheep's `cwd` is this path, permanently".
 ///
 /// **The probe is registered, not deployed.** Nothing in this crate ever
-/// re-registers the app, so the probe a reload actually uses is this one
-/// and not whatever the new release's Flockfile says. A test that wants a
+/// re-registers the app, so the probe a reload actually uses is this one. A test that wants a
 /// reload to fail therefore cannot change the probe; it changes what the
 /// probe LOOKS at, which is why the probe points through `current` at a
 /// file a release either ships or does not.
@@ -256,7 +230,7 @@ pub fn register_web(shepherd: &Shepherd, readiness: Readiness, verify: &str, ext
 
 /// [`register_web`] with `settings` added to the sheep's
 /// `[app.dogs.deploy]` table, which is where the dog reads its build command
-/// from. The release's Flockfile is not consulted for it. The table always
+/// from. The table always
 /// follows `main` and verifies the way `verify` says; `watch` is left unset
 /// so it takes its default, `auto`.
 pub fn register_web_with_settings(

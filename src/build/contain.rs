@@ -70,8 +70,8 @@ mod tests {
     /// fails if `CARGO_TARGET_DIR` can read a file from anywhere on the host.
     ///
     /// The simplest of the three escapes and the one needing no trick at all:
-    /// `env` comes from the deployed repository's own Flockfile, and nothing
-    /// validated where it pointed. `artifacts = ["target/id_rsa"]` is relative
+    /// `env` is app config, and nothing validated where it
+    /// pointed. `artifacts = ["target/id_rsa"]` is relative
     /// and has no `..`, so both lexical guards pass, and `copy_artifact` then
     /// reads whatever that source names into the release. No build code runs.
     ///
