@@ -55,8 +55,8 @@ fn a_reload_slower_than_the_old_window_still_deploys() {
     let shepherd = Shepherd::new();
     let origin = origin_with_app(shepherd.home(), "v1", Readiness::Heuristic(SLOW_LISTEN), "");
     let first = build_tree(shepherd.home(), "web", origin.path());
-    write_state(shepherd.home(), "web", origin.path(), &first, "alive");
-    register_web(&shepherd, Readiness::Heuristic(SLOW_LISTEN), "");
+    write_state(shepherd.home(), "web", origin.path(), &first);
+    register_web(&shepherd, Readiness::Heuristic(SLOW_LISTEN), "alive", "");
 
     wait_until("the first release to come online", || {
         described_online(&shepherd, "web")
@@ -131,8 +131,8 @@ fn a_reload_that_uses_its_whole_drain_window_still_deploys() {
     git(origin.path(), &["commit", "-q", "-m", "stubborn v1"]);
 
     let first = build_tree(shepherd.home(), "web", origin.path());
-    write_state(shepherd.home(), "web", origin.path(), &first, "alive");
-    register_web(&shepherd, readiness, DRAINING_APP);
+    write_state(shepherd.home(), "web", origin.path(), &first);
+    register_web(&shepherd, readiness, "alive", DRAINING_APP);
 
     wait_until("both instances to come online", || {
         described_online(&shepherd, "web")

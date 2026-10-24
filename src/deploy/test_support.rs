@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use shep_client::RequestError;
-use shep_client::shep_core::config::AppConfig;
+use shep_client::shep_core::config::{AppConfig, DogTable};
 use shep_client::shep_core::protocol::{ProcessInfo, RpcError, RpcErrorCode};
 use shep_client::shep_core::status::ProcStatus;
 use tempfile::TempDir;
@@ -16,7 +16,7 @@ use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::fixtures;
 use crate::paths::Tree;
-use crate::state::{State, Watch};
+use crate::state::State;
 use crate::swap;
 
 /// [`fixtures::dog_config`] with a retention the caller cares about.
@@ -188,10 +188,10 @@ pub(crate) struct Shepherd {
     /// before the rollback. A regular file, because a stale symlink there
     /// is this dog's own leftover and the swap replaces it.
     plant: Option<PathBuf>,
-    /// A record to set `watch = manual` in when the first reload
-    /// arrives, standing in for an operator running `--watch manual`
+    /// Whether to set `watch = manual` in the sheep's table when the first
+    /// reload arrives, standing in for an operator running `--watch manual`
     /// while the deploy is past its build and inside its reload.
-    flip_watch: Option<PathBuf>,
+    flip_watch: bool,
     /// How many reloads after the first to refuse, standing in for the
     /// shepherd's own refusal to start a reload while one is in flight.
     /// The first is never refused, because that is the deploy's own and
@@ -227,10 +227,15 @@ pub(crate) struct Shepherd {
     /// Counted only so [`Self::flapping`] has something to move with.
     describes: Cell<u32>,
     reloads: Cell<u32>,
-    /// The sheep's `[app.dogs.deploy]` table, in TOML, or `None` for a sheep
-    /// registered without one.
-    settings: Option<String>,
+    /// The sheep as the shepherd holds it: following `main`, until a test
+    /// says otherwise.
+    held: fixtures::Sheep,
 }
+
+/// The table a [`Shepherd`] holds for the sheep, matching the record
+/// [`fixture_with_previous_release`] writes: the branch it follows, no
+/// poll loop, and a probed verify.
+pub(crate) const FIXTURE_TABLE: &str = "branch = 'main'\nwatch = 'manual'\nverify = 'probed'\n";
 
 /// The pid serving before any reload. Any other value would do; this
 /// one is only recognisable in a failure message.
@@ -249,7 +254,7 @@ impl Shepherd {
             drops_the_sheep_from: None,
             describe_fails_from: None,
             plant: None,
-            flip_watch: None,
+            flip_watch: false,
             refusals: Cell::new(0),
             refusal_code: RpcErrorCode::Internal,
             refuse_from_the_first: Cell::new(false),
@@ -260,17 +265,35 @@ impl Shepherd {
             turnover_after: 0,
             describes: Cell::new(0),
             reloads: Cell::new(0),
-            settings: None,
+            held: fixtures::Sheep::of("web", FIXTURE_TABLE),
         }
     }
 
-    /// The same shepherd, holding `settings` as the sheep's
-    /// `[app.dogs.deploy]` table.
+    /// The same shepherd, holding `settings` in the sheep's
+    /// `[app.dogs.deploy]` table beside [`FIXTURE_TABLE`]'s keys, which
+    /// `settings` must not repeat.
     pub(crate) fn with_settings(self, settings: &str) -> Self {
         Self {
-            settings: Some(settings.to_owned()),
+            held: fixtures::Sheep::of("web", &format!("{FIXTURE_TABLE}{settings}")),
             ..self
         }
+    }
+
+    /// The same shepherd, with `key` set to `value` in the sheep's table.
+    pub(crate) fn with_setting(self, key: &str, value: &str) -> Self {
+        self.set_setting(key, value);
+        self
+    }
+
+    /// Sets `key` in the sheep's `[app.dogs.deploy]` table, as an operator's
+    /// pane would, leaving every other key.
+    pub(crate) fn set_setting(&self, key: &str, value: &str) {
+        self.held.set(key, value);
+    }
+
+    /// The sheep's `[app.dogs.deploy]` table as the shepherd holds it now.
+    pub(crate) fn settings(&self) -> crate::settings::Settings {
+        self.held.settings()
     }
 
     /// A reload that replaces the process with one that never becomes
@@ -355,11 +378,11 @@ impl Shepherd {
         shepherd
     }
 
-    /// As [`Self::ready`], but sets `watch = manual` in the record at
-    /// `record` when the reload arrives, as an operator would mid-deploy.
-    pub(super) fn flipping_watch(record: PathBuf) -> Self {
+    /// As [`Self::ready`], but sets `watch = manual` in the sheep's table
+    /// when the reload arrives, as an operator would mid-deploy.
+    pub(super) fn flipping_watch() -> Self {
         Self {
-            flip_watch: Some(record),
+            flip_watch: true,
             ..Self::ready()
         }
     }
@@ -514,11 +537,16 @@ impl Shepherd {
 }
 
 impl Daemon for Shepherd {
-    async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
-        Ok(match &self.settings {
-            Some(settings) => fixtures::app_with_settings(sheep, settings),
-            None => fixtures::app_named(sheep),
-        })
+    async fn sheep_config(&self, _sheep: &str) -> Result<AppConfig, Error> {
+        self.held.answer()
+    }
+    async fn set_sheep_dog_settings(
+        &self,
+        _sheep: &str,
+        dog: &str,
+        table: DogTable,
+    ) -> Result<(), Error> {
+        self.held.replace(dog, table)
     }
     async fn describe(&self, sheep: &str) -> Result<Vec<ProcessInfo>, Error> {
         // `exists()` follows the link, and this one dangles on purpose,
@@ -557,14 +585,8 @@ impl Daemon for Shepherd {
             .collect())
     }
     async fn reload(&self, sheep: &str) -> Result<(), Error> {
-        if let Some(record) = &self.flip_watch
-            && self.attempts.get() == 0
-        {
-            let mut state = State::read(record).expect("the record to flip");
-            state.watch = Watch::Manual;
-            state
-                .write(record)
-                .expect("flip watch to manual mid-deploy");
+        if self.flip_watch && self.attempts.get() == 0 {
+            self.held.set("watch", "manual");
         }
         self.attempts.set(self.attempts.get() + 1);
         let refusals = self.refusals.get();

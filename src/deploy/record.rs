@@ -1,11 +1,12 @@
 //! What a deploy writes into `deploy.toml`, and the one setting an operator
 //! can change without deploying.
 
+use crate::daemon::Daemon;
 use crate::deploy::Outcome;
 use crate::error::Error;
 use crate::paths::Tree;
 use crate::state::{State, Watch};
-use crate::{lock, retention, shared};
+use crate::{lock, retention, settings, shared};
 
 /// Writes down what this attempt on `head` came to, and reclaims old
 /// releases.
@@ -31,7 +32,8 @@ use crate::{lock, retention, shared};
 /// decided and true - what a lost write costs is one more attempt at the
 /// same sha - and the prune failure has always been reported this way; see
 /// [`crate::retention`]'s own doc.
-pub(crate) async fn record(
+pub(crate) async fn record<D: Daemon>(
+    daemon: &D,
     tree: &Tree,
     state: &mut State,
     head: &str,
@@ -62,10 +64,17 @@ pub(crate) async fn record(
                 eprintln!("shep-deploy: {sheep}: could not record what {head} came to: {err}");
             }
             Ok(_record) => match landed_elsewhere(tree, head, failed.as_deref()) {
-                Some(fresher) => *state = fresher,
+                Some(fresher) => {
+                    let (branch, watch, verify) = (state.branch.clone(), state.watch, state.verify);
+                    *state = State {
+                        branch,
+                        watch,
+                        verify,
+                        ..fresher
+                    };
+                }
                 None => {
                     state.failed = failed;
-                    adopt_operator_fields(tree, state);
                     if let Err(err) = state.write(&tree.state_file()) {
                         eprintln!(
                             "shep-deploy: {sheep}: could not record what {head} came to: {err}"
@@ -75,6 +84,8 @@ pub(crate) async fn record(
             },
         }
     }
+
+    adopt_operator_fields(daemon, tree, state).await;
 
     // Both the record in memory and the one on disk. They differ after the
     // one write this module swallows, a verified deploy whose record could
@@ -115,24 +126,20 @@ pub(crate) async fn record(
     }
 }
 
-/// Takes `watch`, `verify` and `branch` from the record on disk into `state`,
-/// so a deploy's own write of the record does not put back a setting the
-/// operator changed while it ran.
+/// Takes `branch`, `watch` and `verify` from the sheep's `[app.dogs.deploy]`
+/// table into `state`, so what the poll loop does with this `State` after the
+/// deploy, painting `shep flock` for one, follows a setting the operator
+/// changed while it ran.
 ///
 /// Those fields are the operator's: `set_watch` and `set_branch` write one
-/// each and a hand edit writes `verify`, and `watch` is documented as
-/// something to change in the middle of an incident. A deploy holds this
-/// `State` from its first read to its last write, which can be a build's worth
-/// of time, and writing it whole put the operator's `manual` back to `auto` at
-/// the end of the very deploy they were trying to stop the next one of.
-/// Called before every whole-record write a deploy makes: the verified arm's,
-/// the rollback's, and `record`'s. A record that cannot be read leaves `state`
-/// as it is: there is nothing to adopt.
-fn adopt_operator_fields(tree: &Tree, state: &mut State) {
-    if let Ok(on_disk) = State::read(&tree.state_file()) {
-        state.watch = on_disk.watch;
-        state.verify = on_disk.verify;
-        state.branch = on_disk.branch;
+/// each, and `watch` is documented as something to change in the middle of an
+/// incident. A deploy holds this `State` from its first read to its last
+/// use, which can be a build's worth of time. A table that cannot be read or
+/// adopted leaves `state` as it is: there is nothing to adopt, and the next
+/// tick reports why.
+async fn adopt_operator_fields<D: Daemon>(daemon: &D, tree: &Tree, state: &mut State) {
+    if let Ok(held) = settings::read(daemon, tree.sheep()).await {
+        let _ = state.adopt(tree.sheep(), &held);
     }
 }
 
@@ -153,8 +160,6 @@ pub(super) fn record_landing(tree: &Tree, state: &mut State, head: &str) -> Resu
     state.deployed = Some(head.to_owned());
     let held = state.failed.take();
     let staged = state.staged.take();
-    // The operator's fields from disk, not this deploy's copy of them: see
-    // `write_record`.
     let written = write_record(tree, state);
     if written.is_err() {
         // The hold is still on disk, so memory keeps saying so: `record`
@@ -166,20 +171,17 @@ pub(super) fn record_landing(tree: &Tree, state: &mut State, head: &str) -> Resu
     written
 }
 
-/// Writes `state` whole, under the record lock, with the operator's fields
-/// taken from disk first.
+/// Writes `state` whole, under the record lock.
 ///
-/// The lock is what makes the adopt-then-write one step: without it a
-/// `set_watch` could land between the read `adopt_operator_fields` makes
-/// and the rename this makes, and be renamed over. Every whole-record
-/// write a deploy makes goes through here.
+/// The lock is what keeps this write from landing between the read and the
+/// rename of a [`set_watch`]-style write. Every whole-record write a deploy
+/// makes goes through here.
 ///
 /// # Errors
 /// [`Error::Io`] if the record lock cannot be taken, and whatever
 /// [`State::write`] returns.
-pub(super) fn write_record(tree: &Tree, state: &mut State) -> Result<(), Error> {
+pub(super) fn write_record(tree: &Tree, state: &State) -> Result<(), Error> {
     let _record = lock::hold_record(tree)?;
-    adopt_operator_fields(tree, state);
     state.write(&tree.state_file())
 }
 
@@ -220,13 +222,15 @@ fn landed_elsewhere(tree: &Tree, head: &str, failing: Option<&str>) -> Option<St
     (on_disk.deployed.as_deref() == Some(head)).then_some(on_disk)
 }
 
-/// Sets `watch` on the target and records it, without deploying.
+/// Sets `watch` on the target and records it in the sheep's
+/// `[app.dogs.deploy]` table, without deploying.
 ///
 /// The verb an operator reaches this through is `deploy`, so it is worth
-/// being explicit: this function takes no [`crate::daemon::Daemon`] at all, and therefore
-/// cannot start, reload or restart anything even by accident. `manual` is
-/// what somebody sets in the middle of an incident, and a deploy firing at
-/// that moment is the exact opposite of what they asked for.
+/// being explicit: the only request this makes of the shepherd is the
+/// settings write, so it cannot start, reload or restart anything even by
+/// accident. `manual` is what somebody sets in the middle of an incident, and
+/// a deploy firing at that moment is the exact opposite of what they asked
+/// for.
 ///
 /// `auto` is refused on a tree the cutover never landed on, and `manual` is
 /// allowed in every state. The asymmetry is the same one [`super::deploy`]
@@ -240,28 +244,27 @@ fn landed_elsewhere(tree: &Tree, head: &str, failing: Option<&str>) -> Option<St
 /// deploy holds the tree's lock from its fetch through its build, which the
 /// default `build_timeout` allows an hour for. A `--watch manual` refused as
 /// `AlreadyDeploying` for that hour is the opposite of what the setting is
-/// for. So this writes without the tree lock, under the record lock instead
-/// (`lock::hold_record`), which every whole-record write a deploy makes
-/// also takes: the read here and the write here are one step nothing can
-/// land between, and the deploy's own writes take `watch` and `verify`
-/// from the disk rather than from their stale copy, see
-/// `adopt_operator_fields`, so the setting survives them. Before the record
-/// lock there was a window the width of one read and one write, in which a
-/// deploy's rename could drop this one or this one drop a `deployed` the
-/// deploy had just recorded.
+/// for. It takes no record lock either: `deploy.toml` is read here and never
+/// written, and a deploy picks the new value up from the table when it is
+/// done, see `adopt_operator_fields`.
 ///
 /// # Errors
 /// [`Error::Config`] if `watch` is `auto` and the target's record names no
-/// released sha. [`Error::Io`] or [`Error::Config`] if `deploy.toml` cannot
-/// be read or written - see [`State::read`] and [`State::write`].
+/// released sha, or the sheep's table does not parse. [`Error::Io`] or
+/// [`Error::Config`] if `deploy.toml` cannot be read - see [`State::read`] -
+/// and whatever [`settings::change`] returns.
 ///
-/// Answers the `watch` the record carried before, and the record as it is
-/// after: the read is this function's, so a caller has nothing older to
-/// print from.
-pub fn set_watch(tree: &Tree, watch: Watch) -> Result<(Watch, State), Error> {
-    let _record = lock::hold_record(tree)?;
+/// Answers the `watch` the table held before, and the record as it is after,
+/// with the new `watch` in it: the read is this function's, so a caller has
+/// nothing older to print from. The record's `branch` and `verify` are the
+/// defaults, which this does not adopt.
+pub async fn set_watch<D: Daemon>(
+    daemon: &D,
+    tree: &Tree,
+    watch: Watch,
+) -> Result<(Watch, State), Error> {
     let mut state = State::read(&tree.state_file())?;
-    let was = state.watch;
+    let was = settings::read(daemon, tree.sheep()).await?.watch;
 
     if watch == Watch::Auto && state.deployed.is_none() {
         return Err(Error::Config(format!(
@@ -276,15 +279,14 @@ pub fn set_watch(tree: &Tree, watch: Watch) -> Result<(Watch, State), Error> {
         )));
     }
 
+    settings::change(daemon, tree.sheep(), [settings::Change::Watch(watch)]).await?;
     state.watch = watch;
-    state.write(&tree.state_file())?;
     Ok((was, state))
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::time::Duration;
 
     use crate::deploy::test_support::{
         Shepherd, commit_on_origin, fixture_before_any_release, fixture_with_previous_release,
@@ -292,9 +294,8 @@ mod tests {
     };
     use crate::deploy::{Outcome, deploy, unattended};
     use crate::error::Error;
-    use crate::paths::Tree;
     use crate::state::{State, Watch};
-    use crate::{fixtures, lock, swap};
+    use crate::{fixtures, swap};
 
     use super::*;
 
@@ -332,6 +333,7 @@ mod tests {
         .expect("the winner lands");
 
         record(
+            &Shepherd::ready(),
             &fixture.tree,
             &mut straggler,
             &second,
@@ -424,51 +426,6 @@ mod tests {
         assert_eq!(count, 3, "the newest two, plus what current names");
     }
 
-    /// fails if a `--watch` and a deploy's record write can drop each
-    /// other's update. Staged exactly: the record lock held as a deploy
-    /// holds it, `set_watch` waiting on another thread, a fresher
-    /// `deployed` written meanwhile, and after the release the record has
-    /// to carry both the fresh sha and the operator's `manual`. Before the
-    /// record lock, `set_watch`'s snapshot renamed over the fresh one.
-    #[test]
-    fn a_watch_set_while_a_deploy_writes_the_record_loses_nothing() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let tree = Tree::for_sheep(home.path(), "web");
-        fs::create_dir_all(tree.root()).expect("tree");
-        let mut state = State {
-            deployed: Some(fixtures::SHA.to_owned()),
-            ..fixtures::state()
-        };
-        state.write(&tree.state_file()).expect("the record before");
-
-        let held = lock::hold_record(&tree).expect("the deploy's hold");
-        let (tx, rx) = std::sync::mpsc::channel();
-        let operator = {
-            let home = home.path().to_owned();
-            std::thread::spawn(move || {
-                let result = set_watch(&Tree::for_sheep(&home, "web"), Watch::Manual);
-                tx.send(()).expect("report");
-                result
-            })
-        };
-        assert!(
-            rx.recv_timeout(Duration::from_millis(300)).is_err(),
-            "set_watch must wait for the record lock"
-        );
-
-        // The deploy's write, under its hold.
-        state.deployed = Some(fixtures::OTHER_SHA.to_owned());
-        state.write(&tree.state_file()).expect("the deploy's write");
-        drop(held);
-
-        rx.recv_timeout(Duration::from_secs(5))
-            .expect("set_watch lands");
-        operator.join().expect("thread").expect("sets");
-        let after = State::read(&tree.state_file()).expect("reads");
-        assert_eq!(after.deployed.as_deref(), Some(fixtures::OTHER_SHA));
-        assert_eq!(after.watch, Watch::Manual);
-    }
-
     /// fails if a race stops being held. With the tree lock, `current`
     /// moving under a deploy means an operator's hand or the release's own
     /// build command did it, and a build that repoints `current` on every
@@ -483,7 +440,15 @@ mod tests {
             found: "b".to_owned(),
         });
 
-        record(&fixture.tree, &mut state, fixtures::OTHER_SHA, &raced, 5).await;
+        record(
+            &Shepherd::ready(),
+            &fixture.tree,
+            &mut state,
+            fixtures::OTHER_SHA,
+            &raced,
+            5,
+        )
+        .await;
 
         assert_eq!(state.failed.as_deref(), Some(fixtures::OTHER_SHA));
         assert_eq!(
@@ -495,23 +460,19 @@ mod tests {
         );
     }
 
-    /// fails if a deploy that LANDS puts back a `watch` the operator changed
-    /// while it ran. The deploy holds its `State` from its first read to
-    /// its last write, and the verified arm's write of it whole put a
-    /// mid-deploy `--watch manual` back to `auto`: the exact deploy the
-    /// operator was trying to make the last one for a while.
+    /// fails if a deploy that LANDS ignores a `watch` the operator set in
+    /// the sheep's table while it ran. The deploy holds its `State` from its
+    /// first read to its last use, and the poll loop paints and decides from
+    /// that copy afterwards: a mid-deploy `--watch manual` has to be in it.
     #[tokio::test(start_paused = true)]
-    async fn a_landed_deploy_keeps_the_watch_the_operator_set_meanwhile() {
+    async fn a_landed_deploy_follows_the_watch_the_operator_set_meanwhile() {
         let mut fixture = fixture_with_previous_release();
+        let daemon = Shepherd::flipping_watch().with_setting("watch", "auto");
         fixture.state.watch = Watch::Auto;
-        fixture
-            .state
-            .write(&fixture.tree.state_file())
-            .expect("watched");
         let second = commit_on_origin(&fixture, "second.txt");
 
         let outcome = deploy(
-            &Shepherd::flipping_watch(fixture.tree.state_file()),
+            &daemon,
             &fixture.tree,
             &mut fixture.state,
             &fixtures::dog_config(),
@@ -520,38 +481,29 @@ mod tests {
         .expect("lands");
 
         assert!(matches!(outcome, Outcome::Deployed { .. }), "{outcome:?}");
+        assert_eq!(fixture.state.watch, Watch::Manual, "the copy follows");
+        assert_eq!(daemon.settings().watch, Watch::Manual, "the table stands");
         let written = State::read(&fixture.tree.state_file()).expect("reads");
-        assert_eq!(
-            written.watch,
-            Watch::Manual,
-            "the operator's setting survives"
-        );
         assert_eq!(
             written.deployed.as_deref(),
             Some(second.as_str()),
-            "and the deploy is recorded by the same write"
+            "and the deploy is recorded"
         );
     }
 
-    /// fails if `record`'s own write, the one a FAILED deploy makes, puts
-    /// back a `watch` the operator changed while it ran. The landed case
-    /// has its own test above; this drives `record` directly.
+    /// fails if `record`'s own write, the one a FAILED deploy makes, leaves
+    /// the copy it holds on a `watch` the operator changed while it ran. The
+    /// landed case has its own test above; this drives `record` directly.
     #[tokio::test]
-    async fn a_failed_deploys_record_write_keeps_the_watch_the_operator_set_meanwhile() {
+    async fn a_failed_deploys_record_follows_the_watch_the_operator_set_meanwhile() {
         let fixture = fixture_with_previous_release();
-        // The copy a deploy holds from its first read: watched.
         let mut in_flight = fixture.state.clone();
         in_flight.watch = Watch::Auto;
-
-        // The operator, mid-deploy.
-        let mut on_disk = fixture.state.clone();
-        on_disk.watch = Watch::Manual;
-        on_disk
-            .write(&fixture.tree.state_file())
-            .expect("--watch manual");
+        let daemon = Shepherd::ready().with_setting("watch", "manual");
 
         let failed: Result<Outcome, Error> = Err(Error::Build { status: Some(1) });
         record(
+            &daemon,
             &fixture.tree,
             &mut in_flight,
             fixtures::OTHER_SHA,
@@ -560,12 +512,8 @@ mod tests {
         )
         .await;
 
+        assert_eq!(in_flight.watch, Watch::Manual, "the operator's setting");
         let written = State::read(&fixture.tree.state_file()).expect("reads");
-        assert_eq!(
-            written.watch,
-            Watch::Manual,
-            "the operator's setting survives"
-        );
         assert_eq!(
             written.failed.as_deref(),
             Some(fixtures::OTHER_SHA),
@@ -599,7 +547,15 @@ mod tests {
         fixture.state.deployed = Some(newest.clone());
 
         let landed: Result<Outcome, Error> = Ok(Outcome::Deployed { sha: newest });
-        record(&fixture.tree, &mut fixture.state, "unused", &landed, 2).await;
+        record(
+            &Shepherd::ready(),
+            &fixture.tree,
+            &mut fixture.state,
+            "unused",
+            &landed,
+            2,
+        )
+        .await;
 
         assert!(
             fixture.tree.release(&old).is_dir(),
@@ -686,35 +642,32 @@ mod tests {
         );
     }
 
-    /// fails if setting the watch mode also deploys. `--watch manual` is
-    /// what an operator reaches for during an incident, and a deploy firing
-    /// at that moment is the exact opposite of what they asked for. The
-    /// verb says deploy, which is why this needs a test rather than a
-    /// comment.
-    ///
-    /// The brief's version of this test asserted on a recording daemon's
-    /// call list. [`set_watch`] takes no daemon at all, so that assertion
-    /// cannot be written - and its absence is the stronger guarantee: no
-    /// daemon traffic is a type error here, not a test failure. What is
-    /// left to check is the filesystem half, which a fall-through could
-    /// still touch: no new release, `current` unmoved, `deployed`
-    /// unchanged.
+    /// fails if setting the watch mode also deploys, or writes anywhere but
+    /// the sheep's table. `--watch manual` is what an operator reaches for
+    /// during an incident, and a deploy firing at that moment is the exact
+    /// opposite of what they asked for. `deploy.toml` is compared byte for
+    /// byte: settings are not state, and the verb must not touch the file.
     #[tokio::test]
-    async fn setting_the_watch_mode_does_not_deploy() {
+    async fn setting_the_watch_mode_writes_the_table_and_does_not_deploy() {
         let fixture = fixture_with_previous_release();
         let previous = fixture.state.deployed.clone().expect("a previous release");
         let second = commit_on_origin(&fixture, "second.txt");
+        let daemon = Shepherd::ready().with_setting("watch", "auto");
+        let before = fs::read(fixture.tree.state_file()).expect("deploy.toml");
 
-        let (was, after) = set_watch(&fixture.tree, Watch::Manual).expect("sets");
+        let (was, after) = set_watch(&daemon, &fixture.tree, Watch::Manual)
+            .await
+            .expect("sets");
 
-        assert_eq!(was, fixture.state.watch, "what the record carried before");
+        assert_eq!(was, Watch::Auto, "what the table held before");
         assert_eq!(after.watch, Watch::Manual);
+        assert_eq!(daemon.settings().watch, Watch::Manual);
         assert_eq!(
-            State::read(&fixture.tree.state_file())
-                .expect("deploy.toml was written")
-                .watch,
-            Watch::Manual
+            fs::read(fixture.tree.state_file()).expect("deploy.toml"),
+            before,
+            "the record is not touched"
         );
+        assert_eq!(daemon.reload_count(), 0);
         assert!(
             !fixture.tree.release(&second).exists(),
             "no release may be built"
@@ -735,21 +688,20 @@ mod tests {
     #[tokio::test]
     async fn a_tree_the_cutover_never_landed_on_cannot_be_watched() {
         let fixture = fixture_before_any_release();
+        let daemon = Shepherd::ready();
 
-        let err = set_watch(&fixture.tree, Watch::Auto).expect_err("refuses");
+        let err = set_watch(&daemon, &fixture.tree, Watch::Auto)
+            .await
+            .expect_err("refuses");
 
         let shown = err.to_string();
         assert!(shown.contains("never cut over"), "{shown}");
         assert!(shown.contains("shep-deploy setup web"), "{shown}");
-        assert_eq!(
-            State::read(&fixture.tree.state_file())
-                .expect("deploy.toml still reads")
-                .watch,
-            Watch::Manual,
-            "unchanged on disk"
-        );
+        assert_eq!(daemon.settings().watch, Watch::Manual, "unchanged");
 
-        set_watch(&fixture.tree, Watch::Manual).expect("manual is allowed");
+        set_watch(&daemon, &fixture.tree, Watch::Manual)
+            .await
+            .expect("manual is allowed");
     }
 
     /// fails if a prune failure fails the deploy that triggered it. The

@@ -29,17 +29,18 @@
 //! this module, so it keeps its own copy. One copy across a target boundary is
 //! the cost of the boundary; six inside one target was not.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use shep_client::shep_core::config::AppConfig;
+use shep_client::shep_core::config::{AppConfig, DogTable};
 use tempfile::TempDir;
 
 use crate::config::DogConfig;
 use crate::daemon::Daemon;
 use crate::error::Error;
+use crate::settings::{self, Settings};
 use crate::state::{State, Verify, Watch};
 
 /// A full commit sha, as `git rev-parse` prints one.
@@ -320,6 +321,16 @@ macro_rules! daemon_methods {
             $body
         }
     };
+    (@method set_sheep_dog_settings, $body:expr) => {
+        async fn set_sheep_dog_settings(
+            &self,
+            _sheep: &str,
+            _dog: &str,
+            _table: shep_client::shep_core::config::DogTable,
+        ) -> Result<(), crate::error::Error> {
+            $body
+        }
+    };
     (@method set_smit, $body:expr) => {
         async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), crate::error::Error> {
             $body
@@ -362,6 +373,100 @@ pub fn app_with_settings(sheep: &str, settings: &str) -> AppConfig {
         "dogs": { "deploy": table },
     }))
     .expect("an app with settings")
+}
+
+/// One sheep's config as a shepherd holds it, and a [`Daemon`] that answers
+/// `sheep_config` from it and applies `set_sheep_dog_settings` to it.
+///
+/// What a test reads back to see that a write reached the sheep's table, and
+/// what a test edits between two ticks to move a setting under a running dog.
+/// Every other method is unimplemented, so a double that needs more embeds
+/// one and delegates these two.
+#[derive(Debug)]
+pub struct Sheep {
+    app: RefCell<AppConfig>,
+}
+
+impl Sheep {
+    /// `sheep` with `settings` as its `[app.dogs.deploy]` table, in TOML.
+    ///
+    /// # Panics
+    /// If `settings` is not a TOML table.
+    #[track_caller]
+    pub fn of(sheep: &str, settings: &str) -> Self {
+        Self {
+            app: RefCell::new(app_with_settings(sheep, settings)),
+        }
+    }
+
+    /// The sheep as `app`, whatever its table.
+    pub fn holding(app: AppConfig) -> Self {
+        Self {
+            app: RefCell::new(app),
+        }
+    }
+
+    /// The config as the shepherd holds it now.
+    pub fn app(&self) -> AppConfig {
+        self.app.borrow().clone()
+    }
+
+    /// The `[app.dogs.deploy]` table as the shepherd holds it now.
+    ///
+    /// # Panics
+    /// If the table no longer parses as [`Settings`].
+    #[track_caller]
+    pub fn settings(&self) -> Settings {
+        settings::from_app("web", &self.app.borrow()).expect("the table parses")
+    }
+
+    /// Sets `key` in the table to `value`, as an operator's pane would,
+    /// leaving every other key.
+    ///
+    /// # Panics
+    /// If the table cannot be edited.
+    #[track_caller]
+    pub fn set(&self, key: &str, value: &str) {
+        let mut app = self.app.borrow_mut();
+        let mut table = app
+            .dogs
+            .get("deploy")
+            .map(|held| held.as_map().clone())
+            .unwrap_or_default();
+        table.insert(key.to_owned(), serde_json::Value::String(value.to_owned()));
+        app.dogs.insert("deploy".to_owned(), DogTable::from(table));
+    }
+
+    /// The `sheep_config` answer.
+    pub fn answer(&self) -> Result<AppConfig, Error> {
+        Ok(self.app())
+    }
+
+    /// The `set_sheep_dog_settings` answer: replaces `dog`'s whole table, as
+    /// the shepherd does.
+    pub fn replace(&self, dog: &str, table: DogTable) -> Result<(), Error> {
+        self.app.borrow_mut().dogs.insert(dog.to_owned(), table);
+        Ok(())
+    }
+}
+
+impl Daemon for Sheep {
+    async fn sheep_config(&self, _sheep: &str) -> Result<AppConfig, Error> {
+        self.answer()
+    }
+
+    async fn set_sheep_dog_settings(
+        &self,
+        _sheep: &str,
+        dog: &str,
+        table: DogTable,
+    ) -> Result<(), Error> {
+        self.replace(dog, table)
+    }
+
+    crate::fixtures::daemon_methods!(unimplemented;
+        dog_config, list_flock, describe, start, delete, reload, restart, save_roll, set_smit,
+    );
 }
 
 /// A bare throwaway directory, for tests that need a path rather than a
@@ -457,7 +562,8 @@ impl Daemon for Sections {
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        list_flock, describe, start, delete, reload, restart, save_roll, sheep_config, set_smit,
+        list_flock, describe, start, delete, reload, restart, save_roll, sheep_config,
+        set_sheep_dog_settings, set_smit,
     );
 }
 

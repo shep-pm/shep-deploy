@@ -60,6 +60,7 @@ use crate::daemon::Daemon;
 use crate::deploy::{self, Outcome};
 use crate::error::Error;
 use crate::paths::{self, Tree};
+use crate::settings;
 use crate::smit;
 use crate::state::{State, Watch};
 
@@ -92,9 +93,10 @@ const fn due(state: &State) -> bool {
 /// failed on is left alone until the branch moves, rather than rebuilt and
 /// rolled back every interval for as long as nobody pushes.
 ///
-/// Targets are re-read from disk every tick rather than cached, so a target
-/// created, switched to `manual`, or moved with `--branch` (the branch is
-/// read from the checkout once, at setup) is picked up on the next pass.
+/// Targets are re-read every tick rather than cached, the record from disk
+/// and `branch`, `watch` and `verify` from the shepherd, so a target created,
+/// switched to `manual`, or moved with `--branch` is picked up on the next
+/// pass.
 ///
 /// Two failures are reported as rows rather than passed over. A record that
 /// cannot be read is a target nothing can be done with, and
@@ -138,8 +140,8 @@ async fn tick<D: Daemon>(daemon: &D, shep_home: &Path, config: &DogConfig) -> Ti
     }
     for name in found.named {
         let tree = Tree::for_sheep(shep_home, &name);
-        let mut state = match State::read(&tree.state_file()) {
-            Ok(state) => state,
+        let mut state = match settings::adopted(daemon, &tree).await {
+            Ok((state, _)) => state,
             Err(err) => {
                 results.push((name, Err(err)));
                 continue;

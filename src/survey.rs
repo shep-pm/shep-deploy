@@ -13,6 +13,7 @@ use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::paths::{self, Tree};
 use crate::roll;
+use crate::settings;
 use crate::state::{State, Watch};
 
 /// Where one sheep stands with respect to this dog.
@@ -89,6 +90,12 @@ pub enum Standing {
     /// the record refuses unknown fields, so one written by a newer
     /// shep-deploy reads this way to an older binary.
     Unreadable(String),
+    /// A deploy tree whose record reads but whose sheep's
+    /// `[app.dogs.deploy]` table cannot be used, and what adopting it said.
+    ///
+    /// Apart from [`Self::Unreadable`] because the repair is in the table,
+    /// where `deploy.toml` has nothing to fix.
+    BadSettings(String),
     /// The deploy directory itself could not be listed, and what listing it
     /// said. Every target is under it, so no row alongside is complete.
     Unlisted(String),
@@ -121,7 +128,14 @@ pub fn classify(shep_home: &Path, app: &AppConfig) -> Standing {
         Err(Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Standing::Unreadable(err.to_string()),
     };
-    if let Some(state) = state {
+    if let Some(mut state) = state {
+        // The roll carries the sheep's `dogs` table, which is where `branch`
+        // and `watch` live now.
+        if let Err(err) =
+            settings::from_app(&app.name, app).and_then(|held| state.adopt(&app.name, &held))
+        {
+            return Standing::BadSettings(err.to_string());
+        }
         let (branch, sha, staged) = (state.branch, state.deployed, state.staged);
         // A hold is only reported for a target something polls. `failed`
         // is written by an operator's own deploy too, and for a manual
@@ -212,6 +226,7 @@ impl Standing {
             Self::Orphaned => "orphaned",
             Self::Unnamed => "unnamed",
             Self::Unreadable(_) => "unreadable",
+            Self::BadSettings(_) => "bad settings",
             Self::Unlisted(_) => "unlisted",
             Self::BadName => "bad name",
         }
@@ -269,6 +284,11 @@ impl Standing {
                 "has a deploy tree whose record cannot be read: {why}. Repair the record \
                  before deploying; do not run setup against it, the sheep may be running from \
                  inside that tree"
+            ),
+            Self::BadSettings(why) => format!(
+                "has a deploy tree whose sheep's settings cannot be used: {why}. Fix its \
+                 `[app.dogs.deploy]` table, not `deploy.toml`; do not run setup against it, \
+                 the sheep may be running from inside that tree"
             ),
             Self::Unlisted(why) => format!(
                 "is the deploy directory and could not be listed: {why}. Every target is \
@@ -442,7 +462,7 @@ mod tests {
         std::fs::create_dir_all(tree.root()).expect("tree");
         std::fs::write(
             tree.state_file(),
-            "remote = \"https://example.com/x\"\nbranch = \"main\"\ncheckout = \"/srv/x\"\n\
+            "remote = \"https://example.com/x\"\ncheckout = \"/srv/x\"\n\
              newer_key = true\n",
         )
         .expect("a record from the future");
@@ -459,6 +479,28 @@ mod tests {
         assert!(shown.contains("do not run setup"), "{shown}");
     }
 
+    /// fails if a table the dog cannot adopt is blamed on `deploy.toml`. The
+    /// record reads fine, and an operator told to repair it edits the wrong
+    /// file.
+    #[test]
+    fn a_table_with_no_branch_is_reported_against_the_table_not_the_record() {
+        let home = tempfile::tempdir().expect("tempdir");
+        write_target(home.path(), "web", None, None);
+        let mut app = app("web", None);
+        app.dogs = Default::default();
+
+        let standing = classify(home.path(), &app);
+
+        assert!(
+            matches!(&standing, Standing::BadSettings(why) if why.contains("branch")),
+            "{standing:?}"
+        );
+        let shown = render(&[("web".to_owned(), standing)]);
+        assert!(shown.contains("[app.dogs.deploy]"), "{shown}");
+        assert!(shown.contains("do not run setup"), "{shown}");
+        assert!(!shown.contains("record cannot be read"), "{shown}");
+    }
+
     /// fails if a deploy tree whose sheep is no longer registered appears in
     /// no row. The roll cannot name it, because the roll is what it is
     /// missing from, and a tree on disk with a service that may still be
@@ -466,7 +508,7 @@ mod tests {
     #[test]
     fn a_tree_with_no_registered_sheep_is_a_row_of_its_own() {
         let home = tempfile::tempdir().expect("tempdir");
-        write_target(home.path(), "gone", Watch::Auto, None, None);
+        write_target(home.path(), "gone", None, None);
         let registered: std::collections::BTreeMap<String, AppConfig> =
             [("web".to_owned(), app("web", None))].into_iter().collect();
         let targets = paths::targets(home.path()).expect("lists");
@@ -510,10 +552,20 @@ mod tests {
         );
     }
 
-    /// An `AppConfig` with just the two fields this module reads.
+    /// An `AppConfig` with just the fields this module reads, whose
+    /// `[app.dogs.deploy]` table follows `main` and is watched.
     fn app(name: &str, cwd: Option<&str>) -> AppConfig {
-        let mut app: AppConfig =
-            toml::from_str(&format!("name = {name:?}\nscript = \"./run.sh\"")).expect("parses");
+        app_watching(name, cwd, Watch::Auto)
+    }
+
+    /// As [`app`], with `watch` in the table.
+    fn app_watching(name: &str, cwd: Option<&str>, watch: Watch) -> AppConfig {
+        let watch = match watch {
+            Watch::Auto => "auto",
+            Watch::Manual => "manual",
+        };
+        let mut app =
+            fixtures::app_with_settings(name, &format!("branch = 'main'\nwatch = '{watch}'"));
         app.cwd = cwd.map(str::to_owned);
         app
     }
@@ -533,20 +585,13 @@ mod tests {
     /// Writes `<home>/deploy/<sheep>/deploy.toml` through `State::write`, so
     /// the fixture and the real reader agree by construction rather than by
     /// a hand-written string that can drift.
-    fn write_target(
-        home: &Path,
-        sheep: &str,
-        watch: Watch,
-        sha: Option<&str>,
-        failed: Option<&str>,
-    ) {
+    fn write_target(home: &Path, sheep: &str, sha: Option<&str>, failed: Option<&str>) {
         let tree = Tree::for_sheep(home, sheep);
         std::fs::create_dir_all(tree.state_file().parent().expect("has a parent"))
             .expect("create target dir");
         let state = State {
             deployed: sha.map(str::to_owned),
             failed: failed.map(str::to_owned),
-            watch,
             ..crate::fixtures::state()
         };
         state.write(&tree.state_file()).expect("write state");
@@ -559,7 +604,6 @@ mod tests {
         let state = State {
             deployed: Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_owned()),
             staged: Some(staged.to_owned()),
-            watch: Watch::Manual,
             ..crate::fixtures::state()
         };
         state.write(&tree.state_file()).expect("write state");
@@ -634,12 +678,14 @@ mod tests {
         write_target(
             home.path(),
             "bpm",
-            Watch::Manual,
             Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
             None,
         );
 
-        let standing = classify(home.path(), &app("bpm", current.path().to_str()));
+        let standing = classify(
+            home.path(),
+            &app_watching("bpm", current.path().to_str(), Watch::Manual),
+        );
         assert!(matches!(standing, Standing::Manual { .. }), "{standing:?}");
     }
 
@@ -697,7 +743,6 @@ mod tests {
         write_target(
             home.path(),
             "bpm",
-            Watch::Auto,
             Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
             Some("d4e5f6a7b8c9d4e5f6a7b8c9d4e5f6a7b8c9d4e5"),
         );
@@ -730,14 +775,16 @@ mod tests {
         write_target(
             home.path(),
             "bpm",
-            Watch::Manual,
             Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
             Some("d4e5f6a7b8c9d4e5f6a7b8c9d4e5f6a7b8c9d4e5"),
         );
 
         let row = render(&[(
             "bpm".to_owned(),
-            classify(home.path(), &app("bpm", current.path().to_str())),
+            classify(
+                home.path(),
+                &app_watching("bpm", current.path().to_str(), Watch::Manual),
+            ),
         )]);
 
         assert!(row.contains("only when asked"), "{row}");
@@ -760,7 +807,10 @@ mod tests {
 
         let row = render(&[(
             "bpm".to_owned(),
-            classify(home.path(), &app("bpm", current.path().to_str())),
+            classify(
+                home.path(),
+                &app_watching("bpm", current.path().to_str(), Watch::Manual),
+            ),
         )]);
 
         assert!(row.contains("manual"), "{row}");
@@ -779,14 +829,16 @@ mod tests {
         write_target(
             home.path(),
             "bpm",
-            Watch::Manual,
             Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
             None,
         );
 
         let row = render(&[(
             "bpm".to_owned(),
-            classify(home.path(), &app("bpm", current.path().to_str())),
+            classify(
+                home.path(),
+                &app_watching("bpm", current.path().to_str(), Watch::Manual),
+            ),
         )]);
 
         assert!(

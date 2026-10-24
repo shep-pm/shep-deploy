@@ -38,6 +38,8 @@
 //! sequence, and it stays because plan one's own brief named it up front.
 //! `sheep_config` is the tenth, added for `crate::settings`: a deploy reads
 //! the sheep's `[app.dogs.deploy]` table from the shepherd's own record of it.
+//! `set_sheep_dog_settings` is the eleventh, its writing twin: `--watch`,
+//! `--branch`, `setup --verify` and the cutover's promotion write the table.
 //!
 //! # Self-identification
 //!
@@ -61,7 +63,7 @@ use std::path::PathBuf;
 
 use shep_client::{
     Client, LinkState, ReconnectingClient, RequestError,
-    shep_core::config::AppConfig,
+    shep_core::config::{AppConfig, DogTable},
     shep_core::protocol::{ProcessInfo, Request, Response, SelectorSpec, SheepRefusal, Smit},
 };
 
@@ -69,7 +71,7 @@ use crate::error::Error;
 
 /// Everything this dog asks the shepherd for.
 ///
-/// Narrow on purpose: ten methods cover the whole plan, and each is written
+/// Narrow on purpose: eleven methods cover the whole plan, and each is written
 /// against whatever the shepherd itself calls the operation (`shep reload`,
 /// `shep restart`, ...) rather than against this crate's own vocabulary for
 /// it, so a reader who knows shep already knows what each one does.
@@ -168,6 +170,23 @@ pub trait Daemon {
     /// As [`Self::dog_config`]; a name no sheep has is a
     /// [`RpcErrorCode::NotFound`](shep_client::shep_core::protocol::RpcErrorCode).
     async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error>;
+
+    /// Replace `dog`'s whole table on `sheep` with `table`.
+    ///
+    /// The shepherd replaces the table rather than merging into it, so a
+    /// caller changing one key reads the table first and writes it back
+    /// whole - see [`crate::settings::change`]. One request, atomic on the
+    /// shepherd's side; it needs no lock of this dog's.
+    ///
+    /// # Errors
+    /// As [`Self::dog_config`]; a name no sheep has is a
+    /// [`RpcErrorCode::NotFound`](shep_client::shep_core::protocol::RpcErrorCode).
+    async fn set_sheep_dog_settings(
+        &self,
+        sheep: &str,
+        dog: &str,
+        table: DogTable,
+    ) -> Result<(), Error>;
 
     /// Attach this dog's short string to `sheep`, for `shep flock` to
     /// paint.
@@ -356,6 +375,23 @@ impl Daemon for Live {
         }
     }
 
+    async fn set_sheep_dog_settings(
+        &self,
+        sheep: &str,
+        dog: &str,
+        table: DogTable,
+    ) -> Result<(), Error> {
+        let asked = Request::SetSheepDogSettings {
+            name: sheep.to_owned(),
+            dog: dog.to_owned(),
+            table: Some(table),
+        };
+        match self.0.request(asked).await? {
+            Response::SheepDogSettingsSet { .. } => Ok(()),
+            other => Err(unexpected("SetSheepDogSettings", &other)),
+        }
+    }
+
     async fn set_smit(&self, sheep: &str, text: &str) -> Result<(), Error> {
         let smit: Smit = text.parse().map_err(Error::Smit)?;
         let asked = Request::SetSmit {
@@ -489,7 +525,7 @@ mod tests {
         }
 
         crate::fixtures::daemon_methods!(unimplemented;
-            dog_config, describe, start, delete, reload, restart, save_roll, sheep_config, set_smit,
+            dog_config, describe, start, delete, reload, restart, save_roll, sheep_config, set_sheep_dog_settings, set_smit,
         );
     }
 
@@ -501,7 +537,7 @@ mod tests {
     impl Daemon for Unreachable {
         crate::fixtures::daemon_methods!(
             answering Err(Error::Protocol("no session".to_owned()));
-            dog_config, list_flock, describe, start, delete, reload, restart, save_roll, sheep_config, set_smit,
+            dog_config, list_flock, describe, start, delete, reload, restart, save_roll, sheep_config, set_sheep_dog_settings, set_smit,
         );
     }
 
@@ -580,7 +616,7 @@ mod tests {
 
     /// fails if `unexpected` stops saying which request the answer was to.
     /// "a Flock of 2" alone does not tell an operator which call went
-    /// wrong, and this dog makes ten different ones.
+    /// wrong, and this dog makes eleven different ones.
     #[test]
     fn an_unexpected_answer_names_the_request_it_answered() {
         let err = unexpected("Reload", &Response::Flock(Vec::new()));

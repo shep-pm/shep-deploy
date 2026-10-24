@@ -326,7 +326,7 @@ async fn go<D: Daemon>(
     }
 
     let outcome = attempt(daemon, tree, state, &head, started_at, &settings, config).await;
-    record(tree, state, &head, &outcome, config.retention).await;
+    record(daemon, tree, state, &head, &outcome, config.retention).await;
     outcome
 }
 

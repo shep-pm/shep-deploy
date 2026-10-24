@@ -9,24 +9,26 @@ use super::undo::undo_start;
 use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::lock;
-use crate::state::{State, Watch};
+use crate::settings::{self, Change};
+use crate::state::Watch;
 use crate::verify::Generation;
 
 /// Registers the sheep against `current`, waits for the newcomer to start
 /// and stay up, and deletes the instances it replaced.
 ///
-/// A cutover that lands with nothing stranded promotes the record's `watch`
-/// from the `manual` [`super::prepare_with()`] wrote to `auto`, which is what makes the
-/// target the poll loop's. A stranded one does not: instances it could not
+/// A cutover that lands with nothing stranded promotes `watch` in the sheep's
+/// `[app.dogs.deploy]` table from the `manual` [`super::prepare_with()`] wrote
+/// to `auto`, which is what makes the target the poll loop's. A stranded one does not: instances it could not
 /// delete are still registered, and every later deploy reloads the name and
 /// respawns each of them from its own pre-adoption spec, so a loop polling
 /// it would bring them back on a schedule. Remove the ids the error names,
 /// then `shep deploy <sheep> --watch auto`.
 ///
-/// A `verify` the operator edited in the record while the cutover ran is
-/// kept; a `--watch manual` typed while it ran is not, because the record
-/// already said `manual` from [`super::prepare_with()`] and the two cannot be told
-/// apart. Run it after setup returns.
+/// The promotion is the one write of `watch` this makes, so a `--watch manual`
+/// typed while the cutover ran is overwritten by it: the table already said
+/// `manual` from [`super::prepare_with()`] and the two cannot be told apart.
+/// Run it after setup returns. Every other key of the table is left as the
+/// shepherd holds it, `verify` included.
 ///
 /// # Errors
 /// [`Error::CutOver`] if the newcomer never came up, in which case it has
@@ -53,9 +55,11 @@ use crate::verify::Generation;
 /// collected rather than the first failure returned, so the error can name
 /// every one of them.
 ///
-/// [`State::write`] failing is the mild one, and it is passed through. The
+/// [`crate::state::State::write`] failing is the mild one, and it is passed through. The
 /// release is serving and only the record is missing, which the next
-/// `shep-deploy deploy` writes.
+/// `shep-deploy deploy` writes. The promotion failing is the same: the
+/// record is written first, and `shep-deploy deploy <sheep> --watch auto`
+/// finishes what the promotion did not.
 pub async fn cut_over<D: Daemon>(daemon: &D, prepared: Prepared) -> Result<String, Error> {
     let (hold, tree, mut state, sha, app, previous_config) = prepared.into_parts();
     // Held to the end of this function, and named so it is not dropped here.
@@ -129,17 +133,6 @@ pub async fn cut_over<D: Daemon>(daemon: &D, prepared: Prepared) -> Result<Strin
             // Written either way: the release is serving, so the record
             // naming it is true whatever the cleanup did.
             state.deployed = Some(sha.clone());
-            // The promotion out of `manual`, and only on the clean path.
-            // The tree has now been served from, which is what makes it a
-            // deploy target at all. A cutover that left instances behind
-            // has not finished: every later deploy reloads the name and
-            // respawns each leftover from its own pre-adoption spec, so a
-            // loop polling this target would bring them back on a
-            // schedule. The operator removes the ids the error names and
-            // then asks for `--watch auto`.
-            if stranded.is_empty() {
-                state.watch = Watch::Auto;
-            }
             let outcome = if stranded.is_empty() {
                 Ok(sha)
             } else {
@@ -154,23 +147,24 @@ pub async fn cut_over<D: Daemon>(daemon: &D, prepared: Prepared) -> Result<Strin
             // operator costs an instance respawned on the old config on every
             // deploy from now on, so the write's failure is printed rather
             // than allowed to replace the error that names them.
-            //
-            // `verify` is the operator's, hand-edited in the record, and a
-            // first build can take an hour: an edit made during it is taken
-            // from the disk rather than written over by this process's copy
-            // from `prepare`. `watch` is deliberately NOT taken from the
-            // disk. `prepare` wrote `manual` so the poll loop leaves the
-            // tree alone until it has been served from, and the line above
-            // is the promotion out of that; a `--watch manual` typed during
-            // setup reads the same as the `manual` `prepare` wrote, and is
-            // overwritten. Setup is a command the operator is sitting at;
-            // `--watch manual` after it returns is the way to keep it.
-            let written = lock::hold_record(&tree).and_then(|_record| {
-                if let Ok(on_disk) = State::read(&tree.state_file()) {
-                    state.verify = on_disk.verify;
+            let recorded =
+                lock::hold_record(&tree).and_then(|_record| state.write(&tree.state_file()));
+            // The promotion out of `manual`, and only on the clean path.
+            // The tree has now been served from, which is what makes it a
+            // deploy target at all. A cutover that left instances behind
+            // has not finished: every later deploy reloads the name and
+            // respawns each leftover from its own pre-adoption spec, so a
+            // loop polling this target would bring them back on a
+            // schedule. The operator removes the ids the error names and
+            // then asks for `--watch auto`. After the record and only if it
+            // was written, so a poll tick that sees `auto` finds a record
+            // naming the release.
+            let written = match recorded {
+                Ok(()) if outcome.is_ok() => {
+                    settings::change(daemon, &sheep, [Change::Watch(Watch::Auto)]).await
                 }
-                state.write(&tree.state_file())
-            });
+                other => other,
+            };
             if let Err(err) = written {
                 if outcome.is_ok() {
                     return Err(err);
@@ -230,7 +224,7 @@ mod tests {
         cutover_fixture_refusing_start, cutover_fixture_shepherd_goes_quiet,
         cutover_fixture_with_instances,
     };
-    use crate::state::Verify;
+    use crate::state::{State, Verify};
     /// fails if the new registration's cwd is anything but the `current`
     /// symlink, set EXPLICITLY. A Flockfile app's DEFAULTED cwd is resolved
     /// at registration, so registering from inside a release pins the sheep
@@ -254,24 +248,22 @@ mod tests {
         );
     }
 
-    /// fails if a `verify` the operator edited during the cutover is written
-    /// over by the cutover's own copy from `prepare`. A first build can take
-    /// an hour, and the record is the file they are told to edit.
+    /// fails if the promotion rewrites the table from the cutover's copy of
+    /// `prepare`'s settings, writing over a `verify` the operator set while
+    /// the first build ran, or if it leaves `watch` unpromoted. A first build
+    /// can take an hour, and the table is what they edit.
     #[tokio::test(start_paused = true)]
-    async fn a_verify_edited_during_the_cutover_survives_its_record_write() {
+    async fn the_promotion_writes_watch_and_keeps_a_verify_set_during_the_cutover() {
         let (daemon, prepared, _dirs) = cutover_fixture().await;
-        let path = prepared.tree.state_file();
-        let mut edited = State::read(&path).expect("the record prepare wrote");
-        assert_eq!(edited.verify, Verify::Probed, "the default before the edit");
-        edited.verify = Verify::Alive;
-        edited.write(&path).expect("the operator's edit");
+        let daemon = daemon.with_operator_setting("verify", "alive");
+        assert_eq!(daemon.settings().watch, Watch::Manual, "as prepare left it");
 
         cut_over(&daemon, prepared).await.expect("cuts over");
 
-        let after = State::read(&path).expect("reads");
-        assert_eq!(after.verify, Verify::Alive, "the edit survives");
-        assert_eq!(after.watch, Watch::Auto, "and the promotion still lands");
-        assert!(after.deployed.is_some());
+        let after = daemon.settings();
+        assert_eq!(after.watch, Watch::Auto, "the promotion lands");
+        assert_eq!(after.verify, Verify::Alive, "the operator's edit survives");
+        assert_eq!(after.branch.as_deref(), Some("main"));
     }
 
     /// fails if a Flockfile that names no `interpreter` is registered with
@@ -488,7 +480,7 @@ mod tests {
         let path = prepared.tree.state_file();
 
         assert_eq!(
-            State::read(&path).expect("reads").watch,
+            daemon.settings().watch,
             Watch::Manual,
             "prepared, and nothing has served from the tree yet"
         );
@@ -496,10 +488,15 @@ mod tests {
         cut_over(&daemon, prepared).await.expect("cuts over");
 
         assert_eq!(
-            State::read(&path).expect("reads").watch,
+            daemon.settings().watch,
             Watch::Auto,
             "the cutover landed, so the poll loop may have it"
         );
+        let on_disk: toml::Table = std::fs::read_to_string(&path)
+            .expect("reads")
+            .parse()
+            .expect("a table");
+        assert!(!on_disk.contains_key("watch"), "{on_disk:?}");
     }
 
     /// fails if a cutover that was abandoned leaves the target watched.
@@ -508,11 +505,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_abandoned_cutover_leaves_the_target_unwatched() {
         let (daemon, prepared, _dirs) = cutover_fixture_never_appears().await;
-        let path = prepared.tree.state_file();
 
         cut_over(&daemon, prepared).await.expect_err("gives up");
 
-        assert_eq!(State::read(&path).expect("reads").watch, Watch::Manual);
+        assert_eq!(daemon.settings().watch, Watch::Manual);
     }
 
     /// fails if a cutover that landed and could not tidy up starts the poll
@@ -532,7 +528,7 @@ mod tests {
         assert!(matches!(err, Error::Stranded { .. }), "{err}");
         let state = State::read(&path).expect("reads");
         assert!(state.deployed.is_some(), "the release is serving");
-        assert_eq!(state.watch, Watch::Manual);
+        assert_eq!(daemon.settings().watch, Watch::Manual);
     }
 
     /// fails if a cutover that DID land stops recording what it landed, or

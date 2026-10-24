@@ -317,12 +317,12 @@ pub(crate) fn refuse_ungated_verification(
         sheep,
         app,
         mode,
-        "change the verify line in deploy.toml to \"alive\"",
+        "set `verify = \"alive\"` in its `[app.dogs.deploy]` table",
     )
 }
 
-/// As [`refuse_ungated_verification`], for `setup`, where no `deploy.toml`
-/// exists yet and the way to `alive` is the flag that writes it.
+/// As [`refuse_ungated_verification`], for `setup`, where the table has no
+/// `verify` yet and the way to `alive` is the flag that writes it.
 ///
 /// # Errors
 /// [`Error::Config`] naming the sheep and every way out.

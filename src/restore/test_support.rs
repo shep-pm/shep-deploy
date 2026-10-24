@@ -292,7 +292,7 @@ impl Daemon for Recording {
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, reload, restart, sheep_config, set_smit,
+        dog_config, list_flock, reload, restart, sheep_config, set_sheep_dog_settings, set_smit,
     );
 }
 

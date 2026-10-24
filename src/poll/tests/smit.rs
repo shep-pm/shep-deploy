@@ -1,5 +1,7 @@
 //! Tests for the smit each tick republishes.
 
+use shep_client::shep_core::config::DogTable;
+
 use super::*;
 
 /// A [`Daemon`] whose `set_smit` records every `(sheep, text)` it was
@@ -12,14 +14,19 @@ struct SmitRecording {
 
 impl Default for SmitRecording {
     fn default() -> Self {
-        Self {
-            ready: Ready::new(),
-            smits: RefCell::new(Vec::new()),
-        }
+        Self::over(Ready::new())
     }
 }
 
 impl SmitRecording {
+    /// Recording smits, with the sheep as `ready` holds them.
+    fn over(ready: Ready) -> Self {
+        Self {
+            ready,
+            smits: RefCell::new(Vec::new()),
+        }
+    }
+
     fn smits(&self) -> Vec<(String, String)> {
         self.smits.borrow().clone()
     }
@@ -53,6 +60,14 @@ impl Daemon for SmitRecording {
     async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
         self.ready.sheep_config(sheep).await
     }
+    async fn set_sheep_dog_settings(
+        &self,
+        sheep: &str,
+        dog: &str,
+        table: DogTable,
+    ) -> Result<(), Error> {
+        self.ready.set_sheep_dog_settings(sheep, dog, table).await
+    }
     async fn set_smit(&self, sheep: &str, text: &str) -> Result<(), Error> {
         self.smits
             .borrow_mut()
@@ -85,7 +100,7 @@ impl Daemon for RefusingSmits {
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, start, delete, restart, save_roll,
+        dog_config, list_flock, start, delete, restart, save_roll, set_sheep_dog_settings,
     );
 }
 
@@ -112,7 +127,7 @@ impl Daemon for RefusingRepaints {
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, start, delete, restart, save_roll,
+        dog_config, list_flock, start, delete, restart, save_roll, set_sheep_dog_settings,
     );
 }
 
@@ -127,16 +142,14 @@ async fn every_tick_republishes_every_targets_smit() {
     write_target(
         home.path(),
         "bpm",
-        Watch::Auto,
         Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
     );
     write_target(
         home.path(),
         "ctm",
-        Watch::Manual,
         Some("f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5"),
     );
-    let daemon = SmitRecording::default();
+    let daemon = SmitRecording::over(Ready::new().with_table("ctm", PAUSED));
 
     tick(&daemon, home.path(), &fixtures::dog_config()).await;
     tick(&daemon, home.path(), &fixtures::dog_config()).await;
@@ -162,10 +175,9 @@ async fn a_manual_target_still_gets_a_smit() {
     write_target(
         home.path(),
         "ctm",
-        Watch::Manual,
         Some("f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5"),
     );
-    let daemon = SmitRecording::default();
+    let daemon = SmitRecording::over(Ready::new().with_table("ctm", PAUSED));
     tick(&daemon, home.path(), &fixtures::dog_config()).await;
     assert_eq!(daemon.smits().len(), 1);
 }
@@ -181,7 +193,7 @@ async fn a_refused_smit_does_not_stop_the_tick() {
     // ends, which fails the fetch for a reason that has nothing to do
     // with the smit refusal this test exists to pin - see every other
     // `write_target_ready` caller in `tests.rs` for the pattern.
-    let _origin = write_target_ready(home.path(), "fine", Watch::Auto);
+    let _origin = write_target_ready(home.path(), "fine");
     let results = tick(
         &RefusingSmits(Ready::new()),
         home.path(),
@@ -215,15 +227,11 @@ async fn a_too_long_branch_name_does_not_stop_the_tick() {
     write_target(
         home.path(),
         "long",
-        Watch::Auto,
         Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
     );
-    let tree = Tree::for_sheep(home.path(), "long");
-    let mut state = State::read(&tree.state_file()).expect("reads");
-    state.branch = "x".repeat(100);
-    state.write(&tree.state_file()).expect("writes");
-
-    let daemon = SmitRecording::default();
+    let daemon = SmitRecording::over(
+        Ready::new().with_table("long", &format!("branch = '{}'\n", "x".repeat(100))),
+    );
     let results = tick(&daemon, home.path(), &fixtures::dog_config())
         .await
         .results;
@@ -246,7 +254,7 @@ async fn a_too_long_branch_name_does_not_stop_the_tick() {
 #[tokio::test(start_paused = true)]
 async fn a_deploy_repaints_the_smit_in_the_tick_that_made_it() {
     let home = tempfile::tempdir().expect("tempdir");
-    let origin = write_target_ready(home.path(), "fine", Watch::Auto);
+    let origin = write_target_ready(home.path(), "fine");
     let head = fixtures::head_of(origin.path());
     let daemon = SmitRecording::default();
 
@@ -269,7 +277,7 @@ async fn a_deploy_repaints_the_smit_in_the_tick_that_made_it() {
 #[tokio::test(start_paused = true)]
 async fn a_refusal_of_both_paints_is_one_row() {
     let home = tempfile::tempdir().expect("tempdir");
-    let _origin = write_target_ready(home.path(), "fine", Watch::Auto);
+    let _origin = write_target_ready(home.path(), "fine");
 
     let results = tick(
         &RefusingSmits(Ready::new()),
@@ -298,7 +306,7 @@ async fn a_refusal_of_both_paints_is_one_row() {
 #[tokio::test(start_paused = true)]
 async fn a_refused_repaint_is_a_row_and_does_not_stop_the_tick() {
     let home = tempfile::tempdir().expect("tempdir");
-    let _origin = write_target_ready(home.path(), "fine", Watch::Auto);
+    let _origin = write_target_ready(home.path(), "fine");
 
     let results = tick(
         &RefusingRepaints(SmitRecording::default()),
