@@ -43,6 +43,19 @@
 //! milliseconds and the caller wants the write to land, not a refusal. A
 //! deploy takes the tree lock first and this one inside it; `set_watch`
 //! takes only this one; nothing holding this one ever waits for the tree's.
+//!
+//! # The third lock
+//!
+//! [`hold_clone`] guards one bare clone, on `git.lock` beside it. Trees whose
+//! remote is the same repository share a clone (see [`crate::paths::Repo`]),
+//! each fetching through its own `git` link under its own tree lock, and git
+//! refuses a second fetch into one repository that overlaps the first
+//! (`cannot lock ref`). So `git::fetch` takes this one for the fetch alone,
+//! and so does anything that adds a link to a clone or removes one. Blocking,
+//! like the record lock, and for the same reason. A deploy holds the tree lock
+//! first and this one inside it; nothing holding this one ever waits for a
+//! tree's, or for a record's. A clone a tree still owns by itself has the same
+//! lock beside it, taken by the same fetch, and nobody else contends for it.
 
 use std::fs::{File, OpenOptions, Permissions};
 use std::io;
@@ -126,6 +139,39 @@ pub fn hold_record(tree: &Tree) -> Result<Recording, Error> {
     }
 }
 
+/// An exclusive hold on one bare clone, for one fetch or one change to who
+/// links to it.
+///
+/// Released when dropped, and by the kernel if the holder dies. See the
+/// module doc.
+#[derive(Debug)]
+pub struct Cloning {
+    /// Held for its `Drop`.
+    _held: Flock<File>,
+}
+
+/// Takes the lock on the clone at `git_dir`, waiting for whoever has it.
+///
+/// `git_dir` is resolved first, so a tree's `git` link and the clone's own
+/// path name one lock. The lock file is `git.lock` beside the resolved
+/// clone, which is the shared clone's own directory, and the tree's root for
+/// a clone the tree owns.
+///
+/// # Errors
+/// [`Error::Io`], naming the lock file, if it cannot be created or the lock
+/// cannot be taken.
+pub fn hold_clone(git_dir: &std::path::Path) -> Result<Cloning, Error> {
+    let path = crate::shared::resolved(git_dir).with_extension("lock");
+    let file = open_lock_file(&path)?;
+    match Flock::lock(file, FlockArg::LockExclusive) {
+        Ok(held) => Ok(Cloning { _held: held }),
+        Err((_, errno)) => Err(Error::Io {
+            path,
+            source: io::Error::from_raw_os_error(errno as i32),
+        }),
+    }
+}
+
 /// Opens (creating if need be) the lock file at `path`, owner-only, never
 /// through a link.
 fn open_lock_file(path: &std::path::Path) -> Result<File, Error> {
@@ -185,6 +231,7 @@ fn refusal(sheep: &str, path: PathBuf, errno: Errno) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures;
 
     /// fails if the record lock stops being exclusive, or stops waiting.
     /// A holder keeps it for one read and one write; a second taker has
@@ -216,6 +263,70 @@ mod tests {
         waiting.join().expect("thread");
     }
     use crate::paths::Tree;
+
+    /// fails if a fetch runs while somebody holds the clone's lock, or if the
+    /// lock is not the same one through a tree's `git` link as through the
+    /// clone's own path. Two trees fetch into one clone through two links, and
+    /// git refuses the second with `cannot lock ref` when they overlap.
+    #[test]
+    fn a_fetch_waits_for_the_clone_lock_whichever_path_names_the_clone() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let origin = fixtures::checkout(&[("a", "a")]);
+        let remote = origin.path().to_str().expect("utf-8").to_owned();
+        let clone = home.path().join("repos").join("k").join("git");
+        crate::git::init_bare(&clone).expect("bare");
+        let link = home.path().join("link");
+        std::os::unix::fs::symlink(&clone, &link).expect("link");
+
+        let held = hold_clone(&clone).expect("first hold");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fetching = std::thread::spawn(move || {
+            crate::git::fetch(&link, &remote, "main", fixtures::TEST_BUDGET).expect("fetch");
+            tx.send(()).expect("report");
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "the fetch must wait while the clone is held"
+        );
+
+        drop(held);
+        rx.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the fetch runs once the hold is dropped");
+        fetching.join().expect("thread");
+    }
+
+    /// fails if two trees fetching into one clone at once cannot both
+    /// succeed, which is what the clone lock exists for. Every round lands a
+    /// new commit first, so each fetch has a ref to move.
+    #[test]
+    fn concurrent_fetches_into_one_clone_both_succeed() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let origin = fixtures::checkout(&[("a", "a")]);
+        let remote = origin.path().to_str().expect("utf-8").to_owned();
+        let clone = home.path().join("git");
+        crate::git::init_bare(&clone).expect("bare");
+
+        for round in 0..5 {
+            fixtures::commit(origin.path(), &[(&format!("f{round}"), "x")], "more");
+            let fetches: Vec<_> = (0..2)
+                .map(|_| {
+                    let (clone, remote) = (clone.clone(), remote.clone());
+                    std::thread::spawn(move || {
+                        crate::git::fetch(&clone, &remote, "main", fixtures::TEST_BUDGET)
+                    })
+                })
+                .collect();
+            for fetch in fetches {
+                fetch.join().expect("thread").expect("both fetches succeed");
+            }
+            assert_eq!(
+                crate::git::remote_head(&clone, "main").expect("head"),
+                fixtures::head_of(origin.path())
+            );
+        }
+    }
 
     /// fails if two holds on one tree can be taken at once.
     #[test]

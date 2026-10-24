@@ -190,10 +190,17 @@ pub fn current_branch(checkout: &Path) -> Result<String, Error> {
 /// closes the door anyway. Measured 2026-09-03: `git fetch -- <url> <refspec>`
 /// behaves exactly as the form without it.
 ///
+/// Holds [`crate::lock::hold_clone`] for the fetch alone, waiting for another
+/// fetch into the same clone: trees with one remote share a clone, and git
+/// refuses two overlapping fetches into one repository. The wait is not part
+/// of `budget`.
+///
 /// # Errors
 /// [`Error::Git`] if `remote` cannot be reached or refuses the fetch.
-/// [`Error::Io`] if `git` itself cannot be launched.
+/// [`Error::Io`] if `git` itself cannot be launched, or the clone's lock
+/// cannot be taken.
 pub fn fetch(git_dir: &Path, remote: &str, tracked: &str, budget: Duration) -> Result<(), Error> {
+    let _cloning = crate::lock::hold_clone(git_dir)?;
     let tracked_ref = refname(tracked);
     let tracked_refspec = format!("+{tracked_ref}:{tracked_ref}");
     let mut args = vec![
