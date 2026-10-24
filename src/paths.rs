@@ -117,6 +117,11 @@ impl Repo {
     /// The shared clone for `remote`.
     #[must_use]
     pub fn for_remote(shep_home: &Path, remote: &str) -> Self {
+        Self::keyed(&shep_home.join("deploy").join(REPOS), remote)
+    }
+
+    /// The clone for `remote` among those under `repos`.
+    fn keyed(repos: &Path, remote: &str) -> Self {
         let normalized = normalized_remote(remote);
         let tail: String = normalized
             .rsplit('/')
@@ -135,10 +140,7 @@ impl Repo {
         let tail = tail.trim_start_matches('.');
         let tail = if tail.is_empty() { "repo" } else { tail };
         Self {
-            root: shep_home
-                .join("deploy")
-                .join(REPOS)
-                .join(format!("{tail}-{:016x}", fnv1a(&normalized))),
+            root: repos.join(format!("{tail}-{:016x}", fnv1a(&normalized))),
         }
     }
 
@@ -322,6 +324,22 @@ impl Tree {
             Err(source) => return Err(Error::Io { path: link, source }),
         }
         std::os::unix::fs::symlink(target, &link).map_err(Error::at(link))
+    }
+
+    /// Whether this tree's clone is one `remote` may be fetched into.
+    ///
+    /// A tree linked to a shared clone is served only by the clone keyed by
+    /// `remote`: fetching another remote into it would replace the branches
+    /// every other tree linked to it deploys from. A tree that owns its clone
+    /// has nothing shared to spoil.
+    #[must_use]
+    pub fn clone_serves(&self, remote: &str) -> bool {
+        let Some(linked) = self.linked_clone() else {
+            return true;
+        };
+        self.root
+            .parent()
+            .is_some_and(|deploy| linked == Repo::keyed(&deploy.join(REPOS), remote))
     }
 
     /// The directory holding every built release, one per sha.

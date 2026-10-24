@@ -5,6 +5,7 @@ use std::fs;
 
 use crate::deploy::test_support::{Shepherd, commit_on_origin, fixture_with_previous_release};
 use crate::deploy::{Outcome, deploy};
+use crate::error::Error;
 use crate::fixtures;
 use crate::paths::Repo;
 
@@ -66,5 +67,36 @@ async fn a_tree_linked_to_a_shared_clone_deploys() {
     assert!(
         repo.git().join("worktrees").is_dir(),
         "the worktree is registered in the shared clone"
+    );
+}
+
+/// fails if a deploy fetches its recorded remote into a shared clone keyed by
+/// another one. The record is hand-editable, and the fetch's mirror refspec
+/// with `--prune` would replace every branch the other sheep deploy from.
+#[tokio::test]
+async fn a_tree_linked_for_one_remote_refuses_to_deploy_another() {
+    let mut fixture = fixture_with_previous_release();
+    let repo = Repo::for_remote(fixture.home.path(), &fixture.state.remote);
+    fs::create_dir_all(repo.root()).expect("repo dir");
+    fs::rename(fixture.tree.git(), repo.git()).expect("move the clone");
+    fixture.tree.link_clone(&repo).expect("link");
+    let before = crate::git::remote_head(&repo.git(), "main").expect("head");
+    fixture.state.remote = "https://example.invalid/other.git".to_owned();
+
+    let err = deploy(
+        &Shepherd::ready(),
+        &fixture.tree,
+        &mut fixture.state,
+        &fixtures::dog_config(),
+    )
+    .await
+    .expect_err("refused");
+
+    assert!(matches!(err, Error::Config(_)), "{err}");
+    assert!(err.to_string().contains("setup"), "{err}");
+    assert_eq!(
+        crate::git::remote_head(&repo.git(), "main").expect("head"),
+        before,
+        "the clone is untouched"
     );
 }

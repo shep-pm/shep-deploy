@@ -288,6 +288,19 @@ async fn go<D: Daemon>(
         });
     }
 
+    // The link was made for the remote `setup` was given, and a record can be
+    // edited by hand. A fetch of another remote into a clone shared with other
+    // sheep would put that remote's branches under all of them.
+    if !tree.clone_serves(&state.remote) {
+        return Err(Error::Config(format!(
+            "{sheep}: `remote` in {} is {}, which is not the remote the clone {} is shared for; \
+             run `shep-deploy setup` again to relink it",
+            tree.state_file().display(),
+            state.remote,
+            tree.git().display(),
+        )));
+    }
+
     let started_at = swap::resolve(&tree.current())?;
 
     // Off the runtime's thread: see `shared::off_thread` for what a fetch on
