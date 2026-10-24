@@ -389,6 +389,45 @@ mod tests {
         );
     }
 
+    /// fails if the app a release is staged with comes from the release. A
+    /// committed `Flockfile.toml` that changes `script` and sets `user` is in
+    /// the checkout, and the staged app is still the sheep's stored one.
+    #[tokio::test]
+    async fn the_staged_app_is_the_stored_one_whatever_the_release_carries() {
+        let fixture = fixture_with_previous_release();
+        fs::write(
+            fixture.origin.path().join("Flockfile.toml"),
+            "[[app]]\nname = 'web'\nscript = './elsewhere.sh'\nuser = 'root'\n",
+        )
+        .expect("write Flockfile");
+        let second = commit_on_origin(&fixture, "second.txt");
+        crate::git::fetch(
+            &fixture.tree.git(),
+            &fixture.state.remote,
+            "main",
+            fixtures::TEST_BUDGET,
+        )
+        .expect("fetch");
+        let stored = fixtures::gated_app("web", FIXTURE_TABLE);
+        let settings = crate::settings::from_app("web", &stored).expect("settings");
+
+        let staged = super::stage_release(
+            &fixture.tree,
+            &fixture.state.checkout,
+            &second,
+            &stored,
+            &settings,
+        )
+        .expect("staged");
+
+        let shipped = fs::read_to_string(fixture.tree.release(&second).join("Flockfile.toml"))
+            .expect("the release carries its Flockfile");
+        assert!(shipped.contains("elsewhere.sh"), "{shipped}");
+        assert_eq!(staged.app, stored);
+        assert_eq!(staged.app.script, "./run.sh");
+        assert_eq!(staged.app.user, None);
+    }
+
     /// fails if a `probed` target with no readiness probe is deployed
     /// anyway. `Online` is only a health verdict when a probe is what gates
     /// it; without one shep waits out `listen_timeout` and reports a

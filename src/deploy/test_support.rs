@@ -302,11 +302,6 @@ impl Shepherd {
         self.held.set(key, value);
     }
 
-    /// The sheep's whole config as the shepherd holds it now.
-    pub(crate) fn stored(&self) -> AppConfig {
-        self.held.app()
-    }
-
     /// The sheep's `[app.dogs.deploy]` table as the shepherd holds it now.
     pub(crate) fn settings(&self) -> crate::settings::Settings {
         self.held.settings()

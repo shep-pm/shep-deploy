@@ -49,7 +49,8 @@ async fn the_sheeps_command_runs_and_the_flockfiles_is_ignored() {
 /// fails if a release's own Flockfile is still read for the app: one that
 /// changes `script` and sets a `user` would then either be refused or choose
 /// who the build runs as. The sheep's stored config is the app, so the deploy
-/// goes through and the shepherd's copy is as it was.
+/// goes through. The app a deploy stages is pinned in
+/// `deploy::prepare`'s tests.
 #[tokio::test]
 async fn a_flockfile_that_changes_script_and_user_deploys_with_the_stored_app() {
     let mut fixture = fixture_with_previous_release();
@@ -62,11 +63,9 @@ async fn a_flockfile_that_changes_script_and_user_deploys_with_the_stored_app() 
     )
     .expect("write Flockfile");
     let second = commit_on_origin(&fixture, "second.txt");
-    let daemon = Shepherd::ready();
-    let stored = daemon.stored();
 
     let outcome = deploy(
-        &daemon,
+        &Shepherd::ready(),
         &fixture.tree,
         &mut fixture.state,
         &fixtures::dog_config(),
@@ -75,9 +74,6 @@ async fn a_flockfile_that_changes_script_and_user_deploys_with_the_stored_app() 
     .expect("completes");
 
     assert_eq!(outcome, Outcome::Deployed { sha: second });
-    assert_eq!(daemon.stored(), stored);
-    assert_eq!(stored.script, "./run.sh");
-    assert_eq!(stored.user, None);
 }
 
 /// fails if a typo in the sheep's table is skipped over, which would deploy
