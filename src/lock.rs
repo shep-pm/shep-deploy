@@ -155,20 +155,47 @@ pub struct Cloning {
 /// `git_dir` is resolved first, so a tree's `git` link and the clone's own
 /// path name one lock. The lock file is `git.lock` beside the resolved
 /// clone, which is the shared clone's own directory, and the tree's root for
-/// a clone the tree owns.
+/// a clone the tree owns. A lock file removed while this waited, with the
+/// clone, is made again and taken afresh.
 ///
 /// # Errors
 /// [`Error::Io`], naming the lock file, if it cannot be created or the lock
 /// cannot be taken.
 pub fn hold_clone(git_dir: &std::path::Path) -> Result<Cloning, Error> {
+    use std::os::unix::fs::MetadataExt;
+
+    // Made first, so the path resolves the same before the clone exists as
+    // after: `resolved` canonicalizes the parent when the clone is not there,
+    // and a parent that is not there either is left as spelled, which under a
+    // symlinked `$SHEP_HOME` is a different lock file.
+    if let Some(parent) = git_dir.parent() {
+        std::fs::create_dir_all(parent).map_err(Error::at(parent))?;
+    }
     let path = crate::shared::resolved(git_dir).with_extension("lock");
-    let file = open_lock_file(&path)?;
-    match Flock::lock(file, FlockArg::LockExclusive) {
-        Ok(held) => Ok(Cloning { _held: held }),
-        Err((_, errno)) => Err(Error::Io {
-            path,
-            source: io::Error::from_raw_os_error(errno as i32),
-        }),
+    loop {
+        let file = open_lock_file(&path)?;
+        let held = match Flock::lock(file, FlockArg::LockExclusive) {
+            Ok(held) => held,
+            Err((_, errno)) => {
+                return Err(Error::Io {
+                    path,
+                    source: io::Error::from_raw_os_error(errno as i32),
+                });
+            }
+        };
+        // The holder before us may have removed the clone, lock file and all,
+        // while we waited: what we hold is then a file nothing can find, and a
+        // later taker would make a new one and not wait for us. Hold the file
+        // that is at the path, or try again.
+        let ours = held.metadata().map_err(Error::at(&path))?;
+        match std::fs::metadata(&path) {
+            Ok(at_path) if (at_path.dev(), at_path.ino()) == (ours.dev(), ours.ino()) => {
+                return Ok(Cloning { _held: held });
+            }
+            Ok(_) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(Error::Io { path, source }),
+        }
     }
 }
 
@@ -295,6 +322,73 @@ mod tests {
         rx.recv_timeout(std::time::Duration::from_secs(30))
             .expect("the fetch runs once the hold is dropped");
         fetching.join().expect("thread");
+    }
+
+    /// Takes the lock, parks a waiter on it, removes the clone's directory
+    /// under the waiter (and makes its lock file again, when `recreate`),
+    /// lets the first holder go, and returns whether a third taker had to
+    /// wait for the waiter.
+    fn third_taker_waits_for_a_waiter_that_outlasted_a_removal(recreate: bool) -> bool {
+        let home = tempfile::tempdir().expect("tempdir");
+        let dir = home.path().join("repos").join("k");
+        let clone = dir.join("git");
+        let held = hold_clone(&clone).expect("first hold");
+
+        let (acquired, hear) = std::sync::mpsc::channel();
+        let (release, let_go) = std::sync::mpsc::channel::<()>();
+        let waiter = {
+            let clone = clone.clone();
+            std::thread::spawn(move || {
+                let second = hold_clone(&clone).expect("second hold");
+                acquired.send(()).expect("report");
+                let_go.recv().ok();
+                drop(second);
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::remove_dir_all(&dir).expect("the clone is removed");
+        if recreate {
+            std::fs::create_dir_all(&dir).expect("the directory is made again");
+            std::fs::write(dir.join("git.lock"), "").expect("the lock file is made again");
+        }
+        drop(held);
+        hear.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the waiter gets a lock");
+
+        let (third_in, third_hears) = std::sync::mpsc::channel();
+        let third = std::thread::spawn(move || {
+            let _third = hold_clone(&clone).expect("third hold");
+            third_in.send(()).expect("report");
+        });
+        let waited = third_hears.recv_timeout(std::time::Duration::from_millis(300))
+            == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+        release.send(()).expect("let go");
+        third_hears
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("and then get it");
+        waiter.join().expect("thread");
+        third.join().expect("thread");
+        waited
+    }
+
+    /// fails if a taker that waited out a holder who removed the clone, lock
+    /// file and all, ends up holding a file nobody else can find. A later
+    /// taker would make a new lock file and not wait for it, so two fetches
+    /// would run at once with both believing they held the clone.
+    #[test]
+    fn a_lock_file_removed_under_a_waiter_does_not_leave_it_holding_nothing() {
+        assert!(third_taker_waits_for_a_waiter_that_outlasted_a_removal(
+            false
+        ));
+    }
+
+    /// fails if a lock file made again under a waiter is mistaken for the one
+    /// the waiter holds, which only the inode tells apart.
+    #[test]
+    fn a_lock_file_made_again_under_a_waiter_is_not_the_one_it_holds() {
+        assert!(third_taker_waits_for_a_waiter_that_outlasted_a_removal(
+            true
+        ));
     }
 
     /// fails if two trees fetching into one clone at once cannot both
