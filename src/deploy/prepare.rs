@@ -11,9 +11,8 @@ use crate::error::Error;
 use crate::hook::Hooks;
 use crate::paths::Tree;
 use crate::settings::Settings;
-use crate::shared::run_git;
 use crate::state::Verify;
-use crate::{flockfile, git, linkcheck, shared};
+use crate::{git, linkcheck, shared};
 
 /// What [`stage_release`] hands its callers: the app to register, the build
 /// to run and the hooks to run after it (both from the sheep's
@@ -26,36 +25,33 @@ pub(crate) struct Staged {
     pub(crate) linked: shared::FromCheckout,
 }
 
-/// Everything between a sha and its build: the worktree, the cache link,
-/// the operator's shared files, and the two Flockfiles read once.
+/// Everything between a sha and its build: the worktree, the cache link, and
+/// the operator's shared files.
 ///
 /// One function because two callers, [`super::attempt`] and
 /// [`crate::optin::prepare_with`], had the same seven lines, and because all of
-/// it is blocking work (git, symlinks, file reads) that both run through
-/// [`shared::off_thread`]. Answers a [`Staged`], whose build and hooks are
-/// `settings`' and whose app is the release's.
+/// it is blocking work (git, symlinks) that both run through
+/// [`shared::off_thread`]. Answers a [`Staged`] whose app is the sheep's
+/// stored `app`, and whose build and hooks are `settings`'. Nothing in the
+/// release is read.
 ///
 /// # Errors
-/// Whatever [`checkout_release`], [`shared::link_cache`],
-/// [`shared::to_link`], [`shared::link_into`] and [`flockfile::read`]
-/// return, plus the app-selection and schema failures of
-/// [`flockfile::Merged::app_config`].
+/// Whatever [`checkout_release`], [`shared::link_cache`], [`shared::to_link`]
+/// and [`shared::link_into`] return.
 pub(crate) fn stage_release(
     tree: &Tree,
     checkout: &Path,
     sha: &str,
+    app: &AppConfig,
     settings: &Settings,
 ) -> Result<Staged, Error> {
     let release = tree.release(sha);
     checkout_release(tree, sha)?;
     shared::link_cache(&release, &tree.cache_target())?;
-    // Held, not recomputed. This is the only record of which files came from
-    // the operator's own checkout rather than from the repository, and
-    // `flockfile` needs it to know whether an override is theirs.
-    let shared_paths = shared::to_link(checkout)?;
-    shared::link_into(&release, checkout, &shared_paths)?;
+    let linked = shared::to_link(checkout)?;
+    shared::link_into(&release, checkout, &linked)?;
 
-    let staged = read_release(tree, &release, shared_paths, settings)?;
+    let staged = staged(app, settings, linked);
     // Printed here rather than returned, as `build::root_warning` is: nothing
     // is refused, and `deploy` and `setup` both come through this function.
     for warning in linkcheck::warnings(tree.sheep(), &staged.linked, &staged.spec.artifacts) {
@@ -64,15 +60,9 @@ pub(crate) fn stage_release(
     Ok(staged)
 }
 
-/// What [`stage_release`] reads, for a release it staged earlier: the
-/// operator's shared files are linked in again and both Flockfiles are read
-/// again, with no checkout and no cache link.
-///
-/// The link step is what keeps the override's proof honest. A build runs in
-/// the release as `user` and can replace any file there, and
-/// [`flockfile::read`] follows the override only when the checkout says it
-/// is the operator's, so a regular file left at that path since the stage is
-/// refused by [`shared::link_into`] here rather than read as the operator's.
+/// What [`stage_release`] answers, for a release it staged earlier: the
+/// operator's shared files are linked in again, with no checkout and no cache
+/// link.
 ///
 /// # Errors
 /// As [`stage_release`], less the checkout and the cache link.
@@ -80,89 +70,22 @@ pub(crate) fn read_staged(
     tree: &Tree,
     checkout: &Path,
     sha: &str,
+    app: &AppConfig,
     settings: &Settings,
 ) -> Result<Staged, Error> {
     let release = tree.release(sha);
-    let shared_paths = shared::to_link(checkout)?;
-    shared::link_into(&release, checkout, &shared_paths)?;
-    refuse_rewritten(tree, sha, &shared_paths)?;
-    read_release(tree, &release, shared_paths, settings)
+    let linked = shared::to_link(checkout)?;
+    shared::link_into(&release, checkout, &linked)?;
+    Ok(staged(app, settings, linked))
 }
 
-/// Refuses a release whose committed Flockfile, or a committed or planted
-/// override, is not what the commit carries.
-///
-/// A build runs as `user` over a directory it owns, so after the stage the
-/// files in the release are whatever the build left, and the app of a promote
-/// would come from them. The operator's own override is
-/// exempt: it is a link into their checkout, and [`shared::link_into`]
-/// has just refused anything else at that path. Compared by git's own hash of
-/// the file against the commit's blob, so a link, a missing file or a changed
-/// byte all differ.
-///
-/// # Errors
-/// [`Error::Config`] naming the file. [`Error::Io`] if it cannot be examined,
-/// and whatever [`run_git`] returns when it cannot hash it.
-fn refuse_rewritten(
-    tree: &Tree,
-    sha: &str,
-    shared_paths: &shared::FromCheckout,
-) -> Result<(), Error> {
-    let release = tree.release(sha);
-    let git_dir = tree.git();
-    let mut names = vec!["Flockfile.toml"];
-    if !shared_paths.includes_override() {
-        names.push(flockfile::OVERRIDE);
-    }
-    for name in names {
-        let path = release.join(name);
-        let on_disk = match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_file() => Some(
-                run_git(
-                    &git_dir,
-                    &["hash-object", "--no-filters", "--", &path.to_string_lossy()],
-                )?
-                .trim()
-                .to_owned(),
-            ),
-            Ok(_) => Some(String::new()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-            Err(err) => return Err(Error::at(&path)(err)),
-        };
-        let committed = run_git(
-            &git_dir,
-            &["rev-parse", "--verify", "-q", &format!("{sha}:{name}")],
-        )
-        .ok()
-        .map(|hash| hash.trim().to_owned());
-        if committed != on_disk {
-            return Err(Error::Config(format!(
-                "{name} in {} is not what {sha} commits: a build can rewrite it after the stage, \
-                 and a promote reads the app from it. Remove the release and run \
-                 `shep-deploy deploy {} --stage` again.",
-                release.display(),
-                tree.sheep()
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// The Flockfiles of a release whose files are already linked in, and the
-/// build and hooks `settings` describe.
-fn read_release(
-    tree: &Tree,
-    release: &Path,
-    shared_paths: shared::FromCheckout,
-    settings: &Settings,
-) -> Result<Staged, Error> {
-    let app = flockfile::read(release, &shared_paths)?.app_config(tree.sheep())?;
-    Ok(Staged {
-        app,
+fn staged(app: &AppConfig, settings: &Settings, linked: shared::FromCheckout) -> Staged {
+    Staged {
+        app: app.clone(),
         spec: settings.build_spec(),
         hooks: settings.hooks(),
-        linked: shared_paths,
-    })
+        linked,
+    }
 }
 
 /// Checks `sha` out at `release`, unless a FINISHED checkout is already there.
@@ -175,9 +98,8 @@ fn read_release(
 ///
 /// The next tick against that sha then skipped the checkout and built,
 /// swapped, reloaded and verified against the subset, reporting success.
-/// Nothing downstream catches it. A missing `Flockfile.toml` fails loudly,
-/// and every other missing file is simply absent from a release the operator
-/// has been told is live.
+/// Nothing downstream catches it. A missing file is simply absent from a
+/// release the operator has been told is live.
 ///
 /// `rev-parse HEAD` is not the check either, which is worth writing down
 /// because it is the obvious one to reach for. The first of those three kills
@@ -289,22 +211,8 @@ pub(crate) fn head_of(tree: &Tree, branch: &str) -> Result<String, Error> {
 /// the deliberate, visible downgrade the design offers rather than a synonym
 /// for going without a check.
 ///
-/// # This is a heuristic, and it cannot be more
-///
-/// It reads the app definition from the release's own Flockfile, which is
-/// not necessarily the config the shepherd is running. Nothing in this crate
-/// re-registers a sheep, so the readiness gate a reload actually uses is
-/// whatever was registered when the sheep was started, and
-/// [`crate::daemon::Daemon::describe`] reports status, pid and uptime - never config. There
-/// is no request that would answer the real question.
-///
-/// So the check catches the case worth catching, a target whose Flockfile
-/// declares no gate at all, and misses the asymmetric one: a sheep
-/// REGISTERED without a gate whose release Flockfile has since added one
-/// passes here and then gets `listen_timeout`-elapsed verification under the
-/// `probed` label. The turnover requirement in [`crate::verify`] still
-/// applies to it, so what it loses is the readiness half of the check, not
-/// the whole of it.
+/// It reads the sheep's stored config, which is the app the shepherd runs, so
+/// the gate it finds is the gate a reload uses.
 ///
 /// # Errors
 /// [`Error::Config`] naming the sheep and every way out.
@@ -350,7 +258,7 @@ fn refuse_ungated(
             "{sheep} has verify = \"probed\" but neither a readiness_probe nor wait_ready, so \
              there is nothing for a deploy to wait on: shep reports a sheep with no readiness \
              gate Online as soon as it has not died, which would verify every release, including \
-             a broken one. Add a [readiness_probe] to its Flockfile, or set wait_ready if the app \
+             a broken one. Add a [readiness_probe] to its app config, or set wait_ready if the app \
              announces itself on the channel, or {accept_alive} to accept the weaker check \
              deliberately."
         )));
@@ -489,13 +397,11 @@ mod tests {
     async fn a_probed_target_with_no_readiness_probe_is_refused() {
         let mut fixture = fixture_with_previous_release();
         let previous = fixture.state.deployed.clone().expect("a previous release");
-        fs::write(
-            fixture.origin.path().join("Flockfile.toml"),
-            "[[app]]\nname = 'web'\nscript = './run.sh'\n",
-        )
-        .expect("write a probeless Flockfile");
         commit_on_origin(&fixture, "second.txt");
-        let daemon = Shepherd::ready();
+        let daemon = Shepherd::ready().with_app(fixtures::app_with_settings(
+            "web",
+            crate::deploy::test_support::FIXTURE_TABLE,
+        ));
 
         let err = deploy(
             &daemon,

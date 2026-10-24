@@ -241,10 +241,14 @@ mod tests {
     use super::*;
     use crate::optin::cut_over;
     use crate::optin::test_support::{
-        NEWCOMER_ID, checkout_declaring, comes_up, cutover_fixture_crash_looping,
-        cutover_fixture_dies_during_dwell, cutover_fixture_from, cutover_fixture_never_appears,
-        cutover_fixture_online_then_gone, cutover_fixture_original_respawns,
+        NEWCOMER_ID, comes_up, cutover_fixture_crash_looping, cutover_fixture_dies_during_dwell,
+        cutover_fixture_from, cutover_fixture_never_appears, cutover_fixture_online_then_gone,
+        cutover_fixture_original_respawns,
     };
+
+    /// A gated sheep that runs two instances.
+    const TWO_INSTANCES: &str = ",\"wait_ready\":true,\"instances\":2";
+
     /// fails if a pidless newcomer is judged by anything but its status.
     /// A row the shepherd has accepted and not yet spawned has no pid and
     /// says `Starting`; one that died hard has no pid and says `Errored`.
@@ -282,11 +286,8 @@ mod tests {
     /// strength with the deploy reported landed.
     #[tokio::test(start_paused = true)]
     async fn a_scaled_cutover_waits_for_every_instance_the_start_asked_for() {
-        let checkout = checkout_declaring(
-            "[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\nwait_ready = true\ninstances = 2\n",
-        );
         let (daemon, prepared, _dirs) =
-            cutover_fixture_from(checkout, &[7, 8], comes_up(), None).await;
+            cutover_fixture_from(TWO_INSTANCES, &[7, 8], comes_up(), None).await;
         let daemon = daemon.spawning_at_most(1);
 
         let err = cut_over(&daemon, prepared)
@@ -307,11 +308,8 @@ mod tests {
     /// originals replaced.
     #[tokio::test(start_paused = true)]
     async fn a_scaled_cutover_lands_when_every_instance_appears() {
-        let checkout = checkout_declaring(
-            "[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\nwait_ready = true\ninstances = 2\n",
-        );
         let (daemon, prepared, _dirs) =
-            cutover_fixture_from(checkout, &[7, 8], comes_up(), None).await;
+            cutover_fixture_from(TWO_INSTANCES, &[7, 8], comes_up(), None).await;
 
         cut_over(&daemon, prepared).await.expect("cuts over");
 

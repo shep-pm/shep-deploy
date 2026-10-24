@@ -43,8 +43,8 @@ async fn resolve_id(release: &Path, user: &str, flag: &str, kind: &str) -> Resul
     if !output.status.success() {
         return Err(Error::Config(format!(
             "the app's `user = {user:?}` does not resolve to a {kind} on this host (`id {flag} \
-             {user}` failed); create that account, or pin a different one in \
-             Flockfile.override.toml"
+             {user}` failed); create that account, or set a different one on \
+             the sheep"
         )));
     }
 

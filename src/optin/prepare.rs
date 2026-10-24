@@ -351,9 +351,11 @@ pub async fn prepare_with<D: Daemon>(
         app, spec, linked, ..
     } = {
         let (tree, checkout, sha) = (tree.clone(), state.checkout.clone(), sha.clone());
-        let settings = settings.clone();
-        shared::off_thread(move || crate::deploy::stage_release(&tree, &checkout, &sha, &settings))
-            .await?
+        let (app, settings) = (previous_config.clone(), settings.clone());
+        shared::off_thread(move || {
+            crate::deploy::stage_release(&tree, &checkout, &sha, &app, &settings)
+        })
+        .await?
     };
     // Before the build, so a refusal costs no build.
     refuse_ungated_at_setup(sheep, &app, verify)?;
@@ -419,9 +421,7 @@ pub async fn prepare_with<D: Daemon>(
 mod tests {
     use super::*;
     use crate::fixtures;
-    use crate::optin::test_support::{
-        RollBuilding, RollOf, checkout_declaring, checkout_with_commit, write_target,
-    };
+    use crate::optin::test_support::{RollBuilding, RollOf, checkout_with_commit, write_target};
 
     /// fails if a sheep that is already a target can be opted in again.
     /// The second run would `git init --bare` over a live tree and rebuild
@@ -792,11 +792,6 @@ mod tests {
         );
     }
 
-    /// A portless app: no `readiness_probe` and no `wait_ready`.
-    fn ungated_checkout() -> tempfile::TempDir {
-        checkout_declaring("[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\n")
-    }
-
     /// fails if setup takes over a sheep its first deploy would refuse, or
     /// pays for a build before it says so. The refusal at the first deploy
     /// lands after the cutover, with the sheep already running from the tree.
@@ -805,9 +800,9 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         let scratch = tempfile::tempdir().expect("tempdir");
         let marker = scratch.path().join("built");
-        let checkout = ungated_checkout();
+        let checkout = checkout_with_commit();
         let entries = [("bpm", checkout.path())];
-        let daemon = RollBuilding::new(&entries, &marker);
+        let daemon = RollBuilding::new(&entries, &marker).ungated();
 
         let err = prepare_with(
             &daemon,
@@ -842,10 +837,10 @@ mod tests {
     async fn a_refused_setup_can_be_retried_with_alive() {
         let home = tempfile::tempdir().expect("tempdir");
         let scratch = tempfile::tempdir().expect("tempdir");
-        let checkout = ungated_checkout();
+        let checkout = checkout_with_commit();
         let entries = [("bpm", checkout.path())];
         let built = scratch.path().join("built");
-        let daemon = RollBuilding::new(&entries, &built);
+        let daemon = RollBuilding::new(&entries, &built).ungated();
         let config = fixtures::dog_config();
         prepare_with(&daemon, home.path(), "bpm", &config, Verify::Probed)
             .await
@@ -863,10 +858,10 @@ mod tests {
     async fn an_ungated_app_under_alive_is_prepared_and_recorded_as_alive() {
         let home = tempfile::tempdir().expect("tempdir");
         let scratch = tempfile::tempdir().expect("tempdir");
-        let checkout = ungated_checkout();
+        let checkout = checkout_with_commit();
         let entries = [("bpm", checkout.path())];
         let built = scratch.path().join("built");
-        let daemon = RollBuilding::new(&entries, &built);
+        let daemon = RollBuilding::new(&entries, &built).ungated();
 
         let prepared = prepare_with(
             &daemon,
@@ -887,9 +882,7 @@ mod tests {
     #[tokio::test]
     async fn an_app_with_wait_ready_is_prepared_under_probed() {
         let home = tempfile::tempdir().expect("tempdir");
-        let checkout = checkout_declaring(
-            "[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\nwait_ready = true\n",
-        );
+        let checkout = checkout_with_commit();
         let entries = [("bpm", checkout.path())];
         let daemon = RollOf::new(&entries);
 

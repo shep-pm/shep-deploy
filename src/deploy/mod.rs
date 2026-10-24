@@ -64,6 +64,8 @@ pub(crate) mod test_support;
 
 use std::path::PathBuf;
 
+use shep_client::shep_core::config::AppConfig;
+
 use crate::build;
 use crate::config::DogConfig;
 use crate::daemon::Daemon;
@@ -137,7 +139,7 @@ pub enum Outcome {
 /// recognise it.
 ///
 /// Anything the steps before the swap return - see [`crate::git::fetch`],
-/// [`crate::shared::to_link`], [`crate::flockfile::read`] and
+/// [`crate::shared::to_link`] and
 /// [`crate::build::run`] - in which case nothing has been disturbed and the
 /// old release is still serving. [`Error::Raced`] if `current` moved while
 /// this deploy was preparing, which is refused rather than swapped over.
@@ -313,11 +315,11 @@ async fn go<D: Daemon>(
         });
     }
 
-    // Once per deploy, as the Flockfile is, and after the two returns above so
-    // a poll that finds nothing new asks the shepherd for nothing. Returned
-    // rather than recorded: the branch will not move to repair it, so a hold
-    // on this sha would outlive the operator's fix.
-    let settings = settings::read(daemon, sheep).await?;
+    // Once per deploy, and after the two returns above so a poll that finds
+    // nothing new asks the shepherd for nothing. Returned rather than
+    // recorded: the branch will not move to repair it, so a hold on this sha
+    // would outlive the operator's fix.
+    let (app, settings) = settings::held(daemon, sheep).await?;
 
     // After the hold, so a sha that already failed is still said once rather
     // than judged again, and only for the poll loop: a hand deploy means now.
@@ -325,7 +327,10 @@ async fn go<D: Daemon>(
         return Ok(Outcome::Skipped { sha: head });
     }
 
-    let outcome = attempt(daemon, tree, state, &head, started_at, &settings, config).await;
+    let outcome = attempt(
+        daemon, tree, state, &head, started_at, &app, &settings, config,
+    )
+    .await;
     record(daemon, tree, state, &head, &outcome, config.retention).await;
     outcome
 }
@@ -337,12 +342,14 @@ async fn go<D: Daemon>(
 /// Split out of [`go`] so that recording what the attempt came to has one
 /// place to happen rather than five. See [`deploy`] for what each ending
 /// means.
+#[expect(clippy::too_many_arguments, reason = "one deploy, one call site")]
 async fn attempt<D: Daemon>(
     daemon: &D,
     tree: &Tree,
     state: &mut State,
     head: &str,
     started_at: Option<PathBuf>,
+    app: &AppConfig,
     settings: &Settings,
     config: &DogConfig,
 ) -> Result<Outcome, Error> {
@@ -350,8 +357,8 @@ async fn attempt<D: Daemon>(
     let release = tree.release(head);
     let staged = {
         let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
-        let settings = settings.clone();
-        shared::off_thread(move || stage_release(&tree, &checkout, &head, &settings)).await?
+        let (app, settings) = (app.clone(), settings.clone());
+        shared::off_thread(move || stage_release(&tree, &checkout, &head, &app, &settings)).await?
     };
     refuse_ungated_verification(sheep, &staged.app, state.verify)?;
     let snapshot = linkcheck::Snapshot::before(sheep, &release, &staged.linked);

@@ -1,7 +1,7 @@
 use std::fs;
 
 use crate::deploy::test_support::{
-    FLOCKFILE, RECLAIMED, Shepherd, commit_on_origin, fixture_before_any_release,
+    FIXTURE_TABLE, RECLAIMED, Shepherd, commit_on_origin, fixture_before_any_release,
     fixture_with_previous_release, install_release,
 };
 use crate::deploy::{Outcome, deploy};
@@ -625,42 +625,33 @@ async fn an_alive_rollback_that_never_turns_over_is_reported_unverified() {
     assert_eq!(daemon.reload_count(), 2);
 }
 
-/// fails if the rollback is timed by the Flockfile of the release it is
-/// rolling back FROM. The rejected commit here shortens its own timeouts,
-/// so its budget is a few seconds; the release being restored has the
-/// ordinary ones and takes longer than that to come up. Judged by the
-/// rejected release's budget, a healthy rollback is reported as one that
-/// never came up, and exit 1 says nothing is serving when the old
-/// release is.
+/// fails if the rollback is timed by anything but the sheep's stored config.
+/// The stored config here has short timeouts, so its budget is a few seconds,
+/// and the release being restored takes longer than that to come up. The
+/// commit's own Flockfile asks for the ordinary timeouts and must not lengthen
+/// the wait.
 #[tokio::test(start_paused = true)]
-async fn the_rollback_is_timed_by_the_release_being_restored() {
+async fn the_rollback_is_timed_by_the_stored_config() {
     let mut fixture = fixture_with_previous_release();
-    let previous = fixture.state.deployed.clone().expect("a previous release");
-    let impatient = FLOCKFILE.replace(
-        "script = './run.sh'\n",
-        "script = './run.sh'\nlisten_timeout = '1ms'\ngraceful_timeout = '1ms'\n",
-    );
-    assert_ne!(impatient, FLOCKFILE);
-    fs::write(fixture.origin.path().join("Flockfile.toml"), impatient).expect("write");
-    fixtures::run_git(fixture.origin.path(), &["add", "."]);
-    fixtures::run_git(fixture.origin.path(), &["commit", "-q", "-m", "impatient"]);
-    // Eight seconds of looks: past the rejected release's budget, well
-    // inside the restored one's.
-    let daemon = Shepherd::never_ready().rollback_ready_after(80);
+    commit_on_origin(&fixture, "second.txt");
+    let mut app = fixtures::gated_app("web", FIXTURE_TABLE);
+    app.listen_timeout = serde_json::from_value(serde_json::json!("1ms")).expect("a duration");
+    app.graceful_timeout = serde_json::from_value(serde_json::json!("1ms")).expect("a duration");
+    // Eight seconds of looks: past the stored budget, inside the ordinary one.
+    let daemon = Shepherd::never_ready()
+        .with_app(app)
+        .rollback_ready_after(80);
 
-    let outcome = deploy(
+    let err = deploy(
         &daemon,
         &fixture.tree,
         &mut fixture.state,
         &fixtures::dog_config(),
     )
     .await
-    .expect("the restored release comes up inside its own budget");
+    .expect_err("the restored release is not seen inside the stored budget");
 
-    assert!(
-        matches!(&outcome, Outcome::RolledBack { to, .. } if *to == previous),
-        "{outcome:?}"
-    );
+    assert!(matches!(err, Error::RollbackUnverified { .. }), "{err:?}");
 }
 
 /// fails if a rollback that cannot swap back reports only half of what

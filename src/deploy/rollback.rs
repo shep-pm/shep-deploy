@@ -12,9 +12,7 @@ use crate::daemon::Daemon;
 use crate::deploy::record::write_record;
 use crate::deploy::reload::{reload_until, sha_of};
 use crate::error::Error;
-use crate::flockfile;
 use crate::paths::Tree;
-use crate::shared;
 use crate::state::State;
 use crate::swap;
 use crate::verify;
@@ -223,9 +221,8 @@ fn rollback_target(
 ///
 /// The reload is then checked like a deploy's own, by `state.verify` against
 /// the flock as it was just before the reload. The budget and the dwell come
-/// from the Flockfile of the release being restored ([`restored_app`]), with
-/// `app`, the rejected release's, only as the fallback; `patience` bounds the
-/// retries of the reload itself. The reload being accepted says the shepherd began a
+/// from `app`, the sheep's stored config, which no release changes;
+/// `patience` bounds the retries of the reload itself. The reload being accepted says the shepherd began a
 /// swap and nothing about the release coming up: one whose binary cannot be
 /// spawned is dropped from the flock after the acceptance. The generation
 /// comes from [`reload_until`], taken before the attempt that was accepted.
@@ -276,9 +273,6 @@ async fn restore<D: Daemon>(
         write_record(tree, state)?;
     }
 
-    let restored = restored_app(tree, &state.checkout, previous).await;
-    let restored = restored.as_ref().unwrap_or(app);
-
     let before = match reload_until(daemon, sheep, patience).await {
         Ok(before) => before,
         // A failure that could have cleared and did not is the split state:
@@ -311,8 +305,8 @@ async fn restore<D: Daemon>(
         sheep,
         state.verify,
         &before,
-        budget(restored, before.instances()),
-        dwell_for(restored),
+        budget(app, before.instances()),
+        dwell_for(app),
     )
     .await
     {
@@ -323,29 +317,6 @@ async fn restore<D: Daemon>(
         ))),
         Err(source) => Err(unverified(source.to_string())),
     }
-}
-
-/// The Flockfile of the release being put back, read the way a deploy reads
-/// the one it stages.
-///
-/// What the rollback is waiting for is the restored release coming up, so its
-/// timeouts and probe set the budget and the dwell, not those of the release
-/// that was just rejected: a commit that shortens `listen_timeout` or drops
-/// its probe must not shorten the verdict on the release it replaced.
-///
-/// An `Err` here is not worth failing the rollback over, since `current`
-/// is already back; the caller falls back to the rejected release's config.
-async fn restored_app(tree: &Tree, checkout: &Path, previous: &Path) -> Result<AppConfig, Error> {
-    let (sheep, checkout, previous) = (
-        tree.sheep().to_owned(),
-        checkout.to_owned(),
-        previous.to_owned(),
-    );
-    shared::off_thread(move || {
-        let shared = shared::to_link(&checkout)?;
-        flockfile::read(&previous, &shared)?.app_config(&sheep)
-    })
-    .await
 }
 
 #[cfg(test)]

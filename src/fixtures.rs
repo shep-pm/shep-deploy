@@ -375,6 +375,26 @@ pub fn app_with_settings(sheep: &str, settings: &str) -> AppConfig {
     .expect("an app with settings")
 }
 
+/// [`app_with_settings`] with an `http` readiness probe, so `Verify::Probed`
+/// has a gate to accept.
+///
+/// The probe's target is never contacted: no double here runs a real
+/// shepherd.
+///
+/// # Panics
+/// If `settings` is not a TOML table.
+#[track_caller]
+pub fn gated_app(sheep: &str, settings: &str) -> AppConfig {
+    let table: serde_json::Value = toml::from_str(settings).expect("settings are TOML");
+    serde_json::from_value(serde_json::json!({
+        "name": sheep,
+        "script": "./run.sh",
+        "readiness_probe": { "kind": "http", "target": "http://127.0.0.1:1/health" },
+        "dogs": { "deploy": table },
+    }))
+    .expect("a gated app")
+}
+
 /// One sheep's config as a shepherd holds it, and a [`Daemon`] that answers
 /// `sheep_config` from it and applies `set_sheep_dog_settings` to it.
 ///

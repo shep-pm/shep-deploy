@@ -26,16 +26,28 @@ use crate::state::State;
 /// `unimplemented!()`, since `prepare` never calls them.
 pub(super) struct RollOf<'a> {
     entries: &'a [(&'a str, &'a Path)],
+    fields: &'a str,
     held: fixtures::Sheep,
 }
+
+/// The app fields every roll here carries unless a test says otherwise: a
+/// readiness gate, which `Verify::Probed` refuses to go without.
+pub(super) const GATED: &str = ",\"wait_ready\":true";
 
 impl<'a> RollOf<'a> {
     pub(super) fn new(entries: &'a [(&'a str, &'a Path)]) -> Self {
         let (name, _) = entries.first().expect("a roll names at least one sheep");
         Self {
             entries,
+            fields: GATED,
             held: fixtures::Sheep::holding(fixtures::app_named(name)),
         }
+    }
+
+    /// The same roll, with `fields` (JSON members, each after a comma) in
+    /// place of [`GATED`] on every app.
+    pub(super) fn with_fields(self, fields: &'a str) -> Self {
+        Self { fields, ..self }
     }
 
     /// The first sheep as the shepherd holds it after `prepare`.
@@ -51,7 +63,7 @@ impl<'a> RollOf<'a> {
 
 impl Daemon for RollOf<'_> {
     async fn save_roll(&self) -> Result<PathBuf, Error> {
-        write_roll(self.entries, "")
+        write_roll(self.entries, self.fields)
     }
 
     async fn sheep_config(&self, _sheep: &str) -> Result<AppConfig, Error> {
@@ -77,6 +89,7 @@ impl Daemon for RollOf<'_> {
 pub(super) struct RollBuilding<'a> {
     entries: &'a [(&'a str, &'a Path)],
     marker: &'a Path,
+    gate: &'static str,
     held: fixtures::Sheep,
 }
 
@@ -87,8 +100,14 @@ impl<'a> RollBuilding<'a> {
         Self {
             entries,
             marker,
+            gate: GATED,
             held: fixtures::Sheep::of(name, &format!("command = {command:?}\n")),
         }
+    }
+
+    /// The same roll, with no readiness gate on its apps.
+    pub(super) fn ungated(self) -> Self {
+        Self { gate: "", ..self }
     }
 
     /// The first sheep's `[app.dogs.deploy]` table as the shepherd holds it.
@@ -102,7 +121,10 @@ impl Daemon for RollBuilding<'_> {
         let command = format!("touch {}", self.marker.display());
         write_roll(
             self.entries,
-            &format!(",\"dogs\":{{\"deploy\":{{\"command\":{command:?}}}}}"),
+            &format!(
+                "{},\"dogs\":{{\"deploy\":{{\"command\":{command:?}}}}}",
+                self.gate
+            ),
         )
     }
 
@@ -148,23 +170,14 @@ fn write_roll(entries: &[(&str, &Path)], extra: &str) -> Result<PathBuf, Error> 
 }
 
 /// A tempdir that is a git checkout, on branch `main`, with an `origin`
-/// remote pointing at itself and one commit declaring an app named
-/// `bpm` whose script is `./run.sh`.
+/// remote pointing at itself and one commit holding `run.sh`.
 ///
 /// `origin` points at the checkout's own path rather than a second
 /// fixture repository: `prepare` fetches from whatever `git::remote_url`
 /// reads, and a checkout is a perfectly fetchable remote for its own
 /// history.
 pub(super) fn checkout_with_commit() -> tempfile::TempDir {
-    checkout_declaring("[[app]]\nname = \"bpm\"\nscript = \"./run.sh\"\nwait_ready = true\n")
-}
-
-/// As [`checkout_with_commit`], with the Flockfile's text given.
-pub(super) fn checkout_declaring(flockfile: &str) -> tempfile::TempDir {
-    let dir = fixtures::checkout(&[
-        ("Flockfile.toml", flockfile),
-        ("run.sh", "#!/bin/sh\necho hi\n"),
-    ]);
+    let dir = fixtures::checkout(&[("run.sh", "#!/bin/sh\necho hi\n")]);
     // Itself, so `git::remote_url` has an answer. Nothing fetches from it.
     fixtures::run_git(
         dir.path(),
@@ -611,19 +624,21 @@ pub(super) async fn cutover_fixture_of(
     script: Vec<(Duration, Shape)>,
     refuses: Option<usize>,
 ) -> (CutOverDouble, Prepared, Dirs) {
-    cutover_fixture_from(checkout_with_commit(), originals, script, refuses).await
+    cutover_fixture_from(GATED, originals, script, refuses).await
 }
 
-/// As [`cutover_fixture_of`], from a checkout the test built itself.
+/// As [`cutover_fixture_of`], for a sheep registered with `fields` (JSON
+/// members, each after a comma) in place of [`GATED`].
 pub(super) async fn cutover_fixture_from(
-    checkout: tempfile::TempDir,
+    fields: &str,
     originals: &[u32],
     script: Vec<(Duration, Shape)>,
     refuses: Option<usize>,
 ) -> (CutOverDouble, Prepared, Dirs) {
     let home = tempfile::tempdir().expect("tempdir");
+    let checkout = checkout_with_commit();
     let entries = [("bpm", checkout.path())];
-    let roll = RollOf::new(&entries);
+    let roll = RollOf::new(&entries).with_fields(fields);
     let prepared = prepare(&roll, home.path(), "bpm", &fixtures::dog_config())
         .await
         .expect("prepares");
