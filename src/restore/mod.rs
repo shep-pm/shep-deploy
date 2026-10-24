@@ -33,6 +33,13 @@
 //! also fails is the sheep genuinely gone, and [`Restored::Lost`] says so
 //! in words an operator cannot misread as "still running".
 //!
+//! # What is left on disk
+//!
+//! The deploy tree stays, since a sheep may still be running from it. A sheep
+//! that is put back lets go of the clone it shared with other sheep with the
+//! same remote (see [`crate::paths::Repo`]), and the clone goes with the last
+//! one: [`crate::retention::release_clone`].
+//!
 //! [`Request::Delete`]: shep_client::shep_core::protocol::Request::Delete
 
 mod put_back;
@@ -41,6 +48,7 @@ use std::path::{Path, PathBuf};
 
 use crate::daemon::Daemon;
 use crate::paths::{self, Tree};
+use crate::retention;
 use crate::roll;
 use crate::state::State;
 use put_back::{PutBack, put_back, registered_against};
@@ -139,6 +147,17 @@ pub enum Restored {
         /// The sheep that is gone.
         sheep: String,
         /// Why neither the restore nor the fallback could put it back.
+        why: String,
+    },
+    /// The sheep was put back, but the shared clone it linked to could not be
+    /// let go of, so it may still be on disk.
+    ///
+    /// Reported after the sheep's own row, which is true: nothing here
+    /// changes where the sheep runs.
+    CloneKept {
+        /// The sheep that was restored.
+        sheep: String,
+        /// Why the clone or the link could not be removed.
         why: String,
     },
     /// The muster roll itself could not be read, so none of these
@@ -271,8 +290,19 @@ pub async fn all<D: Daemon>(daemon: &D, shep_home: &Path) -> Vec<Restored> {
             .as_ref()
             .and_then(|origin| origin.cwd.as_deref())
             .map_or_else(|| cwd.clone(), PathBuf::from);
+        let outcome = put_back(daemon, &sheep, registered, origin.as_ref(), &cwd, &script).await;
+        // A sheep that is back at its origin has no use for its tree, so it
+        // lets go of the clone it shared. Only then: every other outcome
+        // leaves the sheep running from, or retrying into, the tree.
+        let clone_kept = matches!(outcome, PutBack::Done)
+            .then(|| retention::release_clone(shep_home, &tree))
+            .and_then(Result::err)
+            .map(|err| Restored::CloneKept {
+                sheep: sheep.clone(),
+                why: err.to_string(),
+            });
         results.push(
-            match put_back(daemon, &sheep, registered, origin.as_ref(), &cwd, &script).await {
+            match outcome {
                 PutBack::Done => Restored::Returned { sheep, to },
                 PutBack::Untouched(err) => Restored::Failed {
                     sheep,
@@ -292,6 +322,7 @@ pub async fn all<D: Daemon>(daemon: &D, shep_home: &Path) -> Vec<Restored> {
                 },
             },
         );
+        results.extend(clone_kept);
     }
 
     if let Err(err) = &registered
@@ -371,6 +402,10 @@ pub fn report(results: &[Restored]) -> String {
                  putting its previous configuration back, so it is stopped and gone from the \
                  flock. It will not come back on its own after a restart. Re-register it from \
                  its own Flockfile.\n"
+            ),
+            Restored::CloneKept { sheep, why } => format!(
+                "{sheep}: the clone it shared with other sheep could not be let go of ({why}); \
+                 remove it by hand from $SHEP_HOME/deploy/repos once no sheep needs it\n"
             ),
             // One row naming every affected sheep and the roll's own
             // cause, rather than one wrong-shaped guess per sheep.

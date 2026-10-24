@@ -37,7 +37,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use crate::error::Error;
-use crate::paths::Tree;
+use crate::paths::{self, Tree};
 use crate::state::is_sha;
 use crate::{git, swap};
 
@@ -146,6 +146,52 @@ pub fn prune(tree: &Tree, keep: usize, recorded: &[&str]) -> Result<Vec<String>,
     }
 }
 
+/// Lets go of the shared clone `tree` links to, removing the clone when no
+/// other tree links to it. Answers whether it removed the clone.
+///
+/// For the tree's own removal, never for retention: [`prune`] reclaims
+/// worktrees and nothing else. A tree is counted as a link whether or not it
+/// has a record yet, so a setup still fetching into the clone keeps it. The
+/// other trees are found by reading every directory under `deploy/` for a
+/// `git` link to this clone, not by asking [`paths::targets`], which lists
+/// only trees with a record. Under the clone's lock, so a setup linking to it
+/// at the same moment either lands before the sweep and keeps it, or finds it
+/// gone and makes it again.
+///
+/// A tree with a clone of its own, or none, is left as it is.
+///
+/// # Errors
+/// [`Error::Io`] if the lock cannot be taken, the tree's link cannot be
+/// removed, the deploy directory cannot be listed, or the clone cannot be
+/// removed.
+pub fn release_clone(shep_home: &Path, tree: &Tree) -> Result<bool, Error> {
+    let Some(repo) = tree.linked_clone() else {
+        return Ok(false);
+    };
+    let _cloning = crate::lock::hold_clone(&repo.git())?;
+    match fs::remove_file(tree.git()) {
+        Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
+            return Err(Error::Io {
+                path: tree.git(),
+                source,
+            });
+        }
+        _ => {}
+    }
+
+    let deploy = shep_home.join("deploy");
+    for entry in fs::read_dir(&deploy).map_err(Error::at(&deploy))? {
+        let entry = entry.map_err(Error::at(&deploy))?;
+        if entry.file_name() != paths::REPOS
+            && fs::read_link(entry.path().join("git")).is_ok_and(|to| to == repo.git())
+        {
+            return Ok(false);
+        }
+    }
+    fs::remove_dir_all(repo.root()).map_err(Error::at(repo.root()))?;
+    Ok(true)
+}
+
 /// Removes every completion marker whose release is no longer on disk.
 ///
 /// Best effort throughout: a marker is a zero-byte file whose only reader
@@ -209,6 +255,7 @@ mod tests {
     use crate::fixtures;
 
     use super::*;
+    use crate::paths::Repo;
     use std::process::Command;
     use std::time::Duration;
 
@@ -519,5 +566,78 @@ mod tests {
             "the reclaimed release's marker must go with it"
         );
         assert!(!orphan.exists(), "a marker with no release must be swept");
+    }
+
+    /// Two trees linked to one shared clone, as setup leaves them.
+    fn two_trees_sharing_a_clone() -> (tempfile::TempDir, Tree, Tree, Repo) {
+        let home = tempfile::tempdir().expect("tempdir");
+        let repo = Repo::for_remote(home.path(), "https://example.com/x.git");
+        git::init_bare(&repo.git()).expect("bare");
+        let trees = ["web", "api"].map(|sheep| {
+            let tree = Tree::for_sheep(home.path(), sheep);
+            fs::create_dir_all(tree.root()).expect("tree");
+            tree.link_clone(&repo).expect("link");
+            tree
+        });
+        let [web, api] = trees;
+        (home, web, api, repo)
+    }
+
+    /// fails if removing one of two sheep takes the clone the other still
+    /// links to, or if removing the second leaves it behind. The first is
+    /// the other sheep's next deploy failing on a clone that is gone; the
+    /// second is the object store of a removed sheep kept forever.
+    #[test]
+    fn the_clone_goes_with_the_last_tree_linking_to_it() {
+        let (home, web, api, repo) = two_trees_sharing_a_clone();
+
+        assert!(!release_clone(home.path(), &web).expect("first"));
+        assert!(repo.git().join("HEAD").is_file(), "api still links to it");
+        assert!(web.git().symlink_metadata().is_err(), "web's link is gone");
+        assert!(api.git().join("HEAD").is_file(), "api still reaches it");
+
+        assert!(release_clone(home.path(), &api).expect("second"));
+        assert!(!repo.root().exists(), "nobody links to it now");
+    }
+
+    /// fails if a tree that was linked to a clone but has no record yet, a
+    /// setup that has not finished, is not counted as a link. Its setup
+    /// would be fetching into a clone removed beneath it.
+    #[test]
+    fn a_tree_with_no_record_yet_still_counts_as_a_link() {
+        let (home, web, api, repo) = two_trees_sharing_a_clone();
+        assert!(!api.state_file().exists(), "api has no deploy.toml");
+
+        assert!(!release_clone(home.path(), &web).expect("releases"));
+
+        assert!(repo.git().exists());
+    }
+
+    /// fails if releasing a clone a tree owns touches it. A tree from before
+    /// shared clones keeps its own, and removing it is not this module's.
+    #[test]
+    fn a_tree_with_its_own_clone_is_left_alone() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let tree = Tree::for_sheep(home.path(), "web");
+        git::init_bare(&tree.git()).expect("bare");
+
+        assert!(!release_clone(home.path(), &tree).expect("nothing to release"));
+
+        assert!(tree.git().join("HEAD").is_file());
+    }
+
+    /// fails if retention removes a shared clone while pruning a release.
+    /// It reclaims worktrees and nothing else, and a clone belongs to every
+    /// tree linking to it.
+    #[test]
+    fn pruning_a_tree_never_removes_the_shared_clone() {
+        let (home, web, _api, repo) = two_trees_sharing_a_clone();
+        fs::create_dir_all(web.releases()).expect("releases");
+
+        prune(&web, 2, &[]).expect("prunes");
+
+        assert!(repo.git().join("HEAD").is_file());
+        assert!(web.git().join("HEAD").is_file());
+        drop(home);
     }
 }

@@ -286,6 +286,17 @@ impl Tree {
         std::fs::symlink_metadata(self.git()).is_ok_and(|meta| meta.file_type().is_dir())
     }
 
+    /// The shared clone this tree's [`Self::git`] links to, or `None` for a
+    /// tree that owns its clone or has none.
+    #[must_use]
+    pub fn linked_clone(&self) -> Option<Repo> {
+        let target = std::fs::read_link(self.git()).ok()?;
+        let root = target.parent()?;
+        (target.file_name()? == "git" && root.parent()?.file_name()? == REPOS).then(|| Repo {
+            root: root.to_owned(),
+        })
+    }
+
     /// Points this tree's [`Self::git`] at `repo`'s clone, replacing a link to
     /// another one. Does nothing to a link already there.
     ///
