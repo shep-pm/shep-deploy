@@ -385,6 +385,7 @@ async fn attempt<D: Daemon>(
 
 #[cfg(test)]
 mod tests {
+    mod clones;
     mod hooks;
     mod retarget;
     mod settings;
