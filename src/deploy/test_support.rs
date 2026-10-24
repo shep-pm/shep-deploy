@@ -265,7 +265,7 @@ impl Shepherd {
             turnover_after: 0,
             describes: Cell::new(0),
             reloads: Cell::new(0),
-            held: fixtures::Sheep::of("web", FIXTURE_TABLE),
+            held: fixtures::Sheep::holding(fixtures::gated_app("web", FIXTURE_TABLE)),
         }
     }
 
@@ -274,7 +274,18 @@ impl Shepherd {
     /// `settings` must not repeat.
     pub(crate) fn with_settings(self, settings: &str) -> Self {
         Self {
-            held: fixtures::Sheep::of("web", &format!("{FIXTURE_TABLE}{settings}")),
+            held: fixtures::Sheep::holding(fixtures::gated_app(
+                "web",
+                &format!("{FIXTURE_TABLE}{settings}"),
+            )),
+            ..self
+        }
+    }
+
+    /// The same shepherd, holding `app` as the sheep's stored config.
+    pub(crate) fn with_app(self, app: AppConfig) -> Self {
+        Self {
+            held: fixtures::Sheep::holding(app),
             ..self
         }
     }

@@ -11,6 +11,8 @@
 //! what a stage built, reloads and verifies it, and takes the daemon a stage
 //! never does.
 
+use shep_client::shep_core::config::AppConfig;
+
 use crate::build;
 use crate::config::DogConfig;
 use crate::daemon::Daemon;
@@ -87,7 +89,7 @@ pub async fn stage<D: Daemon>(
     // The caller read `state` before the lock, and a deploy or another stage
     // may have written the record since. Answering from the older copy would
     // rebuild a head that is already staged or call a landed one new.
-    let (fresh, settings) = settings::adopted(daemon, tree).await?;
+    let (fresh, app, settings) = settings::adopted(daemon, tree).await?;
     *state = fresh;
 
     if state.deployed.is_none() {
@@ -124,7 +126,7 @@ pub async fn stage<D: Daemon>(
         return Ok(Staged::AlreadyStaged { sha: head });
     }
 
-    let built = build_and_record(daemon, tree, state, &head, &settings, config).await;
+    let built = build_and_record(daemon, tree, state, &head, &app, &settings, config).await;
 
     let spared: Vec<String> = [state.deployed.as_deref(), state.staged.as_deref()]
         .into_iter()
@@ -180,7 +182,8 @@ pub async fn promote<D: Daemon>(
 
     // The caller read `state` before the lock, and a deploy or a stage may
     // have written the record since.
-    *state = settings::adopted(daemon, tree).await?.0;
+    let (fresh, app, settings) = settings::adopted(daemon, tree).await?;
+    *state = fresh;
 
     if state.deployed.is_none() {
         return Err(Error::NotCutOver {
@@ -200,7 +203,7 @@ pub async fn promote<D: Daemon>(
         )));
     }
 
-    let outcome = land_staged(daemon, tree, state, &head, config).await;
+    let outcome = land_staged(daemon, tree, state, &head, &app, &settings, config).await;
     record(daemon, tree, state, &head, &outcome, config.retention).await;
     outcome
 }
@@ -211,13 +214,15 @@ async fn land_staged<D: Daemon>(
     tree: &Tree,
     state: &mut State,
     head: &str,
+    app: &AppConfig,
+    settings: &Settings,
     config: &DogConfig,
 ) -> Result<Outcome, Error> {
     let started_at = swap::resolve(&tree.current())?;
-    let settings = settings::read(daemon, tree.sheep()).await?;
     let staged = {
         let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
-        shared::off_thread(move || read_staged(&tree, &checkout, &head, &settings)).await?
+        let (app, settings) = (app.clone(), settings.clone());
+        shared::off_thread(move || read_staged(&tree, &checkout, &head, &app, &settings)).await?
     };
     refuse_ungated_verification(tree.sheep(), &staged.app, state.verify)?;
     run_release_hook(tree, head, &staged, config).await?;
@@ -230,19 +235,18 @@ async fn build_and_record<D: Daemon>(
     tree: &Tree,
     state: &mut State,
     head: &str,
+    app: &AppConfig,
     settings: &Settings,
     config: &DogConfig,
 ) -> Result<(), Error> {
     let sheep = tree.sheep();
     let release = tree.release(head);
-    let deploy::Staged {
-        app, spec, linked, ..
-    } = {
+    let deploy::Staged { spec, linked, .. } = {
         let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
-        let settings = settings.clone();
-        shared::off_thread(move || stage_release(&tree, &checkout, &head, &settings)).await?
+        let (app, settings) = (app.clone(), settings.clone());
+        shared::off_thread(move || stage_release(&tree, &checkout, &head, &app, &settings)).await?
     };
-    refuse_ungated_verification(sheep, &app, state.verify)?;
+    refuse_ungated_verification(sheep, app, state.verify)?;
     let snapshot = linkcheck::Snapshot::before(sheep, &release, &linked);
     let built = build::run(
         sheep,
@@ -502,40 +506,6 @@ mod tests {
             Some(fixture.tree.release(&previous))
         );
         assert_eq!(fixture.state.staged.as_deref(), Some(second.as_str()));
-    }
-
-    /// fails if a promote reads configuration the build rewrote. The build
-    /// runs as the app's user and owns the release, so a Flockfile it
-    /// changed after the stage is not the one the commit carries. Neither
-    /// the app nor the hooks may come from it.
-    #[tokio::test]
-    async fn promote_refuses_a_flockfile_the_build_changed() {
-        for command in [
-            "echo '# changed' >> Flockfile.toml",
-            "echo '' > Flockfile.override.toml",
-        ] {
-            let mut fixture = fixture_with_previous_release();
-            let previous = fixture.state.deployed.clone().expect("a previous release");
-            stage_a_build(&mut fixture, command).await;
-            let daemon = Shepherd::ready();
-
-            let err = promote(
-                &daemon,
-                &fixture.tree,
-                &mut fixture.state,
-                &fixtures::dog_config(),
-            )
-            .await
-            .expect_err("refuses");
-
-            assert!(matches!(err, Error::Config(_)), "{command}: {err:?}");
-            assert_eq!(daemon.reload_count(), 0, "{command}");
-            assert_eq!(
-                swap::resolve(&fixture.tree.current()).expect("reads"),
-                Some(fixture.tree.release(&previous)),
-                "{command}"
-            );
-        }
     }
 
     /// fails if a promote that does not come up leaves the new release live,

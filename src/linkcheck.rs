@@ -234,7 +234,7 @@ mod tests {
         let artifacts = [PathBuf::from("out/bin/koji")];
         let found = warnings(
             "web",
-            &linked(&[".env", "config/local.json", "Flockfile.override.toml"]),
+            &linked(&[".env", "config/local.json", "config/secrets.toml"]),
             &artifacts,
         );
         assert!(found.is_empty(), "{found:?}");

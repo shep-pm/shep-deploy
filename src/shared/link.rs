@@ -90,51 +90,12 @@ pub fn ignored_present(checkout: &Path) -> Result<Vec<PathBuf>, Error> {
 
 /// The relative paths a release shares from the operator's own checkout.
 ///
-/// Only [`to_link`] builds one, and that is the whole point of the type.
-/// [`crate::flockfile`] treats the presence of `Flockfile.override.toml` in
-/// this list as proof that the override is the operator's file rather than
-/// one the repository committed, and proof has to come from the thing that
-/// did the linking. A plain slice any caller could assemble was the same
-/// evidence with no chain of custody: a wrong or lazy caller could mint the
-/// answer. With the constructor private the only way to hold one is to have
-/// asked [`to_link`], which read the operator's checkout to make it.
-///
-/// Read-only afterwards. It derefs to a slice for [`link_into`] and the
-/// tests, and answers [`Self::includes_override`] for `flockfile`.
+/// Read-only afterwards. It derefs to a slice for [`link_into`],
+/// [`crate::linkcheck`] and the tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FromCheckout(Vec<PathBuf>);
 
 impl FromCheckout {
-    /// Whether the operator's `Flockfile.override.toml` is among the paths.
-    ///
-    /// Answered from this list, not from the filesystem. Three versions of
-    /// this check asked the filesystem and all three were wrong, the last
-    /// one subtly enough to be worth recording.
-    ///
-    /// It required the override to resolve OUTSIDE the release, on the
-    /// grounds that the operator's arrives as a symlink into their checkout.
-    /// A repository can satisfy that in two commits. Release A ships an
-    /// ordinary tracked file holding `user = "root"` under some innocuous
-    /// name, and goes live, which by this crate's own invariant means
-    /// `current` points at it. Release B then commits
-    /// `Flockfile.override.toml` as a symlink to
-    /// `../../current/.deploy-payload.toml`. That resolves into release A,
-    /// which is outside release B, so the check passed and the refusal was
-    /// skipped. Demonstrated 2026-08-28.
-    ///
-    /// The lesson is not that the rule needed another clause. It is that
-    /// provenance cannot be recovered from a path once the path exists:
-    /// whoever can write the tree can write the evidence. [`to_link`] is
-    /// the only thing that knows which files came from the operator's
-    /// checkout, because it is what chose them, so the answer travels from
-    /// there instead of being reconstructed later.
-    #[must_use]
-    pub fn includes_override(&self) -> bool {
-        self.0
-            .iter()
-            .any(|path| path == Path::new(crate::flockfile::OVERRIDE))
-    }
-
     /// A list the tests assemble by hand. Test builds only, so production
     /// code has exactly one way to hold one: asking [`to_link`].
     #[cfg(test)]
@@ -151,8 +112,7 @@ impl std::ops::Deref for FromCheckout {
     }
 }
 
-/// [`ignored_present`], minus whatever `.shepignore` names, except the
-/// operator's own `Flockfile.override.toml`, which nothing can filter out.
+/// [`ignored_present`], minus whatever `.shepignore` names.
 ///
 /// This subtraction is the entire reason `.shepignore` exists. `.gitignore`
 /// conflates config that must be shared, caches that may be, and build
@@ -174,19 +134,9 @@ pub fn to_link(checkout: &Path) -> Result<FromCheckout, Error> {
         ignored
             .into_iter()
             .filter(|path| {
-                // The operator's override is the one entry `.shepignore` cannot
-                // reach. `.shepignore` is committed by the deployed repository,
-                // and this list is the whole of the evidence
-                // `FromCheckout::includes_override` has that the override came
-                // from the operator rather than from the repo. A repo that can delete the
-                // entry deletes every pin the operator wrote in the override,
-                // `user` among them, and a build pinned to an unprivileged
-                // account runs as the dog's own uid instead. Silently: nothing
-                // errors, because an absent override is a legitimate state.
-                path == Path::new(crate::flockfile::OVERRIDE)
-                    || !patterns
-                        .iter()
-                        .any(|pattern| pattern_matches(path, pattern))
+                !patterns
+                    .iter()
+                    .any(|pattern| pattern_matches(path, pattern))
             })
             .collect(),
     ))
@@ -346,31 +296,6 @@ mod tests {
         assert!(!found.iter().any(|p| p.ends_with("scratch.txt")));
     }
 
-    /// fails if the provenance answer stops following the list. The
-    /// override's presence among the linked paths is the only evidence
-    /// `flockfile` has that the file is the operator's; an answer from
-    /// anywhere else is one the repository can forge (see
-    /// `FromCheckout::includes_override`).
-    #[test]
-    fn the_override_is_recognised_only_when_it_was_linked() {
-        let repo = tempfile::tempdir().expect("tempdir");
-        fixtures::run_git(repo.path(), &["init", "-q"]);
-        fs::write(repo.path().join(".gitignore"), "Flockfile.override.toml\n").expect("ignore");
-        fs::write(
-            repo.path().join("Flockfile.override.toml"),
-            "[[app]]\nname = 'web'\nuser = 'app'\n",
-        )
-        .expect("override");
-
-        let linked = to_link(repo.path()).expect("computes");
-        assert!(linked.includes_override(), "{linked:?}");
-
-        fs::remove_file(repo.path().join("Flockfile.override.toml")).expect("removed");
-        let linked = to_link(repo.path()).expect("computes");
-        assert!(!linked.includes_override(), "{linked:?}");
-        assert!(!FromCheckout::of(vec![PathBuf::from("config/local.json")]).includes_override());
-    }
-
     /// fails if a `.shepignore` entry is still linked. This is the whole
     /// reason `.shepignore` exists: symlinking a build output means release
     /// B's build writes through the link and replaces what release A is
@@ -386,40 +311,6 @@ mod tests {
         let linked = to_link(repo.path()).expect("computes");
         assert!(linked.iter().any(|p| p.ends_with("config/local.json")));
         assert!(!linked.iter().any(|p| p.ends_with("dist")));
-    }
-
-    /// fails if a committed `.shepignore` can drop the operator's own
-    /// override out of the shared list.
-    ///
-    /// `.shepignore` is a repo-committed file, so the deployed repository
-    /// writes it. `Flockfile.override.toml` is the operator's, and
-    /// `FromCheckout::includes_override` treats presence in this list as the whole
-    /// proof of that. Letting the repo delete the entry silently drops every
-    /// pin the operator put in the override, `user` included, which is the
-    /// one that keeps a build off the dog's own uid. One innocuous-looking
-    /// line, and a build the operator pinned to `svc` runs as root instead.
-    #[test]
-    fn a_committed_shepignore_cannot_drop_the_operators_override() {
-        let repo = fixture_repo(&[
-            (".gitignore", "Flockfile.override.toml\n"),
-            (".shepignore", "Flockfile.override.toml\n"),
-        ]);
-        // The operator's own, present on disk and never committed, exactly
-        // like the `config/local.json` the other fixtures here use.
-        fs::write(
-            repo.path().join("Flockfile.override.toml"),
-            "[[app]]\nname = \"web\"\nuser = \"svc\"\n",
-        )
-        .expect("the operator's override");
-
-        let linked = to_link(repo.path()).expect("computes");
-
-        assert!(
-            linked
-                .iter()
-                .any(|p| p.ends_with("Flockfile.override.toml")),
-            "the override must survive a repo-committed .shepignore: {linked:?}"
-        );
     }
 
     /// fails if a repo with no `.shepignore` stops sharing everything

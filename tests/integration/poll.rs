@@ -94,7 +94,7 @@ const _: () = assert!(
 #[test]
 fn the_supervised_dog_deploys_a_moved_branch_without_being_asked() {
     let shepherd = Shepherd::new();
-    let origin = origin_with_app(shepherd.home(), "v1", Readiness::Probe, "");
+    let origin = origin_with_app("v1", Readiness::Probe, "");
     let sha = build_tree(shepherd.home(), "web", origin.path());
     write_state(shepherd.home(), "web", origin.path(), &sha);
     register_web(&shepherd, Readiness::Probe, "probed", "");

@@ -48,16 +48,6 @@ use tempfile::TempDir;
 
 use crate::swap;
 
-/// The fixture app, named per sheep so `flockfile::app_config` finds
-/// it, and probed because `Verify::Probed` refuses a sheep whose
-/// readiness nothing gates.
-fn flockfile(sheep: &str) -> String {
-    format!(
-        "[[app]]\nname = '{sheep}'\nscript = './run.sh'\n\n\
-         [app.readiness_probe]\nkind = 'http'\ntarget = 'http://127.0.0.1:1/health'\n"
-    )
-}
-
 /// The table every sheep a [`Ready`] serves has, unless it is given another.
 const BASE_TABLE: &str = "branch = 'main'\nverify = 'probed'\n";
 
@@ -90,12 +80,7 @@ fn write_target(home: &Path, sheep: &str, sha: Option<&str>) {
 /// The returned [`TempDir`] is the origin, and dropping it deletes the
 /// repository the deploy fetches from, so tests hold it.
 fn write_target_ready(home: &Path, sheep: &str) -> TempDir {
-    write_target_with_flockfile(home, sheep, &flockfile(sheep))
-}
-
-/// [`write_target_ready`], with the live release's Flockfile given.
-fn write_target_with_flockfile(home: &Path, sheep: &str, flockfile: &str) -> TempDir {
-    let origin = fixtures::checkout(&[("Flockfile.toml", flockfile)]);
+    let origin = fixtures::checkout(&[("run.sh", "#!/bin/sh\n")]);
 
     let tree = Tree::for_sheep(home, sheep);
     fs::create_dir_all(tree.git()).expect("create the git dir");
@@ -191,7 +176,7 @@ impl Daemon for Ready {
             .get(sheep)
             .cloned()
             .unwrap_or_else(|| format!("{BASE_TABLE}{}", self.extra));
-        Ok(fixtures::app_with_settings(sheep, &table))
+        Ok(fixtures::gated_app(sheep, &table))
     }
     async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), Error> {
         Ok(())
@@ -254,7 +239,7 @@ impl Daemon for Counting {
         Err(Error::Protocol("the shepherd stopped answering".to_owned()))
     }
     async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
-        Ok(fixtures::app_with_settings(sheep, BASE_TABLE))
+        Ok(fixtures::gated_app(sheep, BASE_TABLE))
     }
     async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), Error> {
         Ok(())
@@ -571,7 +556,7 @@ async fn a_deploy_is_written_to_the_log_it_belongs_in() {
 #[tokio::test(start_paused = true)]
 async fn a_skip_is_said_once() {
     let home = tempfile::tempdir().expect("tempdir");
-    let origin = write_target_with_flockfile(home.path(), "quiet", &flockfile("quiet"));
+    let origin = write_target_ready(home.path(), "quiet");
     let head = fixtures::head_of(origin.path());
     let (mut out, mut err) = (Vec::new(), Vec::new());
 

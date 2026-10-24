@@ -45,8 +45,8 @@ impl Generation {
     /// How many instances this generation has.
     ///
     /// Measured, which is the point: `AppConfig::instances` is the count the
-    /// release's Flockfile ASKS for, and `shep stock <sheep> <n>` changes
-    /// what is actually running without touching that file. A reload costs
+    /// stored config ASKS for, and `shep stock <sheep> <n>` changes
+    /// what is actually running without touching it. A reload costs
     /// one swap per instance the shepherd lists, so this is the number
     /// `crate::deploy`'s budget has to multiply by, and the number a
     /// turnover has to come back at.

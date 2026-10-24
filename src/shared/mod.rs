@@ -17,7 +17,6 @@ pub use link::{FromCheckout, link_cache, link_into, to_link};
 pub(crate) use process::{kill_group, off_thread, run_git, run_git_within};
 
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
 /// `text` with every control character replaced by `?`, for a message that
@@ -63,8 +62,7 @@ pub(crate) fn forges_a_line(c: char) -> bool {
 /// The value is fixed by each platform's ABI and cannot change without
 /// breaking every compiled program on it. Same "ask the host rather than
 /// reimplement its answer" spirit as `crate::build`'s use of `id`, except
-/// here the host's answer is a constant. Shared by the artifact copy and the
-/// Flockfile read, which both open a path the deployed repository chose.
+/// here the host's answer is a constant.
 pub(crate) const fn o_nofollow() -> i32 {
     #[cfg(target_os = "linux")]
     {
@@ -78,15 +76,6 @@ pub(crate) const fn o_nofollow() -> i32 {
     {
         compile_error!("O_NOFOLLOW's value is not known for this target")
     }
-}
-
-/// Whether `err` is `ELOOP`: the kernel refusing to follow a symlink, which
-/// is what an `O_NOFOLLOW` open answers when the last component is one.
-///
-/// By errno rather than `io::ErrorKind::FilesystemLoop`, which is not stable
-/// yet. `nix` already names the number for each platform.
-pub(crate) fn is_eloop(err: &io::Error) -> bool {
-    err.raw_os_error() == Some(nix::errno::Errno::ELOOP as i32)
 }
 
 /// `path` with every symlink and `..` resolved as far as the filesystem

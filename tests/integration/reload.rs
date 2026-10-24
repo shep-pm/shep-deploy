@@ -53,7 +53,7 @@ const DRAINING_LISTEN: u64 = 1;
 #[test]
 fn a_reload_slower_than_the_old_window_still_deploys() {
     let shepherd = Shepherd::new();
-    let origin = origin_with_app(shepherd.home(), "v1", Readiness::Heuristic(SLOW_LISTEN), "");
+    let origin = origin_with_app("v1", Readiness::Heuristic(SLOW_LISTEN), "");
     let first = build_tree(shepherd.home(), "web", origin.path());
     write_state(shepherd.home(), "web", origin.path(), &first);
     register_web(&shepherd, Readiness::Heuristic(SLOW_LISTEN), "alive", "");
@@ -125,7 +125,7 @@ fn a_reload_slower_than_the_old_window_still_deploys() {
 fn a_reload_that_uses_its_whole_drain_window_still_deploys() {
     let shepherd = Shepherd::new();
     let readiness = Readiness::Heuristic(DRAINING_LISTEN);
-    let origin = origin_with_app(shepherd.home(), "v1", readiness, DRAINING_APP);
+    let origin = origin_with_app("v1", readiness, DRAINING_APP);
     write_stubborn_run_script(origin.path(), "v1");
     git(origin.path(), &["add", "-A"]);
     git(origin.path(), &["commit", "-q", "-m", "stubborn v1"]);

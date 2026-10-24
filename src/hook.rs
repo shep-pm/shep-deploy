@@ -67,7 +67,7 @@ impl fmt::Debug for HookSpec {
     }
 }
 
-/// Every hook a release's Flockfile declares.
+/// Every hook the sheep's `[app.dogs.deploy]` table declares.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Hooks {
     /// Runs after the build and before the swap: `[app.dogs.deploy.release]`.

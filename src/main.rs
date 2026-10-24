@@ -65,7 +65,6 @@ mod exit;
 /// why a binary crate needs this declared here.
 #[cfg(test)]
 mod fixtures;
-mod flockfile;
 mod git;
 mod hook;
 mod linkcheck;
@@ -475,7 +474,7 @@ async fn deploy_once(sheep: &str) -> Result<u8, Error> {
 
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
-    let (mut state, _) = settings::adopted(&daemon, &tree).await?;
+    let (mut state, ..) = settings::adopted(&daemon, &tree).await?;
 
     let config = config::read(&daemon).await?;
     let outcome = deploy::deploy(&daemon, &tree, &mut state, &config).await?;
@@ -507,7 +506,7 @@ async fn promote_once(sheep: &str) -> Result<u8, Error> {
 
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
-    let (mut state, _) = settings::adopted(&daemon, &tree).await?;
+    let (mut state, ..) = settings::adopted(&daemon, &tree).await?;
 
     let config = config::read(&daemon).await?;
     let outcome = stage::promote(&daemon, &tree, &mut state, &config).await?;
@@ -528,7 +527,7 @@ async fn stage_once(sheep: &str) -> Result<u8, Error> {
 
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
-    let (mut state, _) = settings::adopted(&daemon, &tree).await?;
+    let (mut state, ..) = settings::adopted(&daemon, &tree).await?;
     let config = config::read(&daemon).await?;
     match stage::stage(&daemon, &tree, &mut state, &config).await? {
         Staged::Built { sha } => println!(

@@ -25,7 +25,7 @@
 //! privileges - a repository's `bun install` postinstall or `make build`
 //! executes as root, with the shepherd's full privilege, on every deploy.
 //! Nothing here refuses that deploy: this crate's job is to run the build the
-//! Flockfile describes, and an app with no `user` is a legitimate
+//! sheep's settings describe, and an app with no `user` is a legitimate
 //! configuration that shep itself accepts.
 //!
 //! That is a deliberate decision by this project's owner rather than an
@@ -152,10 +152,9 @@ pub struct BuildSpec {
 /// whose `remote` every later fetch reads. A commit on the tracked branch
 /// could therefore repoint the deploy at a repository of its own choosing.
 ///
-/// Refused rather than sanitised, matching
-/// [`crate::flockfile`]'s treatment of a committed `user`: a path that cannot
-/// mean what it says is an operator error worth naming, and silently
-/// rewriting one would leave a Flockfile whose text and behaviour disagree.
+/// Refused rather than sanitised: a path that cannot mean what it says is an
+/// operator error worth naming, and silently rewriting one would leave a
+/// setting whose text and behaviour disagree.
 ///
 /// # Errors
 /// A deserialization error naming the offending path, if any entry is
@@ -511,10 +510,9 @@ mod tests {
 
     /// fails if an escaping artifact reaches a build at all.
     ///
-    /// The refusal above is the last line; this is the first. A Flockfile
-    /// naming such a path is refused when it is parsed, so no build is ever
-    /// spawned for it, matching how `crate::flockfile` refuses a committed
-    /// `user` rather than ignoring it.
+    /// The refusal above is the last line; this is the first. Settings
+    /// naming such a path are refused when they are parsed, so no build is ever
+    /// spawned for them.
     #[test]
     fn an_escaping_artifact_is_refused_at_parse_time() {
         for bad in ["target/../../../deploy.toml", "/etc/passwd"] {

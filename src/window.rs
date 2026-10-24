@@ -33,14 +33,14 @@ pub(crate) const RELOAD_DEADLINE_SLACK: Duration = Duration::from_secs(5);
 /// with `pop_front`, one swap at a time, so a whole reload is that per
 /// instance.
 ///
-/// # What is measured and what is still read from a file
+/// # What is measured and what is read from the config
 ///
 /// `instances` is measured. It comes from [`crate::verify::Generation::instances`], the
 /// live pid count, and NOT from `AppConfig::instances`, which is the count
-/// the release's Flockfile asks for. Those differ the moment anyone runs
+/// the stored config asks for. Those differ the moment anyone runs
 /// `shep stock <sheep> <n>`, a first-class verb that changes what is running
-/// without touching any file this crate reads - and the failure that
-/// produced is the one this whole window exists to stop: a file saying one
+/// without touching the stored config - and the failure that
+/// produced is the one this whole window exists to stop: a config saying one
 /// instance against two really running gave a budget of 14s for a reload
 /// that took about 17, and a healthy release was rolled back.
 ///
@@ -51,15 +51,9 @@ pub(crate) const RELOAD_DEADLINE_SLACK: Duration = Duration::from_secs(5);
 /// `listen_timeout` per instance the post-drain check could outlast the
 /// budget and roll back a healthy release.
 ///
-/// The two timeouts are still read from the release's Flockfile, and that
-/// IS an inference, for the same reason
-/// `deploy::prepare::refuse_ungated_verification` documents about its own read: nothing
-/// re-registers a sheep, and `describe` reports status, pid and uptime but
-/// never config, so there is no live source to read them from. The exposure
-/// is narrower than the instance count's, because changing either one means
-/// editing the Flockfile and redeploying, which is the path that brings the
-/// new value here anyway - where `shep stock` is a single command that
-/// bypasses it.
+/// The two timeouts are read from the sheep's stored config, which is what
+/// the shepherd holds for it. `describe` reports status, pid and uptime but
+/// never config, so the stored config is the only source for them.
 ///
 /// # Why it is copied rather than inferred
 ///
@@ -88,10 +82,8 @@ pub(crate) const RELOAD_DEADLINE_SLACK: Duration = Duration::from_secs(5);
 /// by the same field, and an app that needs a minute to compile its client
 /// says so by setting `listen_timeout`, which this reads.
 pub(crate) fn budget(app: &AppConfig, instances: u32) -> Duration {
-    // Saturating throughout, and then held under `verify::MAX_WAIT`. Both
-    // timeouts come out of the release's own Flockfile, which the deployed
-    // repository writes, and `UpDuration` accepts any value up to `u64::MAX`
-    // milliseconds: a plain `+` here panicked, and a sum that did not would
+    // Saturating throughout, and then held under `verify::MAX_WAIT`.
+    // `UpDuration` accepts any value up to `u64::MAX` milliseconds: a plain `+` here panicked, and a sum that did not would
     // have had this dog watching one reload for longer than the host will
     // exist, holding the tree's lock and the poll loop with it.
     let mut per_instance = app

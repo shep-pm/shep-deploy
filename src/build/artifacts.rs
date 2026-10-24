@@ -111,7 +111,7 @@ pub(super) fn copy_artifact(
     // are spelled. The lexical refusal above catches `..` and an absolute
     // path; it cannot catch a committed symlink, and it says nothing at all
     // about the source, which `CARGO_TARGET_DIR` points wherever the
-    // repository's own Flockfile says. See `artifact_roots` for what the
+    // app's `env` says. See `artifact_roots` for what the
     // two roots are and the escapes they were measured against.
     for (end, path) in [("destination", &to), ("source", &from)] {
         if !lands_within(roots, path) {

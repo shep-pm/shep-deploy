@@ -65,7 +65,7 @@ async fn a_retargeted_tree_deploys_the_new_branchs_head() {
     set_branch(&daemon, &fixture.tree, "release")
         .await
         .expect("--branch release");
-    let (mut state, _) = settings::adopted(&daemon, &fixture.tree)
+    let (mut state, ..) = settings::adopted(&daemon, &fixture.tree)
         .await
         .expect("reads");
 

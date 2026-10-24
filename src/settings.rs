@@ -110,19 +110,35 @@ pub(crate) async fn read<D: Daemon>(daemon: &D, sheep: &str) -> Result<Settings,
     from_app(sheep, &daemon.sheep_config(sheep).await?)
 }
 
-/// `tree`'s record with the settings it no longer holds adopted from the
-/// shepherd, and the settings they came from.
+/// `sheep`'s whole stored config, and the settings in its table.
+///
+/// The config is the app a deploy builds as and verifies against: a release's
+/// own files choose none of it.
 ///
 /// # Errors
-/// [`State::read`]'s, [`read`]'s and [`State::adopt`]'s.
+/// As [`read`].
+pub(crate) async fn held<D: Daemon>(
+    daemon: &D,
+    sheep: &str,
+) -> Result<(AppConfig, Settings), Error> {
+    let app = daemon.sheep_config(sheep).await?;
+    let settings = from_app(sheep, &app)?;
+    Ok((app, settings))
+}
+
+/// `tree`'s record with the settings it no longer holds adopted from the
+/// shepherd, and the stored config and settings they came from.
+///
+/// # Errors
+/// [`State::read`]'s, [`held`]'s and [`State::adopt`]'s.
 pub(crate) async fn adopted<D: Daemon>(
     daemon: &D,
     tree: &Tree,
-) -> Result<(State, Settings), Error> {
+) -> Result<(State, AppConfig, Settings), Error> {
     let mut state = State::read(&tree.state_file())?;
-    let settings = read(daemon, tree.sheep()).await?;
+    let (app, settings) = held(daemon, tree.sheep()).await?;
     state.adopt(tree.sheep(), &settings)?;
-    Ok((state, settings))
+    Ok((state, app, settings))
 }
 
 /// One key of the table this dog writes, and its new value.
