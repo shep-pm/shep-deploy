@@ -331,7 +331,11 @@ pub async fn prepare_with<D: Daemon>(
     let hold = lock::hold(&tree)?;
 
     std::fs::create_dir_all(tree.releases()).map_err(Error::at(tree.releases()))?;
-    share_clone(&tree, shep_home, &state.remote)?;
+    // Off the runtime's thread: it waits on the clone's lock.
+    {
+        let (tree, shep_home, remote) = (tree.clone(), shep_home.to_owned(), state.remote.clone());
+        shared::off_thread(move || share_clone(&tree, &shep_home, &remote)).await?;
+    }
     // Off the runtime's thread, like every git call: see `shared::off_thread`.
     let (git_dir, remote, tracked, budget) = (
         tree.git(),
@@ -435,11 +439,16 @@ pub async fn prepare_with<D: Daemon>(
 /// [`Error::Io`] or [`Error::Git`] as [`git::init_bare`] and
 /// [`Tree::link_clone`] return them, and [`Error::Io`] if the lock cannot be
 /// taken.
-fn share_clone(tree: &Tree, shep_home: &Path, remote: &str) -> Result<(), Error> {
+pub(super) fn share_clone(tree: &Tree, shep_home: &Path, remote: &str) -> Result<(), Error> {
     if tree.owns_clone() {
         return git::init_bare(&tree.git());
     }
     let repo = Repo::for_remote(shep_home, remote);
+    // A retry after the remote changed: the link to the old clone goes, and
+    // the old clone with it when nothing else links to it.
+    if tree.linked_clone().is_some_and(|old| old != repo) {
+        crate::retention::release_clone(shep_home, tree)?;
+    }
     let _cloning = lock::hold_clone(&repo.git())?;
     git::init_bare(&repo.git())?;
     tree.link_clone(&repo)

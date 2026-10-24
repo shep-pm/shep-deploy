@@ -294,13 +294,19 @@ pub async fn all<D: Daemon>(daemon: &D, shep_home: &Path) -> Vec<Restored> {
         // A sheep that is back at its origin has no use for its tree, so it
         // lets go of the clone it shared. Only then: every other outcome
         // leaves the sheep running from, or retrying into, the tree.
-        let clone_kept = matches!(outcome, PutBack::Done)
-            .then(|| retention::release_clone(shep_home, &tree))
-            .and_then(Result::err)
-            .map(|err| Restored::CloneKept {
-                sheep: sheep.clone(),
-                why: err.to_string(),
-            });
+        let clone_kept = if matches!(outcome, PutBack::Done) {
+            // Off the runtime's thread: it waits on the clone's lock.
+            let (home, tree) = (shep_home.to_owned(), tree.clone());
+            crate::shared::off_thread(move || retention::release_clone(&home, &tree))
+                .await
+                .err()
+                .map(|err| Restored::CloneKept {
+                    sheep: sheep.clone(),
+                    why: err.to_string(),
+                })
+        } else {
+            None
+        };
         results.push(match outcome {
             PutBack::Done => Restored::Returned { sheep, to },
             PutBack::Untouched(err) => Restored::Failed {

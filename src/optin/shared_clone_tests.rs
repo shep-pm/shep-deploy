@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::prepare::prepare;
+use super::prepare::{prepare, share_clone};
 use super::test_support::{RollOf, checkout_with_commit};
 use crate::fixtures;
 use crate::paths::{self, Repo, Tree};
@@ -72,4 +72,34 @@ async fn a_sheep_cannot_be_called_repos() {
 
     assert!(err.to_string().contains("shared"), "{err}");
     assert!(!Tree::for_sheep(home.path(), "repos").root().exists());
+}
+
+/// fails if a setup retried after the sheep's remote changed leaves the old
+/// shared clone behind with nothing linking to it, or takes it from a sheep
+/// that still does.
+#[test]
+fn relinking_to_another_remote_releases_the_old_clone_when_nothing_else_uses_it() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let (old, new) = ("https://example.com/old", "https://example.com/new");
+    let trees = ["web", "api"].map(|sheep| {
+        let tree = Tree::for_sheep(home.path(), sheep);
+        std::fs::create_dir_all(tree.root()).expect("tree");
+        share_clone(&tree, home.path(), old).expect("shares");
+        tree
+    });
+    let (old, new) = (
+        Repo::for_remote(home.path(), old),
+        Repo::for_remote(home.path(), new),
+    );
+
+    share_clone(&trees[0], home.path(), "https://example.com/new").expect("relinks");
+    assert!(
+        old.git().join("HEAD").is_file(),
+        "api still uses the old one"
+    );
+    assert_eq!(trees[0].linked_clone(), Some(new.clone()));
+
+    share_clone(&trees[1], home.path(), "https://example.com/new").expect("relinks");
+    assert!(!old.root().exists(), "nothing links to the old clone now");
+    assert_eq!(trees[1].linked_clone(), Some(new));
 }

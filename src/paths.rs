@@ -284,11 +284,22 @@ impl Tree {
 
     /// The shared clone this tree's [`Self::git`] links to, or `None` for a
     /// tree that owns its clone or has none.
+    ///
+    /// Only a link to `<this tree's deploy dir>/repos/<key>/git` counts. A
+    /// link anywhere else is not a shared clone, whatever it is called, since
+    /// whoever lets go of a clone removes its directory.
     #[must_use]
     pub fn linked_clone(&self) -> Option<Repo> {
         let target = std::fs::read_link(self.git()).ok()?;
         let root = target.parent()?;
-        (target.file_name()? == "git" && root.parent()?.file_name()? == REPOS).then(|| Repo {
+        let repos = self.root.parent()?.join(REPOS);
+        (target.file_name()? == "git"
+            && root.parent()? == repos
+            && matches!(
+                Path::new(root.file_name()?).components().next(),
+                Some(Component::Normal(_))
+            ))
+        .then(|| Repo {
             root: root.to_owned(),
         })
     }
@@ -552,6 +563,26 @@ mod tests {
             matches!(parts[0], Component::Normal(_)),
             "key is an ordinary component: {rel:?}"
         );
+    }
+
+    /// fails if a `git` link that points outside this deploy directory's
+    /// `repos/` is taken for a shared clone. Letting go of one removes its
+    /// directory, so a link written by hand to `/data/repos/x/git` would have
+    /// `/data/repos/x` removed.
+    #[test]
+    fn only_a_link_into_this_deploy_dirs_repos_is_a_shared_clone() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let tree = Tree::for_sheep(home.path(), "web");
+        std::fs::create_dir_all(tree.root()).expect("tree");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let outside = elsewhere.path().join("repos").join("x").join("git");
+        std::os::unix::fs::symlink(&outside, tree.git()).expect("link");
+        assert_eq!(tree.linked_clone(), None, "outside");
+
+        std::fs::remove_file(tree.git()).expect("unlink");
+        let repo = Repo::for_remote(home.path(), "https://example.com/x");
+        tree.link_clone(&repo).expect("link");
+        assert_eq!(tree.linked_clone(), Some(repo), "inside");
     }
 
     /// fails if a tree stops knowing which sheep it belongs to. The
