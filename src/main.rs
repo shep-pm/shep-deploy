@@ -92,8 +92,9 @@ mod window;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use shep_client::dogs::{DogIdentity, DogRuntime};
 use shep_client::shep_core::paths::ShepPaths;
-use shep_client::{Client, LinkState, RECONNECT_MAX_DELAY, ReconnectingClient};
+use shep_client::{Client, LinkState, RECONNECT_MAX_DELAY};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::daemon::Live;
@@ -243,9 +244,10 @@ const SHEP_NAME: &str = "SHEP_NAME";
 /// `shep upgrade` hands the socket to a successor process, and a dog is an
 /// ordinary child that keeps running through it, so its connection has to be
 /// re-established or the dog is alive and mute for as long as it is left up.
-/// [`ReconnectingClient`] is the client that does that, and
-/// `connect_as_dog` is the only public door to a handshake that names a dog.
-/// That name is what the daemon marks as handshook, and what it needs to
+/// [`DogRuntime`] hands over the client that does that, and its identity is
+/// the only way in to a handshake that names a dog, which is why it replaced
+/// a hand-written `connect_as_dog` call. That name is what the daemon marks
+/// as handshook, and what it needs to
 /// restart the right dog when a successor refuses one. A dog connecting
 /// without it serves every request correctly and is still recorded as
 /// silent, restarted once, and then written off as stale.
@@ -258,14 +260,16 @@ const SHEP_NAME: &str = "SHEP_NAME";
 ///
 /// # Errors
 /// [`Error::Io`] if `$SHEP_HOME` cannot be resolved, [`Error::Connect`] if
-/// the shepherd's socket cannot be reached, [`Error::Refused`] if a
-/// successor daemon refuses this dog's handshake, and whatever
-/// [`config::Reader::open`] returns - a `[dog.<name>]` section that cannot
-/// be parsed stops the dog here rather than being ignored, because a dog
+/// the shepherd's socket cannot be reached, [`Error::Request`] if it will not
+/// serve the section, [`Error::Refused`] if a successor daemon refuses this dog's handshake,
+/// and whatever [`config::Reader::started`] returns - a `[dog.<name>]`
+/// section that cannot be parsed stops the dog here rather than being ignored, because a dog
 /// running on defaults it was not asked for looks exactly like one
 /// honouring the config.
 ///
-/// That is the STARTING read. The loop reads the section again every tick,
+/// That is the STARTING read, which [`DogRuntime::start`] makes with the
+/// secrets in the section resolved. The loop reads the section again every
+/// tick, through the same resolving request,
 /// so an operator who edits it does not have to restart the dog, and a
 /// later read that fails keeps the last section that parsed instead of
 /// ending a deploy that may be in flight. [`config::Reader::refresh`] says
@@ -278,10 +282,13 @@ async fn poll_forever(name: &str) -> Result<u8, Error> {
     // First, and before anything is awaited. See `Stop`.
     let mut stop = Stop::install();
 
-    let socket = socket()?;
-    let client = ReconnectingClient::connect_as_dog(&socket, name).await?;
-    let daemon = Live::dog(client);
-    let config = config::Reader::open(&daemon).await?;
+    let paths = ShepPaths {
+        socket: socket()?,
+        ..resolved()
+    };
+    let runtime = DogRuntime::start(DogIdentity::named(name), paths).await?;
+    let config = config::Reader::started(name, runtime.section().as_str())?;
+    let daemon = Live::dog(runtime.into_client());
 
     tokio::select! {
         result = poll::run(&daemon, &home, config) => result.map(|()| 0),

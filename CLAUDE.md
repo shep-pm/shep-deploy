@@ -117,6 +117,16 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
 405 unit tests, 7 integration and 3 probe as of 2026-09-22, ~24s, ~32s and instant. The number moves with every task; treat it as a shape, not a checksum.
 
+### Commit subjects
+
+Every commit subject is a conventional commit, and CI refuses a pull request
+with one that is not (`.github/workflows/commits.yml`). The rule is
+`.githooks/commit-msg`, which CI runs too. Turn it on once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Architecture
 
 Binary crate, no library target. Twenty-four modules under `src/`, the big three
