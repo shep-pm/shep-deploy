@@ -36,9 +36,10 @@
 //! # What is left on disk
 //!
 //! The deploy tree stays, since a sheep may still be running from it. A sheep
-//! that is put back lets go of the clone it shared with other sheep with the
-//! same remote (see [`crate::paths::Repo`]), and the clone goes with the last
-//! one: [`crate::retention::release_clone`].
+//! that is put back, or that was never moved, lets go of the clone it shared
+//! with other sheep with the same remote (see [`crate::paths::Repo`]), and the
+//! clone goes with the last one: [`crate::retention::release_clone`]. A sheep
+//! the dog bootstrapped, which runs from its tree, keeps its link.
 //!
 //! [`Request::Delete`]: shep_client::shep_core::protocol::Request::Delete
 
@@ -178,6 +179,21 @@ pub enum Restored {
     },
 }
 
+/// Lets `tree` go of the shared clone it links to, answering the row to add
+/// when that fails.
+///
+/// Off the runtime's thread: it waits on the clone's lock.
+async fn let_go_of_clone(shep_home: &Path, tree: &Tree, sheep: &str) -> Option<Restored> {
+    let (home, tree) = (shep_home.to_owned(), tree.clone());
+    crate::shared::off_thread(move || retention::release_clone(&home, &tree))
+        .await
+        .err()
+        .map(|err| Restored::CloneKept {
+            sheep: sheep.to_owned(),
+            why: err.to_string(),
+        })
+}
+
 /// Puts every target back, and answers with one row per target.
 ///
 /// Never returns a `Result`, and that is the contract rather than a
@@ -279,7 +295,12 @@ pub async fn all<D: Daemon>(daemon: &D, shep_home: &Path) -> Vec<Restored> {
         // sets it to the tree's `current`, so the shepherd's own registration
         // says whether the cutover got as far as registering.
         if never_moved && !registered_against(registered, &sheep, &tree) {
+            // Running from its origin all along, so the tree and the clone it
+            // linked at setup are of no use to it. Left in place, that link
+            // would keep the shared clone on disk after the last sheep went.
+            let clone_kept = let_go_of_clone(shep_home, &tree, &sheep).await;
             results.push(Restored::NeverMoved { sheep, at: cwd });
+            results.extend(clone_kept);
             continue;
         }
 
@@ -295,15 +316,7 @@ pub async fn all<D: Daemon>(daemon: &D, shep_home: &Path) -> Vec<Restored> {
         // lets go of the clone it shared. Only then: every other outcome
         // leaves the sheep running from, or retrying into, the tree.
         let clone_kept = if matches!(outcome, PutBack::Done) {
-            // Off the runtime's thread: it waits on the clone's lock.
-            let (home, tree) = (shep_home.to_owned(), tree.clone());
-            crate::shared::off_thread(move || retention::release_clone(&home, &tree))
-                .await
-                .err()
-                .map(|err| Restored::CloneKept {
-                    sheep: sheep.clone(),
-                    why: err.to_string(),
-                })
+            let_go_of_clone(shep_home, &tree, &sheep).await
         } else {
             None
         };

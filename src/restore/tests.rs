@@ -721,3 +721,23 @@ async fn a_sheep_with_its_own_clone_keeps_it_when_restored() {
     assert!(matches!(&results[0], Restored::Returned { .. }));
     assert!(tree.git().join("HEAD").is_file());
 }
+
+/// fails if a sheep whose cutover never landed keeps its link, which would
+/// keep the shared clone on disk after the last sheep was removed. It runs
+/// from its origin, not from the tree, so the clone is of no use to it.
+#[tokio::test]
+async fn a_sheep_that_never_moved_lets_go_of_the_shared_clone() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let repo = linked_targets(home.path(), &["web"]);
+    write_target_never_cut_over(home.path(), "api", "/srv/api", "server.js");
+    Tree::for_sheep(home.path(), "api")
+        .link_clone(&repo)
+        .expect("link");
+    let daemon = Recording::with_registered(&["api", "web"]);
+
+    let results = all(&daemon, home.path()).await;
+
+    let text = report(&results);
+    assert!(text.contains("api was never moved"), "{text}");
+    assert!(!repo.root().exists(), "no sheep links to it now: {text}");
+}

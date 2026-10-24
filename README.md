@@ -231,9 +231,12 @@ the case of its scheme and host folded away, so `https://host/x` and
 `git@host:x` against `https://host/x` stays two. A sheep cannot be called
 `repos`. Fetches into one clone take turns on `git.lock` beside it.
 
-Removing the dog lets go of the link of each sheep it puts back; the clone goes
-with the last link. A sheep left running from its tree keeps its link, and so
-the clone. Trees set up before this keep the clone
+Removing the dog lets go of the link of each sheep it puts back, and of each
+whose cutover never landed; the clone goes with the last link. A sheep left
+running from its tree keeps its link, and so the clone. A deploy whose recorded
+`remote` is not the one its tree's link was made for is refused, so a hand edit
+cannot fetch one repository into a clone other sheep deploy from; run `setup`
+again to relink. Trees set up before this keep the clone
 they have, and nothing moves them yet.
 
 `branch`, `watch` and `verify` are not in `deploy.toml`. They are keys of the
