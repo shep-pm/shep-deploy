@@ -231,8 +231,9 @@ the case of its scheme and host folded away, so `https://host/x` and
 `git@host:x` against `https://host/x` stays two. A sheep cannot be called
 `repos`. Fetches into one clone take turns on `git.lock` beside it.
 
-Removing the dog restores each sheep and lets go of its link; the clone goes
-with the last sheep that linked to it. Trees set up before this keep the clone
+Removing the dog lets go of the link of each sheep it puts back; the clone goes
+with the last link. A sheep left running from its tree keeps its link, and so
+the clone. Trees set up before this keep the clone
 they have, and nothing moves them yet.
 
 `branch`, `watch` and `verify` are not in `deploy.toml`. They are keys of the
