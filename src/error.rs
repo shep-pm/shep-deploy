@@ -10,6 +10,7 @@ mod display;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use shep_client::dogs::ShepherdError;
 use shep_client::shep_core::protocol::{RpcErrorCode, SmitError};
 use shep_client::{ConnectError, RequestError};
 
@@ -483,6 +484,23 @@ impl From<RequestError> for Error {
     }
 }
 
+/// What a dog's start can fail with, which is the two failures this enum
+/// already has a variant for.
+///
+/// `ShepherdError` is `#[non_exhaustive]`, and its third variant is a link
+/// that dropped after the dog was up, which starting cannot produce. It
+/// lands in [`Self::Protocol`] with its own message rather than being
+/// dropped, so a future way to fail is still said.
+impl From<ShepherdError> for Error {
+    fn from(err: ShepherdError) -> Self {
+        match err {
+            ShepherdError::Connect(err) => Self::Connect(err),
+            ShepherdError::Request(err) => Self::Request(err),
+            other => Self::Protocol(other.to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,5 +891,14 @@ mod tests {
         assert!(!rpc(RpcErrorCode::InvalidConfig).is_retryable());
         assert!(!Error::Request(RequestError::Closed).is_retryable());
         assert!(!Error::Protocol("nonsense".to_owned()).is_retryable());
+    }
+
+    /// fails if a dog that cannot start on its shepherd's answer stops
+    /// carrying the cause it had, and so the exit code `exit::code_for`
+    /// gives that cause.
+    #[test]
+    fn a_failed_start_keeps_the_failure_it_had() {
+        let request = Error::from(ShepherdError::Request(RequestError::Closed));
+        assert!(matches!(request, Error::Request(RequestError::Closed)));
     }
 }
