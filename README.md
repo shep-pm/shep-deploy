@@ -213,12 +213,27 @@ online" is true throughout a deploy that failed.
 Everything lives under `$SHEP_HOME/deploy/<sheep>/`:
 
 ```text
-git/                 one bare clone, shared by every release
+git                  the bare clone, shared by every release: a link to the
+                     shared clone below, or a directory of its own on a tree
+                     set up before clones were shared
 releases/<sha>/      a worktree per release
 current -> releases/<sha>
 deploy.toml          remote, deployed sha, held sha, staged sha, and the app as it was
                      before adoption (owner-only: it holds env)
 ```
+
+Sheep deployed from the same remote share one clone, at
+`$SHEP_HOME/deploy/repos/<key>/git`. `setup` makes it when no sheep with that
+remote has, and links the tree's `git` to it when one has. The key is the
+remote with surrounding whitespace, trailing slashes, a trailing `.git` and
+the case of its scheme and host folded away, so `https://host/x` and
+`https://host/x.git` are one clone; the path's case is kept, and
+`git@host:x` against `https://host/x` stays two. A sheep cannot be called
+`repos`. Fetches into one clone take turns on `git.lock` beside it.
+
+Removing the dog restores each sheep and lets go of its link; the clone goes
+with the last sheep that linked to it. Trees set up before this keep the clone
+they have, and nothing moves them yet.
 
 `branch`, `watch` and `verify` are not in `deploy.toml`. They are keys of the
 sheep's `[app.dogs.deploy]` table, which `setup`, `--watch` and `--branch` write
@@ -603,8 +618,8 @@ after hook) when the app has no build command, through open directory handles
 and never through paths, and skips every symlink, every file with a second
 hard link, and the `.git` file at the release root. The build can still replace
 that file, since it owns the directory, so the dog writes it back after the
-build. `git/`, `deploy.toml`, the lock files, `current` and `releases/`
-stay root's. The user also needs search permission on every directory down to
+build. `git`, the shared clones under `repos/`, `deploy.toml`, the lock files,
+`current` and `releases/` stay root's. The user also needs search permission on every directory down to
 the release: a `$SHEP_HOME` of mode 700 refuses the build at its first step.
 Put `$SHEP_HOME` where that user can search, or run the shepherd as that user.
 

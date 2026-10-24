@@ -301,27 +301,25 @@ pub async fn all<D: Daemon>(daemon: &D, shep_home: &Path) -> Vec<Restored> {
                 sheep: sheep.clone(),
                 why: err.to_string(),
             });
-        results.push(
-            match outcome {
-                PutBack::Done => Restored::Returned { sheep, to },
-                PutBack::Untouched(err) => Restored::Failed {
-                    sheep,
-                    why: err.to_string(),
-                },
-                PutBack::Reset(err) => Restored::Reset {
-                    sheep,
-                    why: err.to_string(),
-                },
-                PutBack::PartlyDeleted(err) => Restored::PartlyDeleted {
-                    sheep,
-                    why: err.to_string(),
-                },
-                PutBack::Deleted(err) => Restored::Lost {
-                    sheep,
-                    why: err.to_string(),
-                },
+        results.push(match outcome {
+            PutBack::Done => Restored::Returned { sheep, to },
+            PutBack::Untouched(err) => Restored::Failed {
+                sheep,
+                why: err.to_string(),
             },
-        );
+            PutBack::Reset(err) => Restored::Reset {
+                sheep,
+                why: err.to_string(),
+            },
+            PutBack::PartlyDeleted(err) => Restored::PartlyDeleted {
+                sheep,
+                why: err.to_string(),
+            },
+            PutBack::Deleted(err) => Restored::Lost {
+                sheep,
+                why: err.to_string(),
+            },
+        });
         results.extend(clone_kept);
     }
 

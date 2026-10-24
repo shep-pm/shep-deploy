@@ -153,12 +153,6 @@ impl Repo {
     pub fn git(&self) -> PathBuf {
         self.root.join("git")
     }
-
-    /// The directory `$SHEP_HOME` keeps every shared clone in.
-    #[must_use]
-    pub fn all(shep_home: &Path) -> PathBuf {
-        shep_home.join("deploy").join(REPOS)
-    }
 }
 
 /// `remote` as [`Repo`] keys it. See there for what is folded together.
@@ -170,7 +164,9 @@ fn normalized_remote(remote: &str) -> String {
         .trim_end_matches('/');
     let authority_end = trimmed.find("://").map_or(0, |scheme| {
         let after = scheme + "://".len();
-        trimmed[after..].find('/').map_or(trimmed.len(), |at| after + at)
+        trimmed[after..]
+            .find('/')
+            .map_or(trimmed.len(), |at| after + at)
     });
     format!(
         "{}{}",

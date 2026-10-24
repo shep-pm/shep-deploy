@@ -661,9 +661,7 @@ fn linked_targets(home: &Path, sheep: &[&str]) -> paths::Repo {
     crate::git::init_bare(&repo.git()).expect("bare");
     for name in sheep {
         write_target_with_origin(home, name, "/srv/web", "server.js");
-        Tree::for_sheep(home, name)
-            .link_clone(&repo)
-            .expect("link");
+        Tree::for_sheep(home, name).link_clone(&repo).expect("link");
     }
     repo
 }
@@ -680,7 +678,9 @@ async fn the_shared_clone_goes_when_the_last_sheep_linking_to_it_is_restored() {
     let tree = Tree::for_sheep(home.path(), "api");
     let mut state = State::read(&tree.state_file()).expect("reads");
     (state.origin_cwd, state.origin_script) = (None, None);
-    state.write(&tree.state_file()).expect("a bootstrapped sheep");
+    state
+        .write(&tree.state_file())
+        .expect("a bootstrapped sheep");
 
     let results = all(&Recording::new(&["web", "api"], Refuse::Never), home.path()).await;
 
@@ -695,11 +695,16 @@ async fn the_shared_clone_goes_when_the_last_sheep_linking_to_it_is_restored() {
     let mut state = State::read(&tree.state_file()).expect("reads");
     state.origin_cwd = Some(PathBuf::from("/srv/api"));
     state.origin_script = Some("server.js".to_owned());
-    state.write(&tree.state_file()).expect("api has an origin now");
+    state
+        .write(&tree.state_file())
+        .expect("api has an origin now");
     let results = all(&Recording::new(&["api"], Refuse::Never), home.path()).await;
 
     assert!(matches!(&results[0], Restored::Returned { sheep, .. } if sheep == "api"));
-    assert!(!repo.root().exists(), "the last link is gone, so is the clone");
+    assert!(
+        !repo.root().exists(),
+        "the last link is gone, so is the clone"
+    );
 }
 
 /// fails if a restored sheep with a clone of its own has it removed. Trees

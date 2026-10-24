@@ -5,7 +5,7 @@ use std::path::Path;
 use super::prepare::prepare;
 use super::test_support::{RollOf, checkout_with_commit};
 use crate::fixtures;
-use crate::paths::{Repo, Tree};
+use crate::paths::{self, Repo, Tree};
 
 /// A second checkout of `first`, so both name `first` as their `origin`.
 fn checkout_of(first: &Path) -> tempfile::TempDir {
@@ -40,7 +40,7 @@ async fn two_sheep_with_one_remote_leave_one_bare_clone_and_two_links() {
         .await
         .expect("ctm prepares");
 
-    let clones: Vec<_> = std::fs::read_dir(Repo::all(home.path()))
+    let clones: Vec<_> = std::fs::read_dir(home.path().join("deploy").join(paths::REPOS))
         .expect("the shared clones")
         .flatten()
         .collect();

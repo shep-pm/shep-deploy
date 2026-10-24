@@ -26,7 +26,12 @@ async fn a_tree_with_its_own_clone_still_deploys() {
     .await
     .expect("completes");
 
-    assert_eq!(outcome, Outcome::Deployed { sha: second.clone() });
+    assert_eq!(
+        outcome,
+        Outcome::Deployed {
+            sha: second.clone()
+        }
+    );
     assert!(fixture.tree.release(&second).join("second.txt").is_file());
 }
 
@@ -51,7 +56,12 @@ async fn a_tree_linked_to_a_shared_clone_deploys() {
     .await
     .expect("completes");
 
-    assert_eq!(outcome, Outcome::Deployed { sha: second.clone() });
+    assert_eq!(
+        outcome,
+        Outcome::Deployed {
+            sha: second.clone()
+        }
+    );
     assert!(fixture.tree.release(&second).join("second.txt").is_file());
     assert!(
         repo.git().join("worktrees").is_dir(),
