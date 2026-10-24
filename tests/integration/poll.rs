@@ -93,6 +93,27 @@ const _: () = assert!(
 /// vetting spawn runs too.
 #[test]
 fn the_supervised_dog_deploys_a_moved_branch_without_being_asked() {
+    a_moved_branch_is_deployed_within_one_interval("[deploy]\ninterval = \"1s\"\n", &[]);
+}
+
+/// fails if a `{{secret:...}}` in the dog's section reaches it unresolved.
+///
+/// The interval is the secret, so the section only parses, and the dog only
+/// deploys inside [`POLL_WINDOW`], when the shepherd's `DogConfigResolved`
+/// answer is what the dog read. An unresolved reference is not a duration,
+/// and the dog refuses to start on it.
+#[test]
+fn a_secret_in_the_dogs_section_reaches_it_resolved() {
+    a_moved_branch_is_deployed_within_one_interval(
+        "[deploy]\ninterval = \"{{secret:DEPLOY_INTERVAL}}\"\n",
+        &[("DEPLOY_INTERVAL", "1s")],
+    );
+}
+
+/// The body of both tests above: `dogs_toml` is the dog's section as written,
+/// and `secrets` are stored in the shepherd's secret store before the dog is
+/// adopted, since it reads its section as it starts.
+fn a_moved_branch_is_deployed_within_one_interval(dogs_toml: &str, secrets: &[(&str, &str)]) {
     let shepherd = Shepherd::new();
     let origin = origin_with_app("v1", Readiness::Probe, "");
     let sha = build_tree(shepherd.home(), "web", origin.path());
@@ -103,11 +124,10 @@ fn the_supervised_dog_deploys_a_moved_branch_without_being_asked() {
 
     // A second rather than the default half minute, and the whole test is
     // built to notice the difference.
-    fs::write(
-        shepherd.home().join("dogs.toml"),
-        "[deploy]\ninterval = \"1s\"\n",
-    )
-    .expect("write dogs.toml");
+    for (key, value) in secrets {
+        shepherd.ok(&["secret", "set", key, value]);
+    }
+    fs::write(shepherd.home().join("dogs.toml"), dogs_toml).expect("write dogs.toml");
 
     // Adopted and supervised, with no argv, exactly as the contract says.
     // The name is the binary's own stem with `shep-` stripped, which is what

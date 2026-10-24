@@ -64,7 +64,9 @@ use std::path::PathBuf;
 use shep_client::{
     Client, LinkState, ReconnectingClient, RequestError,
     shep_core::config::{AppConfig, DogTable},
-    shep_core::protocol::{ProcessInfo, Request, Response, SelectorSpec, SheepRefusal, Smit},
+    shep_core::protocol::{
+        DogSectionToml, ProcessInfo, Request, Response, SelectorSpec, SheepRefusal, Smit,
+    },
 };
 
 use crate::error::Error;
@@ -76,15 +78,17 @@ use crate::error::Error;
 /// `shep restart`, ...) rather than against this crate's own vocabulary for
 /// it, so a reader who knows shep already knows what each one does.
 pub trait Daemon {
-    /// The dog's own `[dog.<name>]` section, as TOML text.
+    /// The dog's own `[dog.<name>]` section, as TOML text, with every
+    /// `{{secret:...}}` in it resolved.
     ///
     /// Empty when `shep.toml` has no such section, which is the ordinary
     /// case for a dog running on its defaults.
     ///
     /// # Errors
-    /// [`Error::Connect`] or [`Error::Request`] if the shepherd cannot be
-    /// reached or refuses, and [`Error::Protocol`] if it answers with
-    /// something other than a dog section.
+    /// [`Error::Request`] if the shepherd cannot be reached or refuses,
+    /// including an older shepherd whose section names a secret it cannot
+    /// resolve, and [`Error::Protocol`] if it answers with something other
+    /// than a dog section.
     // Called by `crate::config::read`, which reads the `[dog.<name>]`
     // section the poll loop needs.
     async fn dog_config(&self, name: &str) -> Result<String, Error>;
@@ -291,17 +295,25 @@ impl Link {
             Self::Command(client) => client.request(body).await,
         }
     }
+
+    /// The section `name` has in `dogs.toml`, with every `{{secret:...}}`
+    /// resolved, over whichever connection this is.
+    ///
+    /// Through shep-client's `dog_config` on both, never a hand-built
+    /// `Request::DogConfig`: that request answers the section as written,
+    /// reference and all, and a dog that read its section that way would
+    /// parse a secret's name where it wanted the secret.
+    async fn dog_section(&self, name: &str) -> Result<DogSectionToml, RequestError> {
+        match self {
+            Self::Dog(client) => client.dog_config(name).await,
+            Self::Command(client) => client.dog_config(name).await,
+        }
+    }
 }
 
 impl Daemon for Live {
     async fn dog_config(&self, name: &str) -> Result<String, Error> {
-        let asked = Request::DogConfig {
-            name: name.to_owned(),
-        };
-        match self.0.request(asked).await? {
-            Response::DogSection { toml } => Ok(toml.as_str().to_owned()),
-            other => Err(unexpected("DogConfig", &other)),
-        }
+        Ok(self.0.dog_section(name).await?.as_str().to_owned())
     }
 
     async fn list_flock(&self) -> Result<Vec<ProcessInfo>, Error> {

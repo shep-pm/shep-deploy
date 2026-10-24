@@ -225,11 +225,17 @@ impl DogConfig {
     /// Every case except the first names the offending key, because the
     /// section is one an operator edited by hand and a complaint they cannot
     /// locate is nearly as bad as none. A plain syntax error is the
-    /// exception and names a line and column instead, because at that point
-    /// the parser has no key to name.
+    /// exception and names a line instead, because at that point the parser
+    /// has no key to name.
+    ///
+    /// No refusal repeats a value from the text. The section arrives with
+    /// its `{{secret:...}}` references resolved and a refusal is logged, so
+    /// the parser's own message, which quotes the offending value, is
+    /// replaced by [`withheld`]'s, and a `passthrough` entry is named by its
+    /// position.
     pub fn parse(toml: &str) -> Result<Self, Error> {
-        let raw: Section = toml::from_str(toml)
-            .map_err(|source| Error::Config(format!("[dog.<name>]: {source}")))?;
+        let raw: Section =
+            toml::from_str(toml).map_err(|source| Error::Config(withheld(toml, &source)))?;
 
         if raw.retention < MINIMUM_RETENTION {
             return Err(Error::Config(format!(
@@ -261,7 +267,7 @@ impl DogConfig {
         )?;
 
         let mut seen = std::collections::BTreeSet::new();
-        for name in &raw.passthrough {
+        for (index, name) in raw.passthrough.iter().enumerate() {
             let why = if name.is_empty() {
                 Some("is empty")
             } else if name.contains(['=', '\0']) {
@@ -273,8 +279,10 @@ impl DogConfig {
             };
             if let Some(why) = why {
                 return Err(Error::Config(format!(
-                    "passthrough entry {name:?} {why}; each entry names one variable to copy \
-                     from the dog's environment into a build"
+                    "passthrough entry {} {why}; each entry names one variable to copy \
+                     from the dog's environment into a build. The entry itself is not \
+                     repeated here, because it may be a resolved secret",
+                    index + 1
                 )));
             }
         }
@@ -287,6 +295,43 @@ impl DogConfig {
             passthrough: raw.passthrough,
         })
     }
+}
+
+/// What to say about a section that would not parse, without saying any of
+/// it.
+///
+/// The parser's own message quotes the value it choked on, and its `Display`
+/// prints the whole source line under it. Either is a resolved secret in the
+/// log. This names the line, and the key on it only when the key is
+/// certain to be one.
+///
+/// Certain means a top-level key of the section read as plain TOML. Text
+/// found before an `=` on the error's line is not that: inside a multi-line
+/// string the line is a secret's own, and whatever precedes its `=` would be
+/// logged as if it were a key. A section that is not TOML at all has no keys
+/// to vouch for, so it is named by its line alone.
+fn withheld(text: &str, source: &toml::de::Error) -> String {
+    let line_number = source.span().map_or(1, |span| {
+        text.get(..span.start)
+            .map_or(1, |before| before.matches('\n').count() + 1)
+    });
+    let keys: Vec<String> = toml::from_str::<toml::Table>(text)
+        .map(|table| table.into_iter().map(|(key, _)| key).collect())
+        .unwrap_or_default();
+    let key = text
+        .lines()
+        .nth(line_number - 1)
+        .and_then(|line| line.split_once('='))
+        .map(|(key, _)| key.trim())
+        .filter(|key| keys.iter().any(|known| known == key));
+    let at = key.map_or_else(
+        || format!("line {line_number}"),
+        |key| format!("line {line_number}, key `{key}`"),
+    );
+    format!(
+        "[dog.<name>]: {at} is not valid here. The parser's detail is withheld because the \
+         section arrives with its secrets resolved"
+    )
 }
 
 /// `value` as a [`Duration`], refused by `key` if it is under
@@ -355,9 +400,10 @@ async fn section_of<D: Daemon>(daemon: &D, name: &str) -> Result<DogConfig, Erro
 ///
 /// # Why the name is resolved once and the section is not
 ///
-/// [`adopted_name`] costs a whole flock listing, and the answer cannot
-/// change under a running process: shep spawns an adopted dog itself and
-/// names it then, so a rename is a respawn. The section is the part that
+/// The name is `SHEP_DOG_NAME`, which the connection announced and the
+/// section was first read under, and it cannot change under a running
+/// process: shep spawns an adopted dog itself and names it then, so a
+/// rename is a respawn. The section is the part that
 /// an operator edits while the dog runs, so it is the part worth asking
 /// for again.
 ///
@@ -379,18 +425,18 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Resolves this dog's name and reads its section, once, as it starts.
+    /// Starts from the section `name` was served as the dog connected, which
+    /// `DogRuntime::start` asked for resolved.
     ///
     /// # Errors
-    /// As [`read`]. A dog does not start on a section it cannot read; see
-    /// [`Self::refresh`] for why that is not what a later read does.
-    pub async fn open<D: Daemon>(daemon: &D) -> Result<Self, Error> {
-        let name = adopted_name(daemon).await;
-        let current = match &name {
-            Some(name) => section_of(daemon, name).await?,
-            None => DogConfig::parse("")?,
-        };
-        Ok(Self { name, current })
+    /// [`Error::Config`] from [`DogConfig::parse`]. A dog does not start on
+    /// a section it cannot read; see [`Self::refresh`] for why that is not
+    /// what a later read does.
+    pub fn started(name: &str, section: &str) -> Result<Self, Error> {
+        Ok(Self {
+            name: Some(name.to_owned()),
+            current: DogConfig::parse(section)?,
+        })
     }
 
     /// The newest section that parsed.
@@ -403,7 +449,7 @@ impl Reader {
     ///
     /// # Why this keeps the last section rather than ending the dog
     ///
-    /// [`Self::open`] propagates and the dog exits, because a dog running
+    /// [`Self::started`] propagates and the dog exits, because a dog running
     /// on defaults it was not asked for looks exactly like one honouring
     /// the config and there is nothing else for it to run on. Neither half
     /// holds here. The section that parsed a tick ago is something else to
@@ -576,6 +622,31 @@ mod tests {
     fn a_value_of_the_wrong_type_names_the_key() {
         let err = DogConfig::parse("retention = \"five\"").expect_err("refuses");
         assert!(err.to_string().contains("retention"), "{err}");
+    }
+
+    /// fails if a refusal repeats a value from the section. The section the
+    /// dog parses arrives with its `{{secret:...}}` references resolved, and
+    /// a refusal is logged, so a value echoed there is a secret in the log.
+    /// The key and the line still have to be named.
+    #[test]
+    fn a_refusal_never_repeats_a_value_from_the_section() {
+        let hunter2 = "hunter2-resolved-secret";
+        for section in [
+            format!("retention = \"{hunter2}\""),
+            format!("interval = {hunter2}"),
+            format!("retention = 5\ninterval = \"{hunter2}\""),
+            format!("interval = \"\"\"\n{hunter2}=\\q\"\"\""),
+            format!("interval = \"\"\"\n{hunter2}=ok\"\"\""),
+            format!("passthrough = [\"{hunter2}=\"]"),
+            format!("passthrough = [\"{hunter2}\", \"{hunter2}\"]"),
+        ] {
+            let shown = DogConfig::parse(&section).expect_err("refuses").to_string();
+            assert!(!shown.contains(hunter2), "{shown}");
+            assert!(
+                shown.contains("line") || shown.contains("passthrough"),
+                "{shown}"
+            );
+        }
     }
 
     /// fails if the schema stops describing the keys `parse` accepts.
