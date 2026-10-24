@@ -320,7 +320,7 @@ class rather than the instances.
   take it; `set_watch` writes only the table and takes neither lock.
   A deploy takes the tree lock first and the record lock inside; nothing
   holding the record lock waits for the tree's. A write to the sheep's table
-  is one request and takes no lock; `set_watch` takes none at all. The
+  is one request and takes no lock. The
   cutover's promotion writes `watch = auto` to the table on the clean path
   only, over whatever `prepare` left there, so a `--watch manual` typed during
   setup is overwritten and belongs after setup returns.

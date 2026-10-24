@@ -16,7 +16,7 @@ use crate::error::Error;
 use crate::fixtures;
 use crate::paths::Tree;
 use crate::settings::Settings;
-use crate::state::{State, Watch};
+use crate::state::State;
 
 /// A [`Daemon`] whose `save_roll` writes a roll JSON naming each
 /// `(sheep, cwd)` pair, with `script = "./run.sh"`, into a fresh
@@ -180,13 +180,12 @@ pub(super) fn checkout_declaring(flockfile: &str) -> tempfile::TempDir {
 
 /// Writes `<home>/deploy/<sheep>/deploy.toml` through `State::write`,
 /// standing in for a sheep that is already a deploy target.
-pub(super) fn write_target(home: &Path, sheep: &str, watch: Watch, sha: Option<&str>) {
+pub(super) fn write_target(home: &Path, sheep: &str, sha: Option<&str>) {
     let tree = Tree::for_sheep(home, sheep);
     std::fs::create_dir_all(tree.state_file().parent().expect("has a parent"))
         .expect("create target dir");
     let state = State {
         deployed: sha.map(str::to_owned),
-        watch,
         ..fixtures::state()
     };
     state.write(&tree.state_file()).expect("write state");

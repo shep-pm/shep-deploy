@@ -73,7 +73,7 @@ impl Prepared {
 /// leaves a directory behind with no `deploy.toml` in it, which is not a
 /// target and does not trip that same refusal on a second attempt.
 ///
-/// The record it writes says `watch = "manual"`, whatever the sheep ends
+/// The sheep's table gets `watch = "manual"`, whatever the sheep ends
 /// up with: nothing has been served from the tree yet, and [`super::cut_over`] is
 /// what promotes it. A cutover abandoned partway therefore leaves a target
 /// the poll loop passes over rather than one it refuses every interval.
@@ -435,7 +435,6 @@ mod tests {
         write_target(
             home.path(),
             "bpm",
-            Watch::Auto,
             Some("0123456789abcdef0123456789abcdef01234567"),
         );
         let entries = [("bpm", checkout.path())];
@@ -636,7 +635,7 @@ mod tests {
         let release = tree.release(fixtures::SHA);
         std::fs::create_dir_all(&release).expect("a release directory");
         swap::point_at(&tree.current(), &release).expect("current");
-        write_target(home.path(), "bpm", Watch::Manual, None);
+        write_target(home.path(), "bpm", None);
         let current = tree.current();
         let entries = [("bpm", current.as_path())];
         let daemon = RollOf::new(&entries);
@@ -679,7 +678,7 @@ mod tests {
         let release = tree.release(fixtures::SHA);
         std::fs::create_dir_all(&release).expect("a release directory");
         swap::point_at(&tree.current(), &release).expect("current");
-        write_target(&home, "bpm", Watch::Manual, None);
+        write_target(&home, "bpm", None);
         let spelled_through_link = link.join("deploy/bpm/current");
         let entries = [("bpm", spelled_through_link.as_path())];
         let daemon = RollOf::new(&entries);
@@ -737,7 +736,6 @@ mod tests {
         write_target(
             home.path(),
             "bpm",
-            Watch::Auto,
             Some("0123456789abcdef0123456789abcdef01234567"),
         );
         let tree = Tree::for_sheep(home.path(), "bpm");
@@ -777,7 +775,7 @@ mod tests {
     async fn an_abandoned_target_is_not_pointed_at_shep_deploy() {
         let home = tempfile::tempdir().expect("tempdir");
         let checkout = checkout_with_commit();
-        write_target(home.path(), "bpm", Watch::Auto, None);
+        write_target(home.path(), "bpm", None);
         let entries = [("bpm", checkout.path())];
         let daemon = RollOf::new(&entries);
 
