@@ -60,11 +60,7 @@ pub enum Standing {
         /// watched target.
         staged: Option<String>,
     },
-    /// A git checkout whose repository ships a `Flockfile.toml`, so
-    /// upstream has said how to run it and nothing has taken it over yet.
-    NeedsSetup,
-    /// A git checkout that could be taken over, where nothing declares a
-    /// deploy.
+    /// A git checkout that `setup` could take over.
     Eligible,
     /// Left alone, and why.
     NotEligible(String),
@@ -83,9 +79,8 @@ pub enum Standing {
     /// A deploy tree whose record cannot be read, and what reading it said.
     ///
     /// Its own standing rather than a fall-through, because the fall-through
-    /// was dangerous: a live target's `cwd` is `current`, a git worktree
-    /// shipping a `Flockfile.toml`, so an unreadable record classified it as
-    /// `NeedsSetup` and told the operator to run `setup` against a running
+    /// was dangerous: a live target's `cwd` is `current`, a git worktree,
+    /// so an unreadable record classified it as `Eligible` and told the operator to run `setup` against a running
     /// service, which clones over its tree. Reachable without corruption:
     /// the record refuses unknown fields, so one written by a newer
     /// shep-deploy reads this way to an older binary.
@@ -115,9 +110,7 @@ pub enum Standing {
 /// Order matters and is not arbitrary. An existing target is answered
 /// first, because a sheep already being deployed is not "eligible" and
 /// offering it again invites a second opt-in that would clone over a live
-/// tree. Then a missing `cwd`, then a `cwd` that is not a checkout, and
-/// only then the Flockfile question, which is the only one that needs the
-/// checkout to be a checkout.
+/// tree. Then a missing `cwd`, then a `cwd` that is not a checkout.
 #[must_use]
 pub fn classify(shep_home: &Path, app: &AppConfig) -> Standing {
     let tree = Tree::for_sheep(shep_home, &app.name);
@@ -168,11 +161,7 @@ pub fn classify(shep_home: &Path, app: &AppConfig) -> Standing {
         return Standing::NotEligible(format!("{cwd} is not a git repository"));
     }
 
-    if checkout.join("Flockfile.toml").is_file() {
-        Standing::NeedsSetup
-    } else {
-        Standing::Eligible
-    }
+    Standing::Eligible
 }
 
 /// Three columns: name, standing, reason.
@@ -220,7 +209,6 @@ impl Standing {
             Self::Watched { .. } => "watched",
             Self::Held { .. } => "held",
             Self::Manual { .. } => "manual",
-            Self::NeedsSetup => "needs setup",
             Self::Eligible => "eligible",
             Self::NotEligible(_) => "not eligible",
             Self::Orphaned => "orphaned",
@@ -266,8 +254,7 @@ impl Standing {
                 }
                 reason
             }
-            Self::NeedsSetup => "a git checkout that ships a Flockfile".to_owned(),
-            Self::Eligible => "a git checkout, nothing declares a deploy".to_owned(),
+            Self::Eligible => "a git checkout".to_owned(),
             Self::NotEligible(why) => why.clone(),
             Self::Orphaned => "has a deploy tree, and the shepherd has no sheep by that name. \
                                Re-register the app from its Flockfile with `cwd` set to the \
@@ -448,9 +435,9 @@ mod tests {
 
     /// fails if a target whose record cannot be read is offered `setup`.
     ///
-    /// A live target's `cwd` is `current`, a git worktree that ships a
-    /// `Flockfile.toml`, so falling through to the checkout questions
-    /// classified it as `NeedsSetup` and the row told an operator to run
+    /// A live target's `cwd` is `current`, a git worktree, so falling
+    /// through to the checkout questions classified it as `Eligible` and the
+    /// row told an operator to run
     /// `shep-deploy setup` against a running service, which clones over its
     /// tree. A record with a key this binary does not know is enough to get
     /// there: one written by a newer shep-deploy reads this way to an older
@@ -466,7 +453,7 @@ mod tests {
              newer_key = true\n",
         )
         .expect("a record from the future");
-        let checkout = checkout_fixture(&[("Flockfile.toml", "[[app]]\nname = \"web\"\n")]);
+        let checkout = checkout_fixture(&[]);
 
         let standing = classify(home.path(), &app("web", checkout.path().to_str()));
 
@@ -475,7 +462,7 @@ mod tests {
             "must name what was wrong with the record: {standing:?}"
         );
         let shown = render(&[("web".to_owned(), standing)]);
-        assert!(!shown.contains("needs setup"), "{shown}");
+        assert!(!shown.contains("eligible"), "{shown}");
         assert!(shown.contains("do not run setup"), "{shown}");
     }
 
@@ -637,26 +624,23 @@ mod tests {
         ));
     }
 
-    /// fails if a checkout that ships its own Flockfile stops being
-    /// distinguished from one that does not. That distinction is the whole
-    /// argument for building this: upstream shipping the app definition is
-    /// what turns "how do I run this" from a README section people misread
-    /// into a file.
+    /// fails if a git checkout is classified by what its repository ships.
+    /// `setup` stages from the registered config and reads no file from the
+    /// checkout, so a `Flockfile.toml` changes nothing about whether it can
+    /// take the sheep over.
     #[test]
-    fn a_checkout_shipping_a_flockfile_needs_setup_and_one_without_is_merely_eligible() {
+    fn a_checkout_is_eligible_whether_or_not_it_ships_a_flockfile() {
         let home = tempfile::tempdir().expect("tempdir");
 
         let declared = checkout_fixture(&[("Flockfile.toml", "[[app]]\nname='x'\nscript='y'\n")]);
-        assert!(matches!(
-            classify(home.path(), &app("reactmap", declared.path().to_str())),
-            Standing::NeedsSetup
-        ));
-
         let bare = checkout_fixture(&[]);
-        assert!(matches!(
-            classify(home.path(), &app("koji", bare.path().to_str())),
-            Standing::Eligible
-        ));
+
+        for (name, checkout) in [("reactmap", &declared), ("koji", &bare)] {
+            assert!(matches!(
+                classify(home.path(), &app(name, checkout.path().to_str())),
+                Standing::Eligible
+            ));
+        }
     }
 
     /// fails if a sheep that is ALREADY a deploy target is offered as
@@ -879,7 +863,6 @@ mod tests {
                     failed: "d4e5f6a7b8c9d4e5f6a7b8c9d4e5f6a7b8c9d4e5".to_owned(),
                 },
             ),
-            ("reactmap".to_owned(), Standing::NeedsSetup),
             ("koji".to_owned(), Standing::Eligible),
             (
                 "legacy".to_owned(),
@@ -892,8 +875,7 @@ mod tests {
              koji-staging  manual        main@a1b2c3, deploys only when asked\n\
              reactmap-eu   held          main@a1b2c3, holding d4e5f6 after it did not land. A \
              newer commit or a landing deploy clears it\n\
-             reactmap      needs setup   a git checkout that ships a Flockfile\n\
-             koji          eligible      a git checkout, nothing declares a deploy\n\
+             koji          eligible      a git checkout\n\
              legacy        not eligible  /opt/legacy is not a git repository\n"
         );
     }
