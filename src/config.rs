@@ -302,24 +302,28 @@ impl DogConfig {
 ///
 /// The parser's own message quotes the value it choked on, and its `Display`
 /// prints the whole source line under it. Either is a resolved secret in the
-/// log. This names the line, and the key on it when the key is a bare one,
-/// which is the operator's own text and not a value.
+/// log. This names the line, and the key on it only when the key is
+/// certain to be one.
+///
+/// Certain means a top-level key of the section read as plain TOML. Text
+/// found before an `=` on the error's line is not that: inside a multi-line
+/// string the line is a secret's own, and whatever precedes its `=` would be
+/// logged as if it were a key. A section that is not TOML at all has no keys
+/// to vouch for, so it is named by its line alone.
 fn withheld(text: &str, source: &toml::de::Error) -> String {
     let line_number = source.span().map_or(1, |span| {
         text.get(..span.start)
             .map_or(1, |before| before.matches('\n').count() + 1)
     });
+    let keys: Vec<String> = toml::from_str::<toml::Table>(text)
+        .map(|table| table.into_iter().map(|(key, _)| key).collect())
+        .unwrap_or_default();
     let key = text
         .lines()
         .nth(line_number - 1)
         .and_then(|line| line.split_once('='))
         .map(|(key, _)| key.trim())
-        .filter(|key| {
-            !key.is_empty()
-                && key
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        });
+        .filter(|key| keys.iter().any(|known| known == key));
     let at = key.map_or_else(
         || format!("line {line_number}"),
         |key| format!("line {line_number}, key `{key}`"),
@@ -631,6 +635,8 @@ mod tests {
             format!("retention = \"{hunter2}\""),
             format!("interval = {hunter2}"),
             format!("retention = 5\ninterval = \"{hunter2}\""),
+            format!("interval = \"\"\"\n{hunter2}=\\q\"\"\""),
+            format!("interval = \"\"\"\n{hunter2}=ok\"\"\""),
             format!("passthrough = [\"{hunter2}=\"]"),
             format!("passthrough = [\"{hunter2}\", \"{hunter2}\"]"),
         ] {
