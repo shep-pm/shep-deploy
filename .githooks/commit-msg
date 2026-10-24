@@ -1,0 +1,33 @@
+#!/bin/sh
+# Refuses a commit whose subject is not a conventional commit:
+#   type(scope)!: description
+# The same script gates CI (.github/workflows/commits.yml), so what this
+# accepts locally is exactly what a pull request is held to.
+#
+# Enable it once per clone:  git config core.hooksPath .githooks
+set -eu
+
+subject=$(sed -n '1p' "$1")
+
+# Subjects git writes itself: nobody typed them, and the commits they name
+# are held to the rule on their own.
+case "$subject" in
+  "Merge "* | "Revert \""* | "fixup! "* | "squash! "* | "amend! "*) exit 0 ;;
+esac
+
+types='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
+if printf '%s\n' "$subject" | grep -Eq "^($types)(\([^()[:space:]]+\))?!?: [^[:space:]].*$"; then
+  exit 0
+fi
+
+cat >&2 <<MSG
+Not a conventional commit subject:
+
+  $subject
+
+Expected  type(scope)!: description
+  type   one of: $(printf '%s' "$types" | sed 's/|/, /g')
+  scope  optional, in parentheses
+  !      optional, marks a breaking change
+MSG
+exit 1

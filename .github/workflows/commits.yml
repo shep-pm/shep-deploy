@@ -1,0 +1,33 @@
+name: commits
+# Every commit on a pull request carries a conventional subject, because
+# release-plz derives the version and the changelog from them. The rule is
+# `.githooks/commit-msg`, run here on each subject so CI and the local hook
+# cannot disagree.
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  conventional:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check every commit subject
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          failed=0
+          message="$(mktemp)"
+          for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            git log -1 --format=%s "$sha" > "$message"
+            if ! .githooks/commit-msg "$message"; then
+              echo "::error::$sha does not have a conventional subject"
+              failed=1
+            fi
+          done
+          exit "$failed"
