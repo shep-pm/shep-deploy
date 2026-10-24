@@ -45,6 +45,8 @@ mod attempt;
 mod cutover;
 mod prepare;
 #[cfg(test)]
+mod shared_clone_tests;
+#[cfg(test)]
 mod test_support;
 mod undo;
 

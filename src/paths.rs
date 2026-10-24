@@ -279,6 +279,33 @@ impl Tree {
         self.root.join("git")
     }
 
+    /// Whether this tree's `git` is a clone of its own, as every tree's was
+    /// before clones were shared, rather than a link to a shared one.
+    #[must_use]
+    pub fn owns_clone(&self) -> bool {
+        std::fs::symlink_metadata(self.git()).is_ok_and(|meta| meta.file_type().is_dir())
+    }
+
+    /// Points this tree's [`Self::git`] at `repo`'s clone, replacing a link to
+    /// another one. Does nothing to a link already there.
+    ///
+    /// Never replaces a clone the tree owns: callers check [`Self::owns_clone`]
+    /// first, and a directory here is an error.
+    ///
+    /// # Errors
+    /// [`Error::Io`], naming the link, if it cannot be read, replaced or
+    /// made, or if it is a directory.
+    pub fn link_clone(&self, repo: &Repo) -> Result<(), Error> {
+        let (link, target) = (self.git(), repo.git());
+        match std::fs::read_link(&link) {
+            Ok(current) if current == target => return Ok(()),
+            Ok(_) => std::fs::remove_file(&link).map_err(Error::at(&link))?,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(Error::Io { path: link, source }),
+        }
+        std::os::unix::fs::symlink(target, &link).map_err(Error::at(link))
+    }
+
     /// The directory holding every built release, one per sha.
     #[must_use]
     pub fn releases(&self) -> PathBuf {

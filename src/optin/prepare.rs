@@ -11,7 +11,7 @@ use crate::deploy::refuse_ungated_at_setup;
 use crate::error::Error;
 use crate::git;
 use crate::lock;
-use crate::paths::Tree;
+use crate::paths::{self, Repo, Tree};
 use crate::roll;
 use crate::settings::Change;
 use crate::shared;
@@ -119,6 +119,12 @@ pub async fn prepare_with<D: Daemon>(
     config: &DogConfig,
     verify: Verify,
 ) -> Result<Prepared, Error> {
+    if sheep == paths::REPOS {
+        return Err(Error::Config(format!(
+            "{sheep:?} is where the clones shared between sheep live, so no sheep can be called \
+             that: rename it in its Flockfile and run setup again"
+        )));
+    }
     let tree = Tree::for_sheep(shep_home, sheep);
 
     // Cloned rather than borrowed, and named `previous_config` rather than
@@ -325,7 +331,7 @@ pub async fn prepare_with<D: Daemon>(
     let hold = lock::hold(&tree)?;
 
     std::fs::create_dir_all(tree.releases()).map_err(Error::at(tree.releases()))?;
-    git::init_bare(&tree.git())?;
+    share_clone(&tree, shep_home, &state.remote)?;
     // Off the runtime's thread, like every git call: see `shared::off_thread`.
     let (git_dir, remote, tracked, budget) = (
         tree.git(),
@@ -415,6 +421,28 @@ pub async fn prepare_with<D: Daemon>(
         app,
         previous_config,
     })
+}
+
+/// Gives `tree` the bare clone for `remote`: links it to the shared one,
+/// making that first if no sheep with this remote has. A tree that already
+/// has a clone of its own, from a setup that died before shared clones
+/// existed, keeps it.
+///
+/// Under the clone's lock, so a removal that is sweeping the shared clone
+/// for links cannot take it between its creation and this link.
+///
+/// # Errors
+/// [`Error::Io`] or [`Error::Git`] as [`git::init_bare`] and
+/// [`Tree::link_clone`] return them, and [`Error::Io`] if the lock cannot be
+/// taken.
+fn share_clone(tree: &Tree, shep_home: &Path, remote: &str) -> Result<(), Error> {
+    if tree.owns_clone() {
+        return git::init_bare(&tree.git());
+    }
+    let repo = Repo::for_remote(shep_home, remote);
+    let _cloning = lock::hold_clone(&repo.git())?;
+    git::init_bare(&repo.git())?;
+    tree.link_clone(&repo)
 }
 
 #[cfg(test)]
