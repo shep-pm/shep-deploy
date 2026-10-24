@@ -33,6 +33,14 @@
 //! also fails is the sheep genuinely gone, and [`Restored::Lost`] says so
 //! in words an operator cannot misread as "still running".
 //!
+//! # What is left on disk
+//!
+//! The deploy tree stays, since a sheep may still be running from it. A sheep
+//! that is put back, or that was never moved, lets go of the clone it shared
+//! with other sheep with the same remote (see [`crate::paths::Repo`]), and the
+//! clone goes with the last one: [`crate::retention::release_clone`]. A sheep
+//! the dog bootstrapped, which runs from its tree, keeps its link.
+//!
 //! [`Request::Delete`]: shep_client::shep_core::protocol::Request::Delete
 
 mod put_back;
@@ -41,6 +49,7 @@ use std::path::{Path, PathBuf};
 
 use crate::daemon::Daemon;
 use crate::paths::{self, Tree};
+use crate::retention;
 use crate::roll;
 use crate::state::State;
 use put_back::{PutBack, put_back, registered_against};
@@ -141,6 +150,17 @@ pub enum Restored {
         /// Why neither the restore nor the fallback could put it back.
         why: String,
     },
+    /// The sheep was put back, but the shared clone it linked to could not be
+    /// let go of, so it may still be on disk.
+    ///
+    /// Reported after the sheep's own row, which is true: nothing here
+    /// changes where the sheep runs.
+    CloneKept {
+        /// The sheep that was restored.
+        sheep: String,
+        /// Why the clone or the link could not be removed.
+        why: String,
+    },
     /// The muster roll itself could not be read, so none of these
     /// pre-existing sheep could be checked against it at all.
     ///
@@ -157,6 +177,21 @@ pub enum Restored {
         /// [`roll::registered`](crate::roll)'s own failure.
         why: String,
     },
+}
+
+/// Lets `tree` go of the shared clone it links to, answering the row to add
+/// when that fails.
+///
+/// Off the runtime's thread: it waits on the clone's lock.
+async fn let_go_of_clone(shep_home: &Path, tree: &Tree, sheep: &str) -> Option<Restored> {
+    let (home, tree) = (shep_home.to_owned(), tree.clone());
+    crate::shared::off_thread(move || retention::release_clone(&home, &tree))
+        .await
+        .err()
+        .map(|err| Restored::CloneKept {
+            sheep: sheep.to_owned(),
+            why: err.to_string(),
+        })
 }
 
 /// Puts every target back, and answers with one row per target.
@@ -260,7 +295,12 @@ pub async fn all<D: Daemon>(daemon: &D, shep_home: &Path) -> Vec<Restored> {
         // sets it to the tree's `current`, so the shepherd's own registration
         // says whether the cutover got as far as registering.
         if never_moved && !registered_against(registered, &sheep, &tree) {
+            // Running from its origin all along, so the tree and the clone it
+            // linked at setup are of no use to it. Left in place, that link
+            // would keep the shared clone on disk after the last sheep went.
+            let clone_kept = let_go_of_clone(shep_home, &tree, &sheep).await;
             results.push(Restored::NeverMoved { sheep, at: cwd });
+            results.extend(clone_kept);
             continue;
         }
 
@@ -271,27 +311,35 @@ pub async fn all<D: Daemon>(daemon: &D, shep_home: &Path) -> Vec<Restored> {
             .as_ref()
             .and_then(|origin| origin.cwd.as_deref())
             .map_or_else(|| cwd.clone(), PathBuf::from);
-        results.push(
-            match put_back(daemon, &sheep, registered, origin.as_ref(), &cwd, &script).await {
-                PutBack::Done => Restored::Returned { sheep, to },
-                PutBack::Untouched(err) => Restored::Failed {
-                    sheep,
-                    why: err.to_string(),
-                },
-                PutBack::Reset(err) => Restored::Reset {
-                    sheep,
-                    why: err.to_string(),
-                },
-                PutBack::PartlyDeleted(err) => Restored::PartlyDeleted {
-                    sheep,
-                    why: err.to_string(),
-                },
-                PutBack::Deleted(err) => Restored::Lost {
-                    sheep,
-                    why: err.to_string(),
-                },
+        let outcome = put_back(daemon, &sheep, registered, origin.as_ref(), &cwd, &script).await;
+        // A sheep that is back at its origin has no use for its tree, so it
+        // lets go of the clone it shared. Only then: every other outcome
+        // leaves the sheep running from, or retrying into, the tree.
+        let clone_kept = if matches!(outcome, PutBack::Done) {
+            let_go_of_clone(shep_home, &tree, &sheep).await
+        } else {
+            None
+        };
+        results.push(match outcome {
+            PutBack::Done => Restored::Returned { sheep, to },
+            PutBack::Untouched(err) => Restored::Failed {
+                sheep,
+                why: err.to_string(),
             },
-        );
+            PutBack::Reset(err) => Restored::Reset {
+                sheep,
+                why: err.to_string(),
+            },
+            PutBack::PartlyDeleted(err) => Restored::PartlyDeleted {
+                sheep,
+                why: err.to_string(),
+            },
+            PutBack::Deleted(err) => Restored::Lost {
+                sheep,
+                why: err.to_string(),
+            },
+        });
+        results.extend(clone_kept);
     }
 
     if let Err(err) = &registered
@@ -371,6 +419,10 @@ pub fn report(results: &[Restored]) -> String {
                  putting its previous configuration back, so it is stopped and gone from the \
                  flock. It will not come back on its own after a restart. Re-register it from \
                  its own Flockfile.\n"
+            ),
+            Restored::CloneKept { sheep, why } => format!(
+                "{sheep}: the clone it shared with other sheep could not be let go of ({why}); \
+                 remove it by hand from $SHEP_HOME/deploy/repos once no sheep needs it\n"
             ),
             // One row naming every affected sheep and the roll's own
             // cause, rather than one wrong-shaped guess per sheep.

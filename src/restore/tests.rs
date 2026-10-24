@@ -7,7 +7,7 @@ use shep_client::shep_core::config::AppConfig;
 
 use super::*;
 use crate::fixtures;
-use crate::paths::Tree;
+use crate::paths::{self, Tree};
 use crate::restore::test_support::{
     Recording, Refuse, write_record, write_target_never_cut_over, write_target_with_full_origin,
     write_target_with_origin, write_target_with_origin_absent,
@@ -652,4 +652,92 @@ async fn a_registration_through_a_symlinked_parent_is_recognised_when_current_da
     let text = report(&results);
     assert!(!text.contains("never moved"), "{text}");
     assert!(!daemon.calls().is_empty(), "put back, not merely reported");
+}
+
+/// Two sheep restored to their origins, linked to one shared clone, as setup
+/// leaves them.
+fn linked_targets(home: &Path, sheep: &[&str]) -> paths::Repo {
+    let repo = paths::Repo::for_remote(home, "https://example.com/x.git");
+    crate::git::init_bare(&repo.git()).expect("bare");
+    for name in sheep {
+        write_target_with_origin(home, name, "/srv/web", "server.js");
+        Tree::for_sheep(home, name).link_clone(&repo).expect("link");
+    }
+    repo
+}
+
+/// fails if removing the dog while one sheep is restored and another is not
+/// takes the clone the second still links to, or if restoring the last one
+/// leaves the clone behind.
+#[tokio::test]
+async fn the_shared_clone_goes_when_the_last_sheep_linking_to_it_is_restored() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let repo = linked_targets(home.path(), &["web", "api"]);
+    // `api` is bootstrapped, with nothing to restore, so it stays running
+    // from its tree and keeps its link.
+    let tree = Tree::for_sheep(home.path(), "api");
+    let mut state = State::read(&tree.state_file()).expect("reads");
+    (state.origin_cwd, state.origin_script) = (None, None);
+    state
+        .write(&tree.state_file())
+        .expect("a bootstrapped sheep");
+
+    let results = all(&Recording::new(&["web", "api"], Refuse::Never), home.path()).await;
+
+    assert!(
+        results
+            .iter()
+            .any(|row| matches!(row, Restored::Returned { sheep, .. } if sheep == "web")),
+        "{results:?}"
+    );
+    assert!(repo.git().join("HEAD").is_file(), "api still links to it");
+
+    let mut state = State::read(&tree.state_file()).expect("reads");
+    state.origin_cwd = Some(PathBuf::from("/srv/api"));
+    state.origin_script = Some("server.js".to_owned());
+    state
+        .write(&tree.state_file())
+        .expect("api has an origin now");
+    let results = all(&Recording::new(&["api"], Refuse::Never), home.path()).await;
+
+    assert!(matches!(&results[0], Restored::Returned { sheep, .. } if sheep == "api"));
+    assert!(
+        !repo.root().exists(),
+        "the last link is gone, so is the clone"
+    );
+}
+
+/// fails if a restored sheep with a clone of its own has it removed. Trees
+/// from before shared clones keep theirs until the migration moves them.
+#[tokio::test]
+async fn a_sheep_with_its_own_clone_keeps_it_when_restored() {
+    let home = tempfile::tempdir().expect("tempdir");
+    write_target_with_origin(home.path(), "web", "/srv/web", "server.js");
+    let tree = Tree::for_sheep(home.path(), "web");
+    crate::git::init_bare(&tree.git()).expect("bare");
+
+    let results = all(&Recording::new(&["web"], Refuse::Never), home.path()).await;
+
+    assert!(matches!(&results[0], Restored::Returned { .. }));
+    assert!(tree.git().join("HEAD").is_file());
+}
+
+/// fails if a sheep whose cutover never landed keeps its link, which would
+/// keep the shared clone on disk after the last sheep was removed. It runs
+/// from its origin, not from the tree, so the clone is of no use to it.
+#[tokio::test]
+async fn a_sheep_that_never_moved_lets_go_of_the_shared_clone() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let repo = linked_targets(home.path(), &["web"]);
+    write_target_never_cut_over(home.path(), "api", "/srv/api", "server.js");
+    Tree::for_sheep(home.path(), "api")
+        .link_clone(&repo)
+        .expect("link");
+    let daemon = Recording::with_registered(&["api", "web"]);
+
+    let results = all(&daemon, home.path()).await;
+
+    let text = report(&results);
+    assert!(text.contains("api was never moved"), "{text}");
+    assert!(!repo.root().exists(), "no sheep links to it now: {text}");
 }

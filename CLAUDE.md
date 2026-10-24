@@ -257,6 +257,16 @@ class rather than the instances.
   `AlreadyDeploying`.
   The hold field is private to `optin/prepare.rs`; `cut_over` takes it
   through `Prepared::into_parts` and keeps it to its end.
+- **A tree's `git` is a link to `$SHEP_HOME/deploy/repos/<key>/git`, or a
+  directory of its own.** `Tree::git()` is the same path either way, so its
+  callers do not care; `Tree::owns_clone` and `Tree::linked_clone` tell them
+  apart. `paths::Repo` derives `<key>` from the normalized remote. `repos` is
+  therefore not a sheep name, and `setup` refuses it. Only `setup` links, only
+  `restore::all` lets go, for a sheep put back or never moved
+  (`retention::release_clone`, which sweeps every directory under `deploy/` for
+  a link, record or not), and `retention::prune` never removes a clone. A deploy
+  refuses a record whose `remote` is not the one its link was keyed by
+  (`Tree::clone_serves`). Trees with their own clone are not migrated yet.
 - **Never derive the markers directory from `Tree::completion("")`.** The
   result has a trailing separator and its `parent()` is the tree root; a sweep
   written that way removed `current`. `Tree::completions()` is the directory.
@@ -301,13 +311,20 @@ class rather than the instances.
   `CARGO_TARGET_DIR` set.** Without it, source and destination collapse to the
   same path and the self-copy guard returns `Ok` before reaching anything the
   test is about. The test says so in its own doc; do not simplify it.
-- **Two locks per tree, and the order is fixed.** `lock::hold` is the deploy
+- **Two locks per tree and a third per clone, and the order is fixed.**
+  `lock::hold` is the deploy
   lock, non-blocking, held for a whole build. `lock::hold_record` is the
   record lock, blocking, held for one read and one write of `deploy.toml`:
   every whole-record write in `deploy` and `optin`, and `retarget::set_branch`,
   take it; `set_watch` writes only the table and takes neither lock.
   A deploy takes the tree lock first and the record lock inside; nothing
-  holding the record lock waits for the tree's. A write to the sheep's table
+  holding the record lock waits for the tree's. `lock::hold_clone` is the
+  clone lock, blocking, on `git.lock` beside the RESOLVED clone, so a tree's
+  `git` link and the clone's own path are one lock. `git::fetch` takes it for
+  the fetch alone, and `share_clone` in `optin/prepare.rs` and
+  `retention::release_clone` take it to make or sweep a shared clone. It is
+  taken inside the tree lock and never waits for a tree's or a record's. A
+  write to the sheep's table
   is one request and takes no lock. The
   cutover's promotion writes `watch = auto` to the table on the clean path
   only, over whatever `prepare` left there, so a `--watch manual` typed during

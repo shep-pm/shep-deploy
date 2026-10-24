@@ -6,8 +6,10 @@
 //!
 //! ```text
 //! $SHEP_HOME/deploy/<sheep>/
-//! ├── git/                 one bare clone; object store shared by every
-//! │                        worktree release
+//! ├── git                  the bare clone; object store shared by every
+//! │                        worktree release. A link to the shared clone
+//! │                        below, or, on a tree set up before those
+//! │                        existed, a directory of its own
 //! ├── releases/<sha>/      a git worktree per built release
 //! ├── cache/target/        the dog's build cache, symlinked into every
 //! │                        release as `target` so builds stay warm and a
@@ -17,6 +19,10 @@
 //! │                        release on purpose - see `Tree::completion`
 //! ├── deploy.lock          exclusive flock so only one deploy runs at once
 //! └── deploy.toml          the sheep's `State` - see `crate::state`
+//!
+//! $SHEP_HOME/deploy/repos/<key>/
+//! ├── git/                 the shared bare clone, one per remote; see [`Repo`]
+//! └── git.lock             held while one fetch into it runs
 //! ```
 
 use std::path::{Component, Path, PathBuf};
@@ -79,6 +85,103 @@ pub fn targets(shep_home: &Path) -> Result<Targets, Error> {
     found.named.sort();
     found.unnamed.sort();
     Ok(found)
+}
+
+/// The sheep name that [`Repo`] directories live under, so no sheep can be
+/// called it. `setup` refuses it.
+pub const REPOS: &str = "repos";
+
+/// A bare clone shared by every tree whose remote is the same repository,
+/// at `$SHEP_HOME/deploy/repos/<key>/git`.
+///
+/// The key is `<tail>-<hash>`: `tail` is the last path component of the
+/// normalized remote, reduced to `[A-Za-z0-9._-]` for whoever reads the
+/// directory, and `hash` is the 64-bit FNV-1a of the whole normalized remote
+/// in hex, which is what tells two repositories apart. FNV-1a is
+/// specified, so the key does not change between builds or toolchains, which
+/// `std`'s hashers do not promise. The key is always one ordinary path
+/// component, whatever the remote says.
+///
+/// The remote is normalized before hashing: surrounding whitespace and
+/// trailing slashes go, then one trailing `.git`, and the scheme and host of
+/// a `scheme://host/path` remote are lowercased. The path is not, since a
+/// host serves `Shep-pm/x` and `shep-pm/x` as different repositories. Remotes
+/// in other spellings (`git@host:path` against `https://host/path`) are
+/// different keys, and so two clones: unifying them is a guess about the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repo {
+    root: PathBuf,
+}
+
+impl Repo {
+    /// The shared clone for `remote`.
+    #[must_use]
+    pub fn for_remote(shep_home: &Path, remote: &str) -> Self {
+        Self::keyed(&shep_home.join("deploy").join(REPOS), remote)
+    }
+
+    /// The clone for `remote` among those under `repos`.
+    fn keyed(repos: &Path, remote: &str) -> Self {
+        let normalized = normalized_remote(remote);
+        let tail: String = normalized
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(40)
+            .collect();
+        let tail = tail.trim_start_matches('.');
+        let tail = if tail.is_empty() { "repo" } else { tail };
+        Self {
+            root: repos.join(format!("{tail}-{:016x}", fnv1a(&normalized))),
+        }
+    }
+
+    /// The clone's own directory: everything of it is inside this.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The bare clone itself.
+    #[must_use]
+    pub fn git(&self) -> PathBuf {
+        self.root.join("git")
+    }
+}
+
+/// `remote` as [`Repo`] keys it. See there for what is folded together.
+fn normalized_remote(remote: &str) -> String {
+    let trimmed = remote.trim().trim_end_matches('/');
+    let trimmed = trimmed
+        .strip_suffix(".git")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    let authority_end = trimmed.find("://").map_or(0, |scheme| {
+        let after = scheme + "://".len();
+        trimmed[after..]
+            .find('/')
+            .map_or(trimmed.len(), |at| after + at)
+    });
+    format!(
+        "{}{}",
+        trimmed[..authority_end].to_ascii_lowercase(),
+        &trimmed[authority_end..]
+    )
+}
+
+/// 64-bit FNV-1a, the hash [`Repo`]'s key carries.
+fn fnv1a(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// The deploy tree for one sheep.
@@ -172,6 +275,71 @@ impl Tree {
     #[must_use]
     pub fn git(&self) -> PathBuf {
         self.root.join("git")
+    }
+
+    /// Whether this tree's `git` is a clone of its own, as every tree's was
+    /// before clones were shared, rather than a link to a shared one.
+    #[must_use]
+    pub fn owns_clone(&self) -> bool {
+        std::fs::symlink_metadata(self.git()).is_ok_and(|meta| meta.file_type().is_dir())
+    }
+
+    /// The shared clone this tree's [`Self::git`] links to, or `None` for a
+    /// tree that owns its clone or has none.
+    ///
+    /// Only a link to `<this tree's deploy dir>/repos/<key>/git` counts. A
+    /// link anywhere else is not a shared clone, whatever it is called, since
+    /// whoever lets go of a clone removes its directory.
+    #[must_use]
+    pub fn linked_clone(&self) -> Option<Repo> {
+        let target = std::fs::read_link(self.git()).ok()?;
+        let root = target.parent()?;
+        let repos = self.root.parent()?.join(REPOS);
+        (target.file_name()? == "git"
+            && root.parent()? == repos
+            && matches!(
+                Path::new(root.file_name()?).components().next(),
+                Some(Component::Normal(_))
+            ))
+        .then(|| Repo {
+            root: root.to_owned(),
+        })
+    }
+
+    /// Points this tree's [`Self::git`] at `repo`'s clone, replacing a link to
+    /// another one. Does nothing to a link already there.
+    ///
+    /// Never replaces a clone the tree owns: callers check [`Self::owns_clone`]
+    /// first, and a directory here is an error.
+    ///
+    /// # Errors
+    /// [`Error::Io`], naming the link, if it cannot be read, replaced or
+    /// made, or if it is a directory.
+    pub fn link_clone(&self, repo: &Repo) -> Result<(), Error> {
+        let (link, target) = (self.git(), repo.git());
+        match std::fs::read_link(&link) {
+            Ok(current) if current == target => return Ok(()),
+            Ok(_) => std::fs::remove_file(&link).map_err(Error::at(&link))?,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(Error::Io { path: link, source }),
+        }
+        std::os::unix::fs::symlink(target, &link).map_err(Error::at(link))
+    }
+
+    /// Whether this tree's clone is one `remote` may be fetched into.
+    ///
+    /// A tree linked to a shared clone is served only by the clone keyed by
+    /// `remote`: fetching another remote into it would replace the branches
+    /// every other tree linked to it deploys from. A tree that owns its clone
+    /// has nothing shared to spoil.
+    #[must_use]
+    pub fn clone_serves(&self, remote: &str) -> bool {
+        let Some(linked) = self.linked_clone() else {
+            return true;
+        };
+        self.root
+            .parent()
+            .is_some_and(|deploy| linked == Repo::keyed(&deploy.join(REPOS), remote))
     }
 
     /// The directory holding every built release, one per sha.
@@ -363,6 +531,76 @@ mod tests {
 
         assert_eq!(found.named, vec!["web".to_owned()]);
         assert_eq!(found.unnamed, vec![deploy.join("bad\nname")]);
+    }
+
+    /// fails if two spellings of one remote get different clones, or two
+    /// remotes get one. The clone is keyed by the remote alone, so a key
+    /// that splits `.git` from no `.git` stores a repository twice, and one
+    /// that merges two repositories deploys one's commits as the other's.
+    #[test]
+    fn a_repo_is_keyed_by_its_normalized_remote() {
+        let home = Path::new("/srv/shep");
+        let key = |remote: &str| Repo::for_remote(home, remote).root().to_owned();
+
+        let one = key("https://github.com/shep-pm/shep-deploy");
+        for same in [
+            "https://github.com/shep-pm/shep-deploy.git",
+            "https://github.com/shep-pm/shep-deploy/",
+            "https://github.com/shep-pm/shep-deploy.git/",
+            "  https://github.com/shep-pm/shep-deploy\n",
+            "HTTPS://GitHub.com/shep-pm/shep-deploy",
+        ] {
+            assert_eq!(key(same), one, "{same:?} is the same remote");
+        }
+        for other in [
+            "https://github.com/shep-pm/shep",
+            "https://github.com/Shep-pm/shep-deploy",
+            "git@github.com:shep-pm/shep-deploy",
+            "/srv/git/shep-deploy",
+        ] {
+            assert_ne!(key(other), one, "{other:?} is a different remote");
+        }
+    }
+
+    /// fails if the shared clone leaves `$SHEP_HOME/deploy/repos/<key>/git`,
+    /// or its key is more than one path component. A key with a separator
+    /// in it would put the clone, and the removal that follows it, somewhere
+    /// the remote's text chose.
+    #[test]
+    fn the_shared_clone_lives_under_repos_in_one_component() {
+        let repo = Repo::for_remote(Path::new("/srv/shep"), "../../etc/passwd");
+        let rel = repo
+            .git()
+            .strip_prefix("/srv/shep/deploy/repos")
+            .expect("under repos")
+            .to_owned();
+        let parts: Vec<_> = rel.components().collect();
+        assert_eq!(parts.len(), 2, "<key>/git, got {rel:?}");
+        assert_eq!(parts[1].as_os_str(), "git");
+        assert!(
+            matches!(parts[0], Component::Normal(_)),
+            "key is an ordinary component: {rel:?}"
+        );
+    }
+
+    /// fails if a `git` link that points outside this deploy directory's
+    /// `repos/` is taken for a shared clone. Letting go of one removes its
+    /// directory, so a link written by hand to `/data/repos/x/git` would have
+    /// `/data/repos/x` removed.
+    #[test]
+    fn only_a_link_into_this_deploy_dirs_repos_is_a_shared_clone() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let tree = Tree::for_sheep(home.path(), "web");
+        std::fs::create_dir_all(tree.root()).expect("tree");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let outside = elsewhere.path().join("repos").join("x").join("git");
+        std::os::unix::fs::symlink(&outside, tree.git()).expect("link");
+        assert_eq!(tree.linked_clone(), None, "outside");
+
+        std::fs::remove_file(tree.git()).expect("unlink");
+        let repo = Repo::for_remote(home.path(), "https://example.com/x");
+        tree.link_clone(&repo).expect("link");
+        assert_eq!(tree.linked_clone(), Some(repo), "inside");
     }
 
     /// fails if a tree stops knowing which sheep it belongs to. The

@@ -43,6 +43,19 @@
 //! milliseconds and the caller wants the write to land, not a refusal. A
 //! deploy takes the tree lock first and this one inside it; `set_watch`
 //! takes only this one; nothing holding this one ever waits for the tree's.
+//!
+//! # The third lock
+//!
+//! [`hold_clone`] guards one bare clone, on `git.lock` beside it. Trees whose
+//! remote is the same repository share a clone (see [`crate::paths::Repo`]),
+//! each fetching through its own `git` link under its own tree lock, and git
+//! refuses a second fetch into one repository that overlaps the first
+//! (`cannot lock ref`). So `git::fetch` takes this one for the fetch alone,
+//! and so does anything that adds a link to a clone or removes one. Blocking,
+//! like the record lock, and for the same reason. A deploy holds the tree lock
+//! first and this one inside it; nothing holding this one ever waits for a
+//! tree's, or for a record's. A clone a tree still owns by itself has the same
+//! lock beside it, taken by the same fetch, and nobody else contends for it.
 
 use std::fs::{File, OpenOptions, Permissions};
 use std::io;
@@ -126,6 +139,66 @@ pub fn hold_record(tree: &Tree) -> Result<Recording, Error> {
     }
 }
 
+/// An exclusive hold on one bare clone, for one fetch or one change to who
+/// links to it.
+///
+/// Released when dropped, and by the kernel if the holder dies. See the
+/// module doc.
+#[derive(Debug)]
+pub struct Cloning {
+    /// Held for its `Drop`.
+    _held: Flock<File>,
+}
+
+/// Takes the lock on the clone at `git_dir`, waiting for whoever has it.
+///
+/// `git_dir` is resolved first, so a tree's `git` link and the clone's own
+/// path name one lock. The lock file is `git.lock` beside the resolved
+/// clone, which is the shared clone's own directory, and the tree's root for
+/// a clone the tree owns. A lock file removed while this waited, with the
+/// clone, is made again and taken afresh.
+///
+/// # Errors
+/// [`Error::Io`], naming the lock file, if it cannot be created or the lock
+/// cannot be taken.
+pub fn hold_clone(git_dir: &std::path::Path) -> Result<Cloning, Error> {
+    use std::os::unix::fs::MetadataExt;
+
+    // Made first, so the path resolves the same before the clone exists as
+    // after: `resolved` canonicalizes the parent when the clone is not there,
+    // and a parent that is not there either is left as spelled, which under a
+    // symlinked `$SHEP_HOME` is a different lock file.
+    if let Some(parent) = git_dir.parent() {
+        std::fs::create_dir_all(parent).map_err(Error::at(parent))?;
+    }
+    let path = crate::shared::resolved(git_dir).with_extension("lock");
+    loop {
+        let file = open_lock_file(&path)?;
+        let held = match Flock::lock(file, FlockArg::LockExclusive) {
+            Ok(held) => held,
+            Err((_, errno)) => {
+                return Err(Error::Io {
+                    path,
+                    source: io::Error::from_raw_os_error(errno as i32),
+                });
+            }
+        };
+        // The holder before us may have removed the clone, lock file and all,
+        // while we waited: what we hold is then a file nothing can find, and a
+        // later taker would make a new one and not wait for us. Hold the file
+        // that is at the path, or try again.
+        let ours = held.metadata().map_err(Error::at(&path))?;
+        match std::fs::metadata(&path) {
+            Ok(at_path) if (at_path.dev(), at_path.ino()) == (ours.dev(), ours.ino()) => {
+                return Ok(Cloning { _held: held });
+            }
+            Ok(_) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(Error::Io { path, source }),
+        }
+    }
+}
+
 /// Opens (creating if need be) the lock file at `path`, owner-only, never
 /// through a link.
 fn open_lock_file(path: &std::path::Path) -> Result<File, Error> {
@@ -185,6 +258,7 @@ fn refusal(sheep: &str, path: PathBuf, errno: Errno) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures;
 
     /// fails if the record lock stops being exclusive, or stops waiting.
     /// A holder keeps it for one read and one write; a second taker has
@@ -216,6 +290,137 @@ mod tests {
         waiting.join().expect("thread");
     }
     use crate::paths::Tree;
+
+    /// fails if a fetch runs while somebody holds the clone's lock, or if the
+    /// lock is not the same one through a tree's `git` link as through the
+    /// clone's own path. Two trees fetch into one clone through two links, and
+    /// git refuses the second with `cannot lock ref` when they overlap.
+    #[test]
+    fn a_fetch_waits_for_the_clone_lock_whichever_path_names_the_clone() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let origin = fixtures::checkout(&[("a", "a")]);
+        let remote = origin.path().to_str().expect("utf-8").to_owned();
+        let clone = home.path().join("repos").join("k").join("git");
+        crate::git::init_bare(&clone).expect("bare");
+        let link = home.path().join("link");
+        std::os::unix::fs::symlink(&clone, &link).expect("link");
+
+        let held = hold_clone(&clone).expect("first hold");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fetching = std::thread::spawn(move || {
+            crate::git::fetch(&link, &remote, "main", fixtures::TEST_BUDGET).expect("fetch");
+            tx.send(()).expect("report");
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "the fetch must wait while the clone is held"
+        );
+
+        drop(held);
+        rx.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the fetch runs once the hold is dropped");
+        fetching.join().expect("thread");
+    }
+
+    /// Takes the lock, parks a waiter on it, removes the clone's directory
+    /// under the waiter (and makes its lock file again, when `recreate`),
+    /// lets the first holder go, and returns whether a third taker had to
+    /// wait for the waiter.
+    fn third_taker_waits_for_a_waiter_that_outlasted_a_removal(recreate: bool) -> bool {
+        let home = tempfile::tempdir().expect("tempdir");
+        let dir = home.path().join("repos").join("k");
+        let clone = dir.join("git");
+        let held = hold_clone(&clone).expect("first hold");
+
+        let (acquired, hear) = std::sync::mpsc::channel();
+        let (release, let_go) = std::sync::mpsc::channel::<()>();
+        let waiter = {
+            let clone = clone.clone();
+            std::thread::spawn(move || {
+                let second = hold_clone(&clone).expect("second hold");
+                acquired.send(()).expect("report");
+                let_go.recv().ok();
+                drop(second);
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::remove_dir_all(&dir).expect("the clone is removed");
+        if recreate {
+            std::fs::create_dir_all(&dir).expect("the directory is made again");
+            std::fs::write(dir.join("git.lock"), "").expect("the lock file is made again");
+        }
+        drop(held);
+        hear.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the waiter gets a lock");
+
+        let (third_in, third_hears) = std::sync::mpsc::channel();
+        let third = std::thread::spawn(move || {
+            let _third = hold_clone(&clone).expect("third hold");
+            third_in.send(()).expect("report");
+        });
+        let waited = third_hears.recv_timeout(std::time::Duration::from_millis(300))
+            == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+        release.send(()).expect("let go");
+        third_hears
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("and then get it");
+        waiter.join().expect("thread");
+        third.join().expect("thread");
+        waited
+    }
+
+    /// fails if a taker that waited out a holder who removed the clone, lock
+    /// file and all, ends up holding a file nobody else can find. A later
+    /// taker would make a new lock file and not wait for it, so two fetches
+    /// would run at once with both believing they held the clone.
+    #[test]
+    fn a_lock_file_removed_under_a_waiter_does_not_leave_it_holding_nothing() {
+        assert!(third_taker_waits_for_a_waiter_that_outlasted_a_removal(
+            false
+        ));
+    }
+
+    /// fails if a lock file made again under a waiter is mistaken for the one
+    /// the waiter holds, which only the inode tells apart.
+    #[test]
+    fn a_lock_file_made_again_under_a_waiter_is_not_the_one_it_holds() {
+        assert!(third_taker_waits_for_a_waiter_that_outlasted_a_removal(
+            true
+        ));
+    }
+
+    /// fails if two trees fetching into one clone at once cannot both
+    /// succeed, which is what the clone lock exists for. Every round lands a
+    /// new commit first, so each fetch has a ref to move.
+    #[test]
+    fn concurrent_fetches_into_one_clone_both_succeed() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let origin = fixtures::checkout(&[("a", "a")]);
+        let remote = origin.path().to_str().expect("utf-8").to_owned();
+        let clone = home.path().join("git");
+        crate::git::init_bare(&clone).expect("bare");
+
+        for round in 0..5 {
+            fixtures::commit(origin.path(), &[(&format!("f{round}"), "x")], "more");
+            let fetches: Vec<_> = (0..2)
+                .map(|_| {
+                    let (clone, remote) = (clone.clone(), remote.clone());
+                    std::thread::spawn(move || {
+                        crate::git::fetch(&clone, &remote, "main", fixtures::TEST_BUDGET)
+                    })
+                })
+                .collect();
+            for fetch in fetches {
+                fetch.join().expect("thread").expect("both fetches succeed");
+            }
+            assert_eq!(
+                crate::git::remote_head(&clone, "main").expect("head"),
+                fixtures::head_of(origin.path())
+            );
+        }
+    }
 
     /// fails if two holds on one tree can be taken at once.
     #[test]
