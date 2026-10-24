@@ -9,10 +9,18 @@ set -eu
 
 subject=$(sed -n '1p' "$1")
 
-# Subjects git writes itself: nobody typed them, and the commits they name
-# are held to the rule on their own.
+# A merge in progress is exempt, because git writes its subject. Decided by
+# MERGE_HEAD and not by the word "Merge", which an ordinary commit could
+# start with to slip past the rule. CI skips merge commits itself and never
+# has a merge in progress, so there a "Merge ..." subject is held to the rule.
+if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+  exit 0
+fi
+
+# Other subjects git writes itself: nobody typed them, and the commits they
+# name are held to the rule on their own.
 case "$subject" in
-  "Merge "* | "Revert \""* | "fixup! "* | "squash! "* | "amend! "*) exit 0 ;;
+  "Revert \""* | "fixup! "* | "squash! "* | "amend! "*) exit 0 ;;
 esac
 
 types='feat|fix|perf|refactor|docs|test|ci|chore|style'
