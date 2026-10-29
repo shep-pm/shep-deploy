@@ -681,9 +681,9 @@ retention, and restore on removal. Tested against a real shepherd.
 Not built: Windows.
 
 See
-[docs/writing-plans/plans/2026-08-26-deploy-engine.md](docs/writing-plans/plans/2026-08-26-deploy-engine.md)
+[docs/writing-plans/plans/2026-08-26-deploy-engine.md](https://github.com/shep-pm/shep-deploy/blob/main/docs/writing-plans/plans/2026-08-26-deploy-engine.md)
 for what was built, and the [design
-spec](docs/brainstorming/specs/2026-08-26-deploy-dog-design.md) for what it is
+spec](https://github.com/shep-pm/shep-deploy/blob/main/docs/brainstorming/specs/2026-08-26-deploy-dog-design.md) for what it is
 for.
 
 ## License
