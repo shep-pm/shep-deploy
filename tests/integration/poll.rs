@@ -132,7 +132,7 @@ fn a_moved_branch_is_deployed_within_one_interval(dogs_toml: &str, secrets: &[(&
     // Adopted and supervised, with no argv, exactly as the contract says.
     // The name is the binary's own stem with `shep-` stripped, which is what
     // makes the section above this dog's.
-    shepherd.ok(&["adopt", DEPLOY_BIN, "--style", "bare"]);
+    shepherd.ok(&["adopt", DEPLOY_BIN, "--style", "bare", "--yes"]);
     wait_until("the dog to be supervised", || {
         described_instances(&shepherd, "deploy") == 1
     });
