@@ -15,7 +15,7 @@ usage: shep-deploy <verb> [args]
   deploy <sheep> --branch <name>         follow another branch; returns without deploying
   deploy <sheep> --stage                 build the branch head and record it; no swap
   deploy <sheep> --promote               swap to the staged release and verify it
-  setup <sheep> [--verify probed|alive]  take a sheep over; alive if it has nothing to probe
+  init <sheep> [--verify probed|alive]   take a sheep over; alive if it has nothing to probe
   survey                                 report where every registered sheep stands
   on-remove                              lifecycle hook; shep runs this itself
   help                                   print this
@@ -26,7 +26,9 @@ hand, the bare command prints this and exits.
 Adopted as `deploy`, the same verbs run as `shep deploy <verb> [args]`, and
 `shep deploy <sheep>` deploys one sheep directly. A sheep whose name is one of
 the verbs above is reached with the verb spelled out: `shep deploy deploy survey`,
-`shep deploy deploy help`.";
+`shep deploy deploy help`.
+
+`setup` is the old name of `init` and still works for now.";
 
 /// What a parsed argv means to do.
 ///
@@ -89,12 +91,14 @@ pub fn route<'a>(args: &[&'a str], supervised: bool) -> Route<'a> {
         // "deploy the sheep called setup", which is a different command
         // against a sheep that almost never exists.
         //
-        // A sheep genuinely named `setup` or `deploy` is reached the same way
-        // one named `survey` already is, by spelling the verb out:
-        // `shep deploy setup`. That is the escape hatch USAGE documents.
-        ["setup" | "deploy"] => Route::Usage,
-        ["setup", sheep] => Route::Setup(sheep),
-        ["setup", sheep, "--verify", mode] => Route::SetupVerify { sheep, mode },
+        // A sheep genuinely named `init`, `setup` or `deploy` is reached the
+        // same way one named `survey` already is, by spelling the verb out:
+        // `shep deploy init`. That is the escape hatch USAGE documents.
+        //
+        // `setup` is the old name of `init`; see [`deprecation`].
+        ["init" | "setup" | "deploy"] => Route::Usage,
+        ["init" | "setup", sheep] => Route::Setup(sheep),
+        ["init" | "setup", sheep, "--verify", mode] => Route::SetupVerify { sheep, mode },
         ["deploy", sheep] => Route::Deploy(sheep),
         ["deploy", sheep, "--watch", mode] => Route::Watch { sheep, mode },
         ["deploy", sheep, "--branch", name] => Route::Branch { sheep, name },
@@ -133,6 +137,18 @@ pub fn route<'a>(args: &[&'a str], supervised: bool) -> Route<'a> {
             Route::Usage
         }
         named => named,
+    }
+}
+
+/// The line to print on stderr when `args` took a sheep over under the old
+/// name, `setup`. `None` for `init`, and for any `setup` that is usage or a
+/// deploy of a sheep named `setup`, which is not the old verb at work.
+pub fn deprecation(args: &[&str]) -> Option<&'static str> {
+    match (args, route(args, false)) {
+        (["setup", ..], Route::Setup(_) | Route::SetupVerify { .. }) => {
+            Some("shep-deploy: `setup` is now `init`; `setup` still works for now")
+        }
+        _ => None,
     }
 }
 
@@ -210,39 +226,84 @@ mod tests {
     /// does.
     #[test]
     fn a_verb_without_its_sheep_is_a_usage_error() {
+        assert_eq!(route(&["init"], false), Route::Usage);
         assert_eq!(route(&["setup"], false), Route::Usage);
         assert_eq!(route(&["deploy"], false), Route::Usage);
 
         // And the escape hatch still reaches a sheep really called that, the
         // same one a sheep named `survey` or `on-remove` uses.
+        assert_eq!(route(&["deploy", "init"], false), Route::Deploy("init"));
         assert_eq!(route(&["deploy", "setup"], false), Route::Deploy("setup"));
         assert_eq!(route(&["deploy", "deploy"], false), Route::Deploy("deploy"));
     }
 
-    /// fails if `setup <sheep> --verify <mode>` falls through to a pattern
-    /// that reads it as something else. `["setup", sheep, ..]` has no other
-    /// arm of its own, so it would reach `Usage`; this pins that the flag has
-    /// a variant and that the mode survives to `setup_once` unparsed.
+    /// fails if `init <sheep> --verify <mode>`, or its old spelling `setup`,
+    /// falls through to a pattern that reads it as something else.
+    /// `[verb, sheep, ..]` has no other arm of its own, so it would reach
+    /// `Usage`; this pins that the flag has a variant and that the mode
+    /// survives to `setup_once` unparsed.
     #[test]
     fn setup_with_verify_routes_to_its_own_variant() {
+        for verb in ["init", "setup"] {
+            assert_eq!(
+                route(&[verb, "koji", "--verify", "alive"], false),
+                Route::SetupVerify {
+                    sheep: "koji",
+                    mode: "alive"
+                },
+                "{verb}"
+            );
+            assert_eq!(
+                route(&[verb, "koji", "--verify", "bogus"], false),
+                Route::SetupVerify {
+                    sheep: "koji",
+                    mode: "bogus"
+                },
+                "{verb}: the mode is parsed where it is used, not here"
+            );
+            assert_eq!(
+                route(&[verb, "../koji", "--verify", "alive"], false),
+                Route::Usage,
+                "{verb}"
+            );
+        }
+    }
+
+    /// fails if `init` stops routing as `setup` did: a sheep, a sheep with
+    /// `--verify`, and a bare `init` that is usage rather than a deploy of a
+    /// sheep named `init`.
+    #[test]
+    fn init_routes_like_setup() {
+        assert_eq!(route(&["init", "koji"], false), Route::Setup("koji"));
         assert_eq!(
-            route(&["setup", "koji", "--verify", "alive"], false),
+            route(&["init", "koji", "--verify", "alive"], false),
             Route::SetupVerify {
                 sheep: "koji",
                 mode: "alive"
             }
         );
+        assert_eq!(route(&["init"], false), Route::Usage);
+    }
+
+    /// fails if `setup` stops routing to the same command as `init`, or if the
+    /// notice that it is the old name goes missing, or fires for an argv that
+    /// is not `setup` taking a sheep over.
+    #[test]
+    fn setup_still_routes_and_is_marked_deprecated() {
+        assert_eq!(route(&["setup", "koji"], false), Route::Setup("koji"));
         assert_eq!(
-            route(&["setup", "koji", "--verify", "bogus"], false),
-            Route::SetupVerify {
-                sheep: "koji",
-                mode: "bogus"
-            },
-            "the mode is parsed where it is used, not here"
+            deprecation(&["setup", "koji"]),
+            Some("shep-deploy: `setup` is now `init`; `setup` still works for now")
         );
+        assert!(deprecation(&["setup", "koji", "--verify", "alive"]).is_some());
+
+        assert_eq!(deprecation(&["init", "koji"]), None);
+        assert_eq!(deprecation(&["setup"]), None, "usage, not a takeover");
+        assert_eq!(deprecation(&["setup", "../koji"]), None);
         assert_eq!(
-            route(&["setup", "../koji", "--verify", "alive"], false),
-            Route::Usage
+            deprecation(&["deploy", "setup"]),
+            None,
+            "a sheep named setup is a deploy"
         );
     }
 
@@ -262,11 +323,9 @@ mod tests {
                 Route::Usage,
                 "deploy: {name}"
             );
-            assert_eq!(
-                route(&["setup", name], false),
-                Route::Usage,
-                "setup: {name}"
-            );
+            for verb in ["init", "setup"] {
+                assert_eq!(route(&[verb, name], false), Route::Usage, "{verb}: {name}");
+            }
             assert_eq!(
                 route(&[name, "--watch", "auto"], false),
                 Route::Usage,

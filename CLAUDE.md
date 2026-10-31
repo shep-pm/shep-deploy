@@ -131,7 +131,7 @@ git config core.hooksPath .githooks
 
 Binary crate, no library target. Twenty-four modules under `src/`, the big three
 being `deploy/` (the state machine, a directory), `optin/` (first cutover, a directory)
-and `poll/` (the dog's loop, with `report.rs` for what it says). `route.rs` holds `Route`, `route` and `USAGE`, and `exit.rs`
+and `poll/` (the dog's loop, with `report.rs` for what it says). `route.rs` holds `Route`, `route`, `deprecation` (the notice for `setup`, the old name of `init`) and `USAGE`, and `exit.rs`
 the exit-code mapping; both left `main.rs` to keep it under 800 lines.
 
 `#[cfg(test)] mod fixtures` is declared from `main.rs`, which is the only way a
@@ -186,7 +186,7 @@ class rather than the instances.
   emits them. A record that still carries one is refused by `State::read`,
   naming the key and `[app.dogs.deploy]`. An absent `branch` is refused rather
   than defaulted, since a guess deploys a branch nobody chose. `--watch`,
-  `--branch` and `setup --verify` write the table through
+  `--branch` and `init --verify` write the table through
   `settings::change`, a read-modify-write of the whole table because
   `SetSheepDogSettings` replaces it. The record keeps `deny_unknown_fields` so
   an older shep-deploy refuses a record with a field it does not know instead
@@ -261,7 +261,7 @@ class rather than the instances.
   directory of its own.** `Tree::git()` is the same path either way, so its
   callers do not care; `Tree::owns_clone` and `Tree::linked_clone` tell them
   apart. `paths::Repo` derives `<key>` from the normalized remote. `repos` is
-  therefore not a sheep name, and `setup` refuses it. Only `setup` links, only
+  therefore not a sheep name, and `init` (and its old name `setup`) refuses it. Only that takeover links, only
   `restore::all` lets go, for a sheep put back or never moved
   (`retention::release_clone`, which sweeps every directory under `deploy/` for
   a link, record or not), and `retention::prune` never removes a clone. A deploy
@@ -328,7 +328,7 @@ class rather than the instances.
   is one request and takes no lock. The
   cutover's promotion writes `watch = auto` to the table on the clean path
   only, over whatever `prepare` left there, so a `--watch manual` typed during
-  setup is overwritten and belongs after setup returns.
+  `init` is overwritten and belongs after init returns.
 - **A build's process group is led by a holder, not by the build.** `sh -c
   'read _'` on a pipe the dog holds, so the group id stays reserved after the
   build is reaped and `killpg` cannot land on a recycled pid. Never signal a

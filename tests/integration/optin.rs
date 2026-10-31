@@ -1,4 +1,4 @@
-//! Taking over a sheep an operator already runs, through `setup`.
+//! Taking over a sheep an operator already runs, through `init`.
 
 use std::fs;
 use std::path::Path;
@@ -60,7 +60,7 @@ fn register_from_checkout(shepherd: &Shepherd, origin: &Path) -> tempfile::TempD
     checkout
 }
 
-/// fails if a sheep taken over by `setup` does not follow later swaps.
+/// fails if a sheep taken over by `init` does not follow later swaps.
 ///
 /// This is the fact no fake can check and the one that fails silently
 /// exactly one release after the mistake: a Flockfile app's DEFAULTED cwd is
@@ -81,7 +81,7 @@ fn register_from_checkout(shepherd: &Shepherd, origin: &Path) -> tempfile::TempD
 /// deployed while every count assertion still passes. The surviving pid is
 /// what tells them apart.
 #[test]
-fn a_sheep_taken_over_by_setup_follows_a_later_swap() {
+fn a_sheep_taken_over_by_init_follows_a_later_swap() {
     let shepherd = Shepherd::new();
     let origin = origin_with_app("v1", Readiness::Probe, "");
 
@@ -94,12 +94,12 @@ fn a_sheep_taken_over_by_setup_follows_a_later_swap() {
     });
     let before = described_pid(&shepherd, "web").expect("a pid");
 
-    let setup = shepherd.deploy_args(&["setup", "web", "--verify", "alive"]);
+    let init = shepherd.deploy_args(&["init", "web", "--verify", "alive"]);
     assert!(
-        setup.status.success(),
-        "setup failed: {}{}",
-        String::from_utf8_lossy(&setup.stdout),
-        String::from_utf8_lossy(&setup.stderr)
+        init.status.success(),
+        "init failed: {}{}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
     );
 
     // One instance again, and it must be the NEWCOMER. Two rows shared this
