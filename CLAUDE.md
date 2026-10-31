@@ -261,7 +261,7 @@ class rather than the instances.
   directory of its own.** `Tree::git()` is the same path either way, so its
   callers do not care; `Tree::owns_clone` and `Tree::linked_clone` tell them
   apart. `paths::Repo` derives `<key>` from the normalized remote. `repos` is
-  therefore not a sheep name, and `init` refuses it. Only `init` links, only
+  therefore not a sheep name, and `init` (and its old name `setup`) refuses it. Only that takeover links, only
   `restore::all` lets go, for a sheep put back or never moved
   (`retention::release_clone`, which sweeps every directory under `deploy/` for
   a link, record or not), and `retention::prune` never removes a clone. A deploy
