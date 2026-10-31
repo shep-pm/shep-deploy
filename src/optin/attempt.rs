@@ -50,7 +50,7 @@ const PORT_COLLISION: &str = "The first cutover is the one deploy that runs two 
      once, so an app that does not bind with SO_REUSEPORT cannot take its own port while the \
      original still holds it. Every deploy after the first replaces the instance rather than \
      joining it, and does not meet this. If the app cannot set SO_REUSEPORT, `shep stop` it, \
-     remove the tree named above, and run setup again: with the port free the newcomer binds, \
+     remove the tree named above, and run init again: with the port free the newcomer binds, \
      and the cutover is the one deploy allowed to be down for a moment anyway.";
 
 /// How long a newcomer gets to APPEAR before the cutover gives up on it.

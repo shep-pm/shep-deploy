@@ -294,7 +294,7 @@ async fn go<D: Daemon>(
     if !tree.clone_serves(&state.remote) {
         return Err(Error::Config(format!(
             "{sheep}: `remote` in {} is {}, which is not the remote the clone {} is shared for; \
-             run `shep-deploy setup` again to relink it",
+             run `shep-deploy init` again to relink it",
             tree.state_file().display(),
             state.remote,
             tree.git().display(),
@@ -751,7 +751,7 @@ mod tests {
         assert!(matches!(err, Error::NotCutOver { .. }), "{err:?}");
         let shown = err.to_string();
         assert!(shown.contains("never cut over"), "{shown}");
-        assert!(shown.contains("shep-deploy setup web"), "{shown}");
+        assert!(shown.contains("shep-deploy init web"), "{shown}");
         assert_eq!(fixture.state.deployed, None, "nothing was recorded");
         assert_eq!(
             swap::resolve(&fixture.tree.current()).expect("reads"),

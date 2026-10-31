@@ -243,7 +243,7 @@ pub(crate) fn refuse_ungated_at_setup(
         sheep,
         app,
         mode,
-        &format!("run `shep-deploy setup {sheep} --verify alive`"),
+        &format!("run `shep-deploy init {sheep} --verify alive`"),
     )
 }
 

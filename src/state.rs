@@ -329,7 +329,7 @@ impl State {
             return Err(refuse(
                 "origin",
                 "is set while origin_cwd or origin_script is missing. All three are written \
-                 together at setup, and removal needs the pair to say where the sheep goes \
+                 together at init, and removal needs the pair to say where the sheep goes \
                  back to; set the pair or remove `origin`",
             ));
         }
@@ -342,7 +342,7 @@ impl State {
             };
             return Err(refuse(
                 missing,
-                "is missing while its partner is set. Both are written together at setup and \
+                "is missing while its partner is set. Both are written together at init and \
                  both are needed to put the sheep back on removal; set both or neither",
             ));
         }

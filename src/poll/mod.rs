@@ -312,7 +312,7 @@ async fn run_with<D: Daemon, O: Write, E: Write>(
                 deploy_dir.clone(),
                 Err(Error::Config(format!(
                     "no deploy targets under {deploy_dir}: nothing to poll until one is set up \
-                     with `shep-deploy setup <sheep>`"
+                     with `shep-deploy init <sheep>`"
                 ))),
             ));
         }

@@ -54,7 +54,7 @@ pub async fn set_branch<D: Daemon>(
         return Err(Error::Config(format!(
             "{sheep} has a deploy tree but was never cut over to it, so a branch set now \
              would not describe the release the cutover lands. Finish the cutover instead - \
-             remove {root} and run `shep-deploy setup {sheep}`.",
+             remove {root} and run `shep-deploy init {sheep}`.",
             root = tree.root().display(),
         )));
     }
@@ -196,7 +196,7 @@ mod tests {
         let shown = err.to_string();
         assert!(matches!(err, Error::Config(_)), "{shown}");
         assert!(shown.contains("never cut over"), "{shown}");
-        assert!(shown.contains("shep-deploy setup web"), "{shown}");
+        assert!(shown.contains("shep-deploy init web"), "{shown}");
         assert_eq!(sheep.settings().branch.as_deref(), Some("main"));
     }
 

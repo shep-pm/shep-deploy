@@ -439,7 +439,7 @@ mod tests {
         let shown = err.to_string();
         assert!(shown.contains("is NOT a deploy target"), "{shown}");
         assert!(shown.contains("Do NOT run `shep deploy bpm`"), "{shown}");
-        assert!(shown.contains("shep-deploy setup bpm"), "{shown}");
+        assert!(shown.contains("shep-deploy init bpm"), "{shown}");
         // Resolved, not `$SHEP_HOME/deploy/bpm`. That variable is usually
         // unset in an operator's own shell, where the fallback is `~/.shep`,
         // so the unexpanded form makes `rm -rf` target `/deploy/bpm` and do
