@@ -272,7 +272,7 @@ pub async fn set_watch<D: Daemon>(
              poll loop to deploy: its record names no released sha, and nothing has ever been \
              served from that tree. Watching it would deploy at every interval and each of \
              those would be refused. Finish the cutover instead - remove {} and run \
-             `shep-deploy setup {}`.",
+             `shep-deploy init {}`.",
             tree.sheep(),
             tree.root().display(),
             tree.sheep()
@@ -696,7 +696,7 @@ mod tests {
 
         let shown = err.to_string();
         assert!(shown.contains("never cut over"), "{shown}");
-        assert!(shown.contains("shep-deploy setup web"), "{shown}");
+        assert!(shown.contains("shep-deploy init web"), "{shown}");
         assert_eq!(daemon.settings().watch, Watch::Manual, "unchanged");
 
         set_watch(&daemon, &fixture.tree, Watch::Manual)

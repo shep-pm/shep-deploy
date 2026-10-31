@@ -122,7 +122,7 @@ pub async fn prepare_with<D: Daemon>(
     if sheep == paths::REPOS {
         return Err(Error::Config(format!(
             "{sheep:?} is where the clones shared between sheep live, so no sheep can be called \
-             that: rename it in its Flockfile and run setup again"
+             that: rename it in its Flockfile and run init again"
         )));
     }
     let tree = Tree::for_sheep(shep_home, sheep);
@@ -147,7 +147,7 @@ pub async fn prepare_with<D: Daemon>(
     // The shepherd already runs the sheep from this tree's `current`: a
     // cutover landed and its record was not written, or the record was lost
     // afterwards. Either way the tree is live, and the advice the record
-    // branch below gives an unrecorded tree, remove it and run setup again,
+    // branch below gives an unrecorded tree, remove it and run init again,
     // would take a running service's cwd with it. The record is repaired
     // from what `current` names instead, and the sheep is then what it is:
     // a deploy target, refused here like any other.
@@ -214,7 +214,7 @@ pub async fn prepare_with<D: Daemon>(
             "{sheep} is registered with its working directory inside its own deploy tree ({}), \
              so there is no operator checkout to take it over from. That is what an abandoned \
              cutover leaves in the shepherd's record: re-register {sheep} from its own \
-             Flockfile in the checkout it should deploy from, then run setup again",
+             Flockfile in the checkout it should deploy from, then run init again",
             checkout.display()
         )));
     }
@@ -262,7 +262,7 @@ pub async fn prepare_with<D: Daemon>(
                  no deployed release, so nothing has ever been served from that tree. An \
                  abandoned first cutover leaves exactly this. Do NOT run `shep deploy {sheep}` \
                  against it - that would reload the sheep at its own checkout and report success \
-                 for a release nothing served. Remove {} and run `shep-deploy setup {sheep}` \
+                 for a release nothing served. Remove {} and run `shep-deploy init {sheep}` \
                  again once the cause of the first failure is fixed.",
                 tree.releases().display(),
                 tree.root().display()
@@ -308,7 +308,7 @@ pub async fn prepare_with<D: Daemon>(
         Error::Config(format!(
             "{sheep} cannot be recorded as it is registered ({err}). `remote` is the \
                  checkout's `origin`, `branch` is the checkout's HEAD, and `checkout` is the cwd \
-                 shep has for {sheep}; fix whichever is named and run setup again"
+                 shep has for {sheep}; fix whichever is named and run init again"
         ))
     };
     state
@@ -824,7 +824,7 @@ mod tests {
         assert!(shown.contains("never cut over"), "{shown}");
         assert!(shown.contains("Do NOT run `shep deploy bpm`"), "{shown}");
         assert!(
-            shown.contains("shep-deploy setup bpm"),
+            shown.contains("shep-deploy init bpm"),
             "it says how to try again: {shown}"
         );
     }

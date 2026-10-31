@@ -93,7 +93,7 @@ async fn a_tree_linked_for_one_remote_refuses_to_deploy_another() {
     .expect_err("refused");
 
     assert!(matches!(err, Error::Config(_)), "{err}");
-    assert!(err.to_string().contains("setup"), "{err}");
+    assert!(err.to_string().contains("init"), "{err}");
     assert_eq!(
         crate::git::remote_head(&repo.git(), "main").expect("head"),
         before,

@@ -80,7 +80,7 @@ pub enum Standing {
     ///
     /// Its own standing rather than a fall-through, because the fall-through
     /// was dangerous: a live target's `cwd` is `current`, a git worktree,
-    /// so an unreadable record classified it as `Eligible` and told the operator to run `setup` against a running
+    /// so an unreadable record classified it as `Eligible` and told the operator to run `init` against a running
     /// service, which clones over its tree. Reachable without corruption:
     /// the record refuses unknown fields, so one written by a newer
     /// shep-deploy reads this way to an older binary.
@@ -269,12 +269,12 @@ impl Standing {
             // one wrong move here is treating it as a sheep with no tree.
             Self::Unreadable(why) => format!(
                 "has a deploy tree whose record cannot be read: {why}. Repair the record \
-                 before deploying; do not run setup against it, the sheep may be running from \
+                 before deploying; do not run init against it, the sheep may be running from \
                  inside that tree"
             ),
             Self::BadSettings(why) => format!(
                 "has a deploy tree whose sheep's settings cannot be used: {why}. Fix its \
-                 `[app.dogs.deploy]` table, not `deploy.toml`; do not run setup against it, \
+                 `[app.dogs.deploy]` table, not `deploy.toml`; do not run init against it, \
                  the sheep may be running from inside that tree"
             ),
             Self::Unlisted(why) => format!(
@@ -284,7 +284,7 @@ impl Standing {
             ),
             Self::BadName => "is registered under a name this dog cannot use as a directory \
                               name: one path component, nothing that forges a log line. \
-                              Rename the sheep before setup"
+                              Rename the sheep before init"
                 .to_owned(),
         }
     }
@@ -433,17 +433,17 @@ mod tests {
         assert!(shown.contains("Rename the sheep"), "{shown}");
     }
 
-    /// fails if a target whose record cannot be read is offered `setup`.
+    /// fails if a target whose record cannot be read is offered `init`.
     ///
     /// A live target's `cwd` is `current`, a git worktree, so falling
     /// through to the checkout questions classified it as `Eligible` and the
     /// row told an operator to run
-    /// `shep-deploy setup` against a running service, which clones over its
+    /// `shep-deploy init` against a running service, which clones over its
     /// tree. A record with a key this binary does not know is enough to get
     /// there: one written by a newer shep-deploy reads this way to an older
     /// one.
     #[test]
-    fn a_target_with_an_unreadable_record_is_not_offered_setup() {
+    fn a_target_with_an_unreadable_record_is_not_offered_init() {
         let home = tempfile::tempdir().expect("tempdir");
         let tree = Tree::for_sheep(home.path(), "web");
         std::fs::create_dir_all(tree.root()).expect("tree");
@@ -463,7 +463,7 @@ mod tests {
         );
         let shown = render(&[("web".to_owned(), standing)]);
         assert!(!shown.contains("eligible"), "{shown}");
-        assert!(shown.contains("do not run setup"), "{shown}");
+        assert!(shown.contains("do not run init"), "{shown}");
     }
 
     /// fails if a table the dog cannot adopt is blamed on `deploy.toml`. The
@@ -484,7 +484,7 @@ mod tests {
         );
         let shown = render(&[("web".to_owned(), standing)]);
         assert!(shown.contains("[app.dogs.deploy]"), "{shown}");
-        assert!(shown.contains("do not run setup"), "{shown}");
+        assert!(shown.contains("do not run init"), "{shown}");
         assert!(!shown.contains("record cannot be read"), "{shown}");
     }
 

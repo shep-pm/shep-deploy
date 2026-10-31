@@ -37,7 +37,7 @@ impl fmt::Display for Error {
                  deploy: its record names no released sha, and nothing has ever been served from \
                  that tree. Deploying now would reload {sheep} at its own checkout and report \
                  success for a release nothing ran. Finish the cutover instead - remove {} and \
-                 run `shep-deploy setup {sheep}`.",
+                 run `shep-deploy init {sheep}`.",
                 tree.display()
             ),
             // Through `printable`, because a path here can be one the deployed
@@ -166,7 +166,7 @@ impl fmt::Display for Error {
                     // the remove-and-setup paragraph below, and flagged as
                     // coming first: an operator working in printed order
                     // must repair the roll before removing the tree, or
-                    // `shep-deploy setup` reads a still-poisoned record.
+                    // `shep-deploy init` reads a still-poisoned record.
                     write!(
                         f,
                         " Before that, one thing is NOT back as it was: the shepherd recorded \
@@ -187,7 +187,7 @@ impl fmt::Display for Error {
                      nothing has ever been served from its tree. Do NOT run `shep deploy \
                      {sheep}` against it - that would reload the sheep at its own checkout and \
                      report success for a release nothing served. Fix what this message names, \
-                     remove {}, and run `shep-deploy setup {sheep}` again.",
+                     remove {}, and run `shep-deploy init {sheep}` again.",
                     tree.display()
                 )?;
                 Ok(())
