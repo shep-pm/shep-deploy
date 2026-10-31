@@ -32,13 +32,13 @@
 //! shep-deploy deploy <sheep>
 //! shep-deploy deploy <sheep> --watch auto|manual
 //! shep-deploy deploy <sheep> --branch <name>
-//! shep-deploy setup <sheep>
+//! shep-deploy init <sheep>
 //! shep-deploy survey
 //! ```
 //!
 //! `--watch` changes one setting and returns without deploying. See
 //! [`deploy::set_watch`]; so does `--branch`, see [`retarget::set_branch`]. `survey` reports where every registered sheep
-//! stands and touches nothing; see [`survey::survey`]. `setup` takes a
+//! stands and touches nothing; see [`survey::survey`]. `init` takes a
 //! sheep over: it builds the deploy tree and its first release, then
 //! re-registers the sheep against `current` and removes the instances it
 //! replaced. See [`optin::prepare_with`] and [`optin::cut_over`] - and note that
@@ -102,7 +102,7 @@ use crate::deploy::Outcome;
 use crate::error::Error;
 use crate::exit::{code_for, code_for_outcome};
 use crate::paths::Tree;
-use crate::route::{Route, USAGE, route};
+use crate::route::{Route, USAGE, deprecation, route};
 use crate::stage::Staged;
 use crate::state::{State, Verify, Watch};
 
@@ -165,6 +165,9 @@ fn main() -> ExitCode {
 async fn run(args: &[&str]) -> ExitCode {
     let env = |key: &str| std::env::var(key).ok();
     let dog = adopted_as(&env);
+    if let Some(notice) = deprecation(args) {
+        eprintln!("{notice}");
+    }
     let outcome = match route(args, supervised(&env)) {
         Route::Poll => match &dog {
             Some(name) => poll_forever(name).await,

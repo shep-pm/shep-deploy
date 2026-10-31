@@ -102,7 +102,7 @@ env = { SUPABASE_DB_PASSWORD = "..." }
 - A non-zero exit, a signal or a timeout stops the deploy. `current` does not
   move, the old release keeps serving, and the sha is held as for a failed
   build.
-- `setup` runs no hook. A cutover does not touch the app's database.
+- `init` runs no hook. A cutover does not touch the app's database.
 
 A rollback does not undo a migration. If the new release fails verification
 after the hook ran, the old release comes back against the migrated database.
@@ -164,7 +164,7 @@ env = { CLOUDFLARE_API_TOKEN = "...", CLOUDFLARE_ZONE_ID = "..." }
 - It runs only if the record write succeeded. If `deploy.toml` cannot be
   written, the log says the hook was skipped.
 - It never runs for a deploy that is rolled back, that fails before the swap,
-  or that finds nothing new, and `setup` runs none.
+  or that finds nothing new, and `init` runs none.
 - A failure changes nothing. A non-zero exit, a signal or a timeout is logged
   as `shep-deploy: <sheep>: deployed <sha>, but the after hook failed: ...`.
   The release stays live, the outcome is still deployed and the sha is not
@@ -223,7 +223,7 @@ deploy.toml          remote, deployed sha, held sha, staged sha, and the app as 
 ```
 
 Sheep deployed from the same remote share one clone, at
-`$SHEP_HOME/deploy/repos/<key>/git`. `setup` makes it when no sheep with that
+`$SHEP_HOME/deploy/repos/<key>/git`. `init` makes it when no sheep with that
 remote has, and links the tree's `git` to it when one has. The key is the
 remote with surrounding whitespace, trailing slashes, a trailing `.git` and
 the case of its scheme and host folded away, so `https://host/x` and
@@ -235,12 +235,12 @@ Removing the dog lets go of the link of each sheep it puts back, and of each
 whose cutover never landed; the clone goes with the last link. A sheep left
 running from its tree keeps its link, and so the clone. A deploy whose recorded
 `remote` is not the one its tree's link was made for is refused, so a hand edit
-cannot fetch one repository into a clone other sheep deploy from; run `setup`
+cannot fetch one repository into a clone other sheep deploy from; run `init`
 again to relink. Trees set up before this keep the clone
 they have, and nothing moves them yet.
 
 `branch`, `watch` and `verify` are not in `deploy.toml`. They are keys of the
-sheep's `[app.dogs.deploy]` table, which `setup`, `--watch` and `--branch` write
+sheep's `[app.dogs.deploy]` table, which `init`, `--watch` and `--branch` write
 and `shep lookout` edits; the dog reads them again every tick. A `deploy.toml`
 that still carries one of them is refused, naming the key.
 
@@ -258,16 +258,16 @@ shep-deploy deploy <sheep> --branch <name>
 shep-deploy deploy <sheep> --branch refs/pull/1/head
 shep-deploy deploy <sheep> --stage
 shep-deploy deploy <sheep> --promote
-shep-deploy setup <sheep>
-shep-deploy setup <sheep> --verify probed|alive
+shep-deploy init <sheep>
+shep-deploy init <sheep> --verify probed|alive
 shep-deploy survey
 shep-deploy on-remove
 shep-deploy help
 ```
 
 `--watch` changes the setting and returns without deploying. `--branch` does
-the same for the branch a target tracks, which `setup` read from the checkout
-once; it clears a held sha and refuses a target `setup` never finished. A name
+the same for the branch a target tracks, which `init` read from the checkout
+once; it clears a held sha and refuses a target `init` never finished. A name
 the remote lacks is reported by the next tick. `--branch` also takes a full ref
 beginning `refs/`, such as `refs/pull/1/head`, which the target then follows on
 every push like a branch. Only that ref is fetched, not every pull ref the
@@ -288,7 +288,7 @@ and it is refused when nothing is staged or the staged release is gone, with
 `--stage` as the way out. A promote that does not come up is rolled back and
 leaves `staged` set, so it can be run again. It ignores a held sha, as a
 deploy asked for by name does. `--verify` on
-`setup` sets how the sheep's deploys are verified in its `[app.dogs.deploy]`,
+`init` sets how the sheep's deploys are verified in its `[app.dogs.deploy]`,
 `probed` when it is left out. `survey` reports
 where every registered sheep stands and starts, registers and writes nothing;
 a manual target with a staged sha reads `main@a1b2c3, deploys only when asked,
@@ -391,7 +391,7 @@ next deploy. A refused smit is logged and otherwise ignored, since it is
 cosmetic and never worth failing a deploy over.
 
 A deploy in the dog's own tick repaints the smit as soon as it lands. A smit
-belongs to the connection that painted it, so a `deploy`, `setup` or `--watch`
+belongs to the connection that painted it, so a `deploy`, `init` or `--watch`
 run by hand cannot leave one: the dog paints the new state on its next tick,
 which starts `interval` after the current one finishes.
 
@@ -444,17 +444,18 @@ cleared still shows until the next tick.
 
 ## Taking a sheep over
 
-`setup` takes a sheep over: it builds the tree, fetches the repository, links
+`init` takes a sheep over: it builds the tree, fetches the repository, links
 the shared files in, builds the first release, and re-registers the sheep with
-its `cwd` set to `current`. A Flockfile that names no `interpreter` keeps the
+its `cwd` set to `current`. `setup` is its old name; it still works for now and
+prints a line on stderr saying so. A Flockfile that names no `interpreter` keeps the
 one the sheep already ran under: `shep start` fills that in from `shep.toml`'s
 `[interpreters]`, and this dog cannot read that map.
 
 An app with neither a `readiness_probe` nor `wait_ready`, a bot with no port
 say, is refused before anything is built, because its first deploy would be
-refused for the same reason. Take it over with `shep-deploy setup <sheep>
+refused for the same reason. Take it over with `shep-deploy init <sheep>
 --verify alive`, which sets `verify = "alive"` in its `[app.dogs.deploy]`. A
-refused `setup` leaves a directory with the fetched repository and the staged
+refused `init` leaves a directory with the fetched repository and the staged
 release but no `deploy.toml` and no `current`, which is not a deploy target, so
 running it again is a retry.
 
@@ -472,7 +473,7 @@ cutover and start it afterwards:
 shep stop web
 ```
 ```bash
-shep-deploy setup web
+shep-deploy init web
 ```
 
 With the port free the newcomer binds and the cutover lands. It costs the
@@ -488,9 +489,9 @@ That refusal is load-bearing rather than tidy. Without it the deploy would not
 stop: it would build, swap, reload the sheep at its own checkout, see a real
 turnover, and report success for a release nothing served.
 
-Remove its tree and run `setup` again once the cause is fixed. Both `setup` and
+Remove its tree and run `init` again once the cause is fixed. Both `init` and
 the failure message say this, and both print the resolved path to remove rather
-than a `$SHEP_HOME` you would have to expand yourself. `setup` leaves it
+than a `$SHEP_HOME` you would have to expand yourself. `init` leaves it
 `watch = manual` until the cutover lands, and `--watch auto` on one is refused
 for the same reason: it would ask for that deploy once every interval,
 unattended.
@@ -502,7 +503,7 @@ unattended.
 yet, so there is nothing to verify against and the deploy is refused.
 `verify = "alive"` is the deliberate downgrade: a new process, still running
 ten seconds later. An app that cannot have a gate, one with no port, is taken
-over with `shep-deploy setup <sheep> --verify alive`; `setup` refuses it under
+over with `shep-deploy init <sheep> --verify alive`; `init` refuses it under
 `probed` before it builds anything.
 
 Both modes watch the flock after the turnover. `probed` requires the same
@@ -520,7 +521,7 @@ time up to that.
 The first cutover is also the one deploy that is not verified against the
 readiness probe. shep reports a freshly started process `Online` once its
 `listen_timeout` elapses, whatever the probe said, and only aborts a *reload*
-whose replacement was not ready. So `setup` checks what it can: a new process
+whose replacement was not ready. So `init` checks what it can: a new process
 started and was still the same process, not errored and not restarted, ten
 seconds later. A release that starts, stays up and serves nothing passes that.
 Every deploy after the first is verified against a new process reaching
@@ -565,7 +566,7 @@ describe <sheep>`.
 
 `shep-deploy on-remove` is the lifecycle hook: shep runs it before forgetting
 the dog, and it puts every sheep back as it ran before the dog took over: the
-whole definition `setup` recorded, `env`, instances and probes included. A
+whole definition `init` recorded, `env`, instances and probes included. A
 record written before 2026-09-04 carries only the old `cwd` and script, and
 those go back over the shepherd's current definition. A
 sheep the dog bootstrapped has nowhere to go back to, so it is left running
