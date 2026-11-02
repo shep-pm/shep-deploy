@@ -5,6 +5,14 @@ All notable changes to this crate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2026-11-02
+
+### Fixed
+
+- Keep a sheep's sandbox key through init and undo on shep-client 0.21
+- Ask for the flock permissions the dog uses
+
+
 ## [0.6.4] - 2026-10-31
 
 ### Fixed
