@@ -640,6 +640,9 @@ mod tests {
         assert!(err.to_string().contains("detached"), "{err}");
     }
 
+    /// A gated roll, with the `sandbox` key shep 0.21 added to `[[app]]`.
+    const SANDBOXED: &str = ",\"wait_ready\":true,\"sandbox\":\"sandbox.json\"";
+
     /// fails if the record stops carrying the app as the shepherd had it
     /// before adoption. Removal restores from this; `cwd` and `script` alone
     /// left the deployed repository's `env`, instances and probes in place.
@@ -648,7 +651,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         let checkout = checkout_with_commit();
         let entries = [("bpm", checkout.path())];
-        let daemon = RollOf::new(&entries);
+        let daemon = RollOf::new(&entries).with_fields(SANDBOXED);
 
         let prepared = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
@@ -656,8 +659,30 @@ mod tests {
 
         let origin = prepared.state.origin.as_ref().expect("recorded");
         assert_eq!(origin, &prepared.previous_config);
+        assert_eq!(origin.sandbox.as_deref(), Some("sandbox.json"));
         let on_disk = State::read(&prepared.tree.state_file()).expect("reads");
         assert_eq!(on_disk.origin.as_ref(), Some(&prepared.previous_config));
+        assert_eq!(
+            on_disk.origin.expect("recorded").sandbox.as_deref(),
+            Some("sandbox.json")
+        );
+    }
+
+    /// fails if the app the cutover registers loses the Flockfile's
+    /// `sandbox`. The cutover sends this app to the shepherd, and a sheep
+    /// registered without the key runs outside crabpot with nothing said.
+    #[tokio::test]
+    async fn the_app_handed_to_the_cutover_keeps_the_flockfiles_sandbox() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let checkout = checkout_with_commit();
+        let entries = [("bpm", checkout.path())];
+        let daemon = RollOf::new(&entries).with_fields(SANDBOXED);
+
+        let prepared = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
+            .await
+            .expect("prepares");
+
+        assert_eq!(prepared.app.sandbox.as_deref(), Some("sandbox.json"));
     }
 
     /// fails if a sheep the shepherd already runs from `current` is treated
