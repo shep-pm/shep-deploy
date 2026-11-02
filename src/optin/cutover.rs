@@ -219,10 +219,10 @@ mod tests {
 
     use super::*;
     use crate::optin::test_support::{
-        NEWCOMER_ID, cutover_fixture, cutover_fixture_comes_up_but_refuses_deletes,
-        cutover_fixture_dies_during_dwell, cutover_fixture_never_appears,
-        cutover_fixture_refusing_start, cutover_fixture_shepherd_goes_quiet,
-        cutover_fixture_with_instances,
+        NEWCOMER_ID, SANDBOXED, comes_up, cutover_fixture,
+        cutover_fixture_comes_up_but_refuses_deletes, cutover_fixture_dies_during_dwell,
+        cutover_fixture_from, cutover_fixture_never_appears, cutover_fixture_refusing_start,
+        cutover_fixture_shepherd_goes_quiet, cutover_fixture_with_instances,
     };
     use crate::state::{State, Verify};
     /// fails if the new registration's cwd is anything but the `current`
@@ -246,6 +246,20 @@ mod tests {
             current.to_str(),
             "cwd must be the current symlink itself, not a release and not None"
         );
+    }
+
+    /// fails if the `Start` the cutover sends drops the app's `sandbox`. The
+    /// shepherd registers what that request carries, so a sheep sent without
+    /// the key runs outside crabpot with nothing said.
+    #[tokio::test(start_paused = true)]
+    async fn the_start_carries_the_apps_sandbox() {
+        let (daemon, prepared, _dirs) =
+            cutover_fixture_from(SANDBOXED, &[7], comes_up(), None).await;
+        cut_over(&daemon, prepared).await.expect("cuts over");
+
+        let started = daemon.started();
+        assert_eq!(started.len(), 1, "exactly one Start");
+        assert_eq!(started[0].sandbox.as_deref(), Some("sandbox.json"));
     }
 
     /// fails if the promotion rewrites the table from the cutover's copy of

@@ -458,7 +458,9 @@ pub(super) fn share_clone(tree: &Tree, shep_home: &Path, remote: &str) -> Result
 mod tests {
     use super::*;
     use crate::fixtures;
-    use crate::optin::test_support::{RollBuilding, RollOf, checkout_with_commit, write_target};
+    use crate::optin::test_support::{
+        RollBuilding, RollOf, SANDBOXED, checkout_with_commit, write_target,
+    };
 
     /// fails if a sheep that is already a target can be opted in again.
     /// The second run would `git init --bare` over a live tree and rebuild
@@ -639,9 +641,6 @@ mod tests {
             .expect_err("refuses");
         assert!(err.to_string().contains("detached"), "{err}");
     }
-
-    /// A gated roll, with the `sandbox` key shep 0.21 added to `[[app]]`.
-    const SANDBOXED: &str = ",\"wait_ready\":true,\"sandbox\":\"sandbox.json\"";
 
     /// fails if the record stops carrying the app as the shepherd had it
     /// before adoption. Removal restores from this; `cwd` and `script` alone
