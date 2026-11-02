@@ -80,6 +80,37 @@ fn the_schema_answer_is_json_describing_this_dogs_own_section() {
     );
 }
 
+/// fails if the manifest stops asking for the flock permissions this dog
+/// uses.
+///
+/// Since shep 0.21 a dog's grants are what its manifest asked for, and the
+/// shepherd refuses any request outside them. A manifest that asks for
+/// nothing adopts cleanly and then fails every tick on its first
+/// `sheep_config`, with the refusal only in the dog's own log.
+#[test]
+fn the_manifest_asks_for_the_flock_permissions_the_dog_uses() {
+    let output = probe(shep_client::shep_core::dogs::MANIFEST_FLAG);
+    assert!(output.status.success(), "{:?}", output.status);
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the answer is JSON");
+    let asked: Vec<(&str, bool)> = manifest["permissions"]
+        .as_array()
+        .expect("the manifest lists permissions")
+        .iter()
+        .map(|p| (p["name"].as_str().expect("named"), p["required"] == true))
+        .collect();
+
+    assert_eq!(
+        asked,
+        [
+            ("flock.read", true),
+            ("flock.control", true),
+            ("flock.edit", true)
+        ]
+    );
+}
+
 /// fails if an ordinary run starts answering a probe, or a probe starts
 /// falling through into one.
 ///

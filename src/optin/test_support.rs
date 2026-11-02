@@ -34,6 +34,9 @@ pub(super) struct RollOf<'a> {
 /// readiness gate, which `Verify::Probed` refuses to go without.
 pub(super) const GATED: &str = ",\"wait_ready\":true";
 
+/// [`GATED`], plus the `sandbox` key shep 0.21 added to `[[app]]`.
+pub(super) const SANDBOXED: &str = ",\"wait_ready\":true,\"sandbox\":\"sandbox.json\"";
+
 impl<'a> RollOf<'a> {
     pub(super) fn new(entries: &'a [(&'a str, &'a Path)]) -> Self {
         let (name, _) = entries.first().expect("a roll names at least one sheep");

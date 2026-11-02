@@ -525,6 +525,7 @@ mod tests {
             .dog(Some(DogSource::Adopted {
                 path: "/usr/local/bin/shep-deploy".to_owned(),
                 channel: false,
+                grants: None,
             }))
             .build()
     }

@@ -106,9 +106,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -130,9 +128,9 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "croner"
-version = "3.0.1"
+version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4aa42bcd3d846ebf66e15bd528d1087f75d1c6c1c66ebff626178a106353c576"
+checksum = "26d09284075f5c87675790d1ad74212a7863eb8bdf228cdbd364f08a152fc62d"
 dependencies = [
  "chrono",
  "derive_builder",
@@ -747,23 +745,26 @@ dependencies = [
 
 [[package]]
 name = "shep-channel"
-version = "0.16.1"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9faac89b4ad1268078252f28bfdde3c2ed9deec12c0991cf82729a5926e47481"
+checksum = "b6d1b283cc87a0a5bf6f3d3c9fd6f1d28d74efbdcc90bbc79e34cbba835d0156"
 dependencies = [
  "serde",
+ "serde_json",
+ "windows-sys",
 ]
 
 [[package]]
 name = "shep-client"
-version = "0.16.1"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3545478bcc171338d1f86fe123357744ab727e005346d53e210120ed8098f6a"
+checksum = "32be0fab2428fff0bcb27e6a3ae82557bcac0c5d5558ca7bc9053427ea796977"
 dependencies = [
  "futures-util",
  "schemars",
  "serde",
  "serde_json",
+ "shep-channel",
  "shep-core",
  "shep-macros",
  "tokio",
@@ -774,9 +775,9 @@ dependencies = [
 
 [[package]]
 name = "shep-core"
-version = "0.16.1"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2ccbd50a8cb396b0dcb218786954e77b0b2d5e138d918fb2b59e270e8012608"
+checksum = "68668c7e1f75042ac4d31a3d929186a0a645a6cde24c7c2f371b771739c950a8"
 dependencies = [
  "annotate-snippets",
  "anstyle",
@@ -821,13 +822,13 @@ dependencies = [
 
 [[package]]
 name = "shep-macros"
-version = "0.16.1"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57665436c35a527043507c97701f41230dc838bd8999a9e523d40616611c2be5"
+checksum = "515d43498ae2968b32152160b3e5377da18585228e92b779444b3e9cc346457c"
 dependencies = [
  "proc-macro2",
  "quote 1.0.47",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
