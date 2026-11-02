@@ -92,7 +92,7 @@ mod window;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use shep_client::dogs::{DogIdentity, DogRuntime};
+use shep_client::dogs::{DogIdentity, DogRuntime, Permission, Probe};
 use shep_client::shep_core::paths::ShepPaths;
 use shep_client::{Client, LinkState, RECONNECT_MAX_DELAY};
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -138,7 +138,32 @@ fn main() -> ExitCode {
     // The name and the version are passed rather than read inside
     // shep-client because `env!` expands where it is written, and there it
     // would report shep-client's own version.
-    shep_client::dogs::probe::<config::Section>(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    //
+    // The manifest is also where the dog's grants come from. Since shep 0.21
+    // the shepherd refuses a request outside them, and a dog that asks for
+    // nothing is adopted with `grants: []` and then refused its first
+    // `sheep_config`, so each request `daemon.rs` sends is covered here:
+    // reads for `ListFlock`, `Describe` and `SheepConfig`, control for
+    // `Start`, `Reload`, `Restart` and `SaveRoll`, and edit for `Delete` and
+    // `SetSmit`. Its own section (`DogConfigResolved`,
+    // `SetSheepDogSettings`) needs no grant.
+    Probe::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+        .permission(Permission::new(
+            "flock.read",
+            true,
+            "reads each sheep's registered definition and status",
+        ))
+        .permission(Permission::new(
+            "flock.control",
+            true,
+            "starts, reloads and restarts sheep, and saves the roll",
+        ))
+        .permission(Permission::new(
+            "flock.edit",
+            true,
+            "deletes the sheep a cutover replaces and sets their smit",
+        ))
+        .answer::<config::Section>();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
