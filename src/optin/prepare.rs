@@ -645,8 +645,9 @@ mod tests {
     /// fails if the record stops carrying the app as the shepherd had it
     /// before adoption. Removal restores from this; `cwd` and `script` alone
     /// left the deployed repository's `env`, instances and probes in place.
-    /// `sandbox` is the one field the file cannot hold: shep-core 0.23 never
-    /// serializes it, since the `sandbox` dog replaced the key.
+    /// `sandbox` is the one field a record this dog writes cannot hold:
+    /// shep-core 0.23 never serializes it, since the `sandbox` dog replaced
+    /// the key. A record an older dog wrote may still carry it.
     #[tokio::test]
     async fn the_record_carries_the_whole_pre_adoption_definition() {
         let home = tempfile::tempdir().expect("tempdir");
