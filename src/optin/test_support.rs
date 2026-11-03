@@ -34,7 +34,7 @@ pub(super) struct RollOf<'a> {
 /// readiness gate, which `Verify::Probed` refuses to go without.
 pub(super) const GATED: &str = ",\"wait_ready\":true";
 
-/// [`GATED`], plus the `sandbox` key shep 0.21 added to `[[app]]`.
+/// [`GATED`], plus the `sandbox` key a shepherd before 0.23 sent in an `[[app]]`.
 pub(super) const SANDBOXED: &str = ",\"wait_ready\":true,\"sandbox\":\"sandbox.json\"";
 
 impl<'a> RollOf<'a> {

@@ -66,6 +66,19 @@ pub(super) async fn put_back<D: Daemon>(
         )));
     };
 
+    // A record an older dog wrote can carry the key, which shep-core 0.23
+    // never sends: starting it would put the sheep back unsandboxed, and
+    // nothing would say so. Refused before the delete, so the sheep keeps
+    // running as it is.
+    if let Some(file) = origin.and_then(|origin| origin.sandbox.as_deref()) {
+        return PutBack::Untouched(Error::Config(format!(
+            "{sheep}'s record carries `sandbox = {file:?}`, which this dog cannot send to the \
+             shepherd, so putting it back would run it unsandboxed. The sheep is left as it is: \
+             move the sandbox to an `[app.dogs.sandbox]` table by hand, then delete the \
+             `sandbox` line from `[origin]` in its deploy.toml and undo again"
+        )));
+    }
+
     // The whole pre-adoption definition when the record has it, so `env`,
     // `instances`, the probes and the rest go back too. A record from before
     // that field carries only `cwd` and `script`, and those go over whatever
