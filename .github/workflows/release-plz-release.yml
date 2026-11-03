@@ -20,6 +20,14 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      dry-run-tag:
+        description: >-
+          An existing tag of this repo, e.g. v0.6.6. Runs only the dog-release
+          dry run against it: builds every target and prints the hashes,
+          uploads nothing, opens no pull request, and skips release-plz.
+        type: string
+        default: ""
 
 concurrency:
   group: release-plz-release
@@ -28,6 +36,8 @@ concurrency:
 jobs:
   release-plz-release:
     name: Publish to crates.io
+    # A dry run of dog-release must not also run release-plz.
+    if: inputs.dry-run-tag == ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # An environment, so a required reviewer can be added here if this ever
@@ -108,3 +118,20 @@ jobs:
       tag: ${{ needs.release-plz-release.outputs.tag }}
     secrets:
       index-token: ${{ secrets.SHEP_INDEX_TOKEN }}
+
+  # Dispatch with `dry-run-tag` set to check the build-and-hash step against
+  # an existing tag without waiting for a real release. The callee's `dry-run`
+  # builds every target and prints the hashes, uploads nothing and opens no
+  # pull request, so it needs no index token. It is pinned to the same commit
+  # as the job above.
+  dog-release-dry-run:
+    name: Dry-run prebuilt binaries
+    if: inputs.dry-run-tag != ''
+    permissions:
+      contents: write
+      actions: read
+    uses: shep-pm/shep/.github/workflows/dog-release.yml@3e217f93ea0e7557b10bb3cdf45cd0755365cbb9
+    with:
+      package: shep-deploy
+      tag: ${{ inputs.dry-run-tag }}
+      dry-run: true
