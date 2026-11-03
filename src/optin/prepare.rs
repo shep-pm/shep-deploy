@@ -645,6 +645,8 @@ mod tests {
     /// fails if the record stops carrying the app as the shepherd had it
     /// before adoption. Removal restores from this; `cwd` and `script` alone
     /// left the deployed repository's `env`, instances and probes in place.
+    /// `sandbox` is the one field the file cannot hold: shep-core 0.23 never
+    /// serializes it, since the `sandbox` dog replaced the key.
     #[tokio::test]
     async fn the_record_carries_the_whole_pre_adoption_definition() {
         let home = tempfile::tempdir().expect("tempdir");
@@ -658,13 +660,10 @@ mod tests {
 
         let origin = prepared.state.origin.as_ref().expect("recorded");
         assert_eq!(origin, &prepared.previous_config);
-        assert_eq!(origin.sandbox.as_deref(), Some("sandbox.json"));
         let on_disk = State::read(&prepared.tree.state_file()).expect("reads");
-        assert_eq!(on_disk.origin.as_ref(), Some(&prepared.previous_config));
-        assert_eq!(
-            on_disk.origin.expect("recorded").sandbox.as_deref(),
-            Some("sandbox.json")
-        );
+        let mut without_sandbox = prepared.previous_config.clone();
+        without_sandbox.sandbox = None;
+        assert_eq!(on_disk.origin.as_ref(), Some(&without_sandbox));
     }
 
     /// fails if the app the cutover registers loses the Flockfile's

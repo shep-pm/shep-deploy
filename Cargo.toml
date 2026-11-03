@@ -16,7 +16,7 @@ categories = ["command-line-utilities"]
 exclude = ["/docs/"]
 
 [dependencies]
-# 0.21.0, the published shep-client that matches the published shep CI
+# 0.23.0, the published shep-client that matches the published shep CI
 # installs. It is also the floor for `AppConfig::sandbox`, the `sandbox =
 # "<file>"` key shep 0.21 added to `[[app]]`: an older `AppConfig` drops the
 # key without an error, so `init` and an undo would register a sandboxed sheep
@@ -29,7 +29,7 @@ exclude = ["/docs/"]
 # impl lives, and 0.7.2's did not, so publishing `config::Section`'s schema
 # at all meant naming shep-core directly, as a dependency whose only job was
 # to turn that feature on. See shep-pm/shep#198.
-shep-client = "0.21.0"
+shep-client = "0.23.0"
 # The `JsonSchema` derive on `config::Section`. Still needed, and not the
 # same question the line above answers: shep-client does not re-export
 # schemars, so a dog derives against its own. Version-matched to the one
