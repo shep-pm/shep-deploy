@@ -100,6 +100,36 @@ async fn a_sheep_is_restored_to_its_whole_pre_adoption_definition() {
     assert_eq!(put_back.script, "server.js");
 }
 
+/// fails if a record whose origin carries `sandbox` is put back. The key is
+/// never sent by shep-core 0.23, so the sheep would come back unsandboxed
+/// with nothing said; it has to be refused before anything is deleted.
+#[tokio::test]
+async fn an_origin_with_a_sandbox_key_is_refused_and_the_sheep_left_running() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let origin: AppConfig = toml::from_str(
+        "name = \"web\"\nscript = \"server.js\"\ncwd = \"/srv/web\"\nsandbox = \"sandbox.json\"\n",
+    )
+    .expect("an app");
+    write_target_with_full_origin(home.path(), "web", &origin);
+    // This crate cannot write the key any more, so the record is edited the
+    // way an older dog's file already reads.
+    let state_file = Tree::for_sheep(home.path(), "web").state_file();
+    let text = std::fs::read_to_string(&state_file).expect("reads");
+    assert!(text.contains("[origin]\n"), "{text}");
+    let text = text.replace("[origin]\n", "[origin]\nsandbox = \"sandbox.json\"\n");
+    std::fs::write(&state_file, text).expect("an older record");
+    let daemon = Recording::new(&["web"], Refuse::Never);
+
+    let results = all(&daemon, home.path()).await;
+
+    assert!(
+        matches!(&results[0], Restored::Failed { why, .. } if why.contains("sandbox")),
+        "{results:?}"
+    );
+    assert!(daemon.started().is_empty(), "nothing was started");
+    assert!(!daemon.calls().contains(&"delete"), "{:?}", daemon.calls());
+}
+
 /// fails if the report names a directory the sheep was not put back in.
 /// `put_back` starts the origin's own `cwd` when the record carries an
 /// origin, and `origin_cwd` is a hand-editable legacy field that can

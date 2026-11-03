@@ -138,6 +138,16 @@ pub async fn prepare_with<D: Daemon>(
              over: `shep-deploy survey` lists every registered sheep and where it stands"
         ))
     })?;
+    // The key cannot be forwarded: shep-core 0.23 never serializes it, so
+    // the `Start` would register the sheep outside crabpot, silently.
+    if let Some(file) = previous_config.sandbox.as_deref() {
+        return Err(Error::Config(format!(
+            "{sheep} is registered with `sandbox = {file:?}`, and this dog cannot carry that \
+             key to the shepherd: shep-client 0.23 never sends it, so the sheep would run \
+             unsandboxed. Move the sandbox to an `[app.dogs.sandbox]` table, or leave the \
+             sheep as it is"
+        )));
+    }
     let checkout = PathBuf::from(previous_config.cwd.as_deref().ok_or_else(|| {
         Error::Config(format!(
             "shep records no working directory for {sheep}, so there is no checkout to deploy \
@@ -645,15 +655,12 @@ mod tests {
     /// fails if the record stops carrying the app as the shepherd had it
     /// before adoption. Removal restores from this; `cwd` and `script` alone
     /// left the deployed repository's `env`, instances and probes in place.
-    /// `sandbox` is the one field a record this dog writes cannot hold:
-    /// shep-core 0.23 never serializes it, since the `sandbox` dog replaced
-    /// the key. A record an older dog wrote may still carry it.
     #[tokio::test]
     async fn the_record_carries_the_whole_pre_adoption_definition() {
         let home = tempfile::tempdir().expect("tempdir");
         let checkout = checkout_with_commit();
         let entries = [("bpm", checkout.path())];
-        let daemon = RollOf::new(&entries).with_fields(SANDBOXED);
+        let daemon = RollOf::new(&entries);
 
         let prepared = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
@@ -662,26 +669,29 @@ mod tests {
         let origin = prepared.state.origin.as_ref().expect("recorded");
         assert_eq!(origin, &prepared.previous_config);
         let on_disk = State::read(&prepared.tree.state_file()).expect("reads");
-        let mut without_sandbox = prepared.previous_config.clone();
-        without_sandbox.sandbox = None;
-        assert_eq!(on_disk.origin.as_ref(), Some(&without_sandbox));
+        assert_eq!(on_disk.origin.as_ref(), Some(&prepared.previous_config));
     }
 
-    /// fails if the app the cutover registers loses the Flockfile's
-    /// `sandbox`. The cutover sends this app to the shepherd, and a sheep
-    /// registered without the key runs outside crabpot with nothing said.
+    /// fails if a sheep registered with a `sandbox` key is taken over. The
+    /// key is never serialized by shep-core 0.23, so the cutover's `Start`
+    /// would register the sheep without it, outside crabpot, with nothing
+    /// said. A 0.21 or 0.22 shepherd still sends the key in its roll.
     #[tokio::test]
-    async fn the_app_handed_to_the_cutover_keeps_the_flockfiles_sandbox() {
+    async fn a_sheep_with_a_sandbox_key_is_refused_before_anything_is_written() {
         let home = tempfile::tempdir().expect("tempdir");
         let checkout = checkout_with_commit();
         let entries = [("bpm", checkout.path())];
         let daemon = RollOf::new(&entries).with_fields(SANDBOXED);
 
-        let prepared = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
+        let err = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
             .await
-            .expect("prepares");
+            .expect_err("refuses");
 
-        assert_eq!(prepared.app.sandbox.as_deref(), Some("sandbox.json"));
+        assert!(err.to_string().contains("sandbox"), "{err}");
+        assert!(
+            !Tree::for_sheep(home.path(), "bpm").root().exists(),
+            "a refused init leaves no tree behind"
+        );
     }
 
     /// fails if a sheep the shepherd already runs from `current` is treated
