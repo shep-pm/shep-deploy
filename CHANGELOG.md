@@ -5,6 +5,22 @@ All notable changes to this crate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Set any setting once in `[deploy]` for every sheep the dog serves, or per
+  sheep in `[app.dogs.deploy]`
+- Refuse a sheep's table that sets `interval`, `retention`, `git_timeout`,
+  `build_timeout` or `passthrough`, by name
+- Mark each hook's `env` secret in the published schema, so the settings pane
+  shows `<set>` and never the value
+
+### Changed
+
+- `shep-client` 0.24.0, the first published release carrying shep's dog
+  settings standard (shep-pm/shep#1428)
+
 ## [0.6.6] - 2026-11-03
 
 ### Fixed

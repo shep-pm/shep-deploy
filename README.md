@@ -41,15 +41,19 @@ Adopting runs the binary twice before anything is recorded. `shep-deploy
 --version` answers with the crate version and the shep protocol number this
 build speaks, which is what shep checks against its own floor: a dog built
 below it is refused there and then, rather than at its first handshake.
-`shep-deploy --schema` answers with a JSON Schema for the `[deploy]` section
-below. `shep restart deploy` asks the first question again, to see whether the
+`shep-deploy --schema` answers with a JSON Schema for this dog's settings: the
+`[deploy]` section below, which sets a value for every sheep this dog serves,
+and each sheep's `[app.dogs.deploy]` table, which overrides it.
+`shep restart deploy` asks the first question again, to see whether the
 binary on disk has moved ahead of the process still running.
 
 ## Telling it how to build
 
 The build command is a setting of the sheep, in the `[app.dogs.deploy]` table
-of its config. shep stores that table with the sheep when you register it and
-hands it to this dog, which asks the shepherd for it once per deploy:
+of its config, or in the dog's `[deploy]` section for every sheep at once (see
+[Running as a dog](#running-as-a-dog)). shep stores that table with the sheep
+when you register it and hands it to this dog, which asks the shepherd for it
+once per deploy:
 
 ```toml
 [[app]]
@@ -87,10 +91,11 @@ command = "supabase db push"
 env = { SUPABASE_DB_PASSWORD = "..." }
 ```
 
-- It is a key of the sheep's `[app.dogs.deploy]` table, which is yours: the
-  hook's `env` holds your secrets, and a commit must not choose the command that
-  receives them. A release's own Flockfile cannot set it. `[app.dogs.deploy.after]`
-  is read the same way.
+- It is a key of the sheep's `[app.dogs.deploy]` table, or of the dog's
+  `[deploy]` section, both of which are yours: the hook's `env` holds your
+  secrets, and a commit must not choose the command that receives them. A
+  release's own Flockfile cannot set it. `[app.dogs.deploy.after]` is read the
+  same way.
 - It runs in the release, as the app's `user`, through `sh -c`, with the build's
   cleared environment: the base set, the dog's `passthrough`, then the hook's
   own `env`. The dog sets `SHEP_DEPLOY_SHEEP`, `SHEP_DEPLOY_SHA` and
@@ -123,8 +128,9 @@ reload = ["cmd/voting", "internal/voting", "pkg", "go.mod"]
 
 - Entries are git pathspecs. A directory name matches everything under it, and
   a glob such as `assets/*.png` works too.
-- Each sheep has its own list, so two sheep built from one repository are
-  judged separately by the same push.
+- Set per sheep, each has its own list, so two sheep built from one repository
+  are judged separately by the same push. Set in `[deploy]`, every sheep this
+  dog serves shares one list.
 - `Flockfile.toml` is not a path unless you list it.
 - No `reload`, or `reload = []`, deploys every new sha, as before.
 - A skipped push costs a fetch and a diff: no checkout, build or reload, and
@@ -150,8 +156,8 @@ command = "nginx -s reload && ./purge-cloudflare.sh"
 env = { CLOUDFLARE_API_TOKEN = "...", CLOUDFLARE_ZONE_ID = "..." }
 ```
 
-- It is set in the sheep's `[app.dogs.deploy]` table and read from nowhere
-  else, as the release hook is.
+- It is set in the sheep's `[app.dogs.deploy]` table or the dog's `[deploy]`
+  section, and read from nowhere else, as the release hook is.
 - It runs in the new release, as the app's `user`, through `sh -c`, with the
   release hook's environment. `SHEP_DEPLOY_SHEEP`, `SHEP_DEPLOY_SHA` and
   `SHEP_DEPLOY_RELEASE` name the sheep, the new sha and the release's absolute
@@ -240,8 +246,10 @@ again to relink. Trees set up before this keep the clone
 they have, and nothing moves them yet.
 
 `branch`, `watch` and `verify` are not in `deploy.toml`. They are keys of the
-sheep's `[app.dogs.deploy]` table, which `init`, `--watch` and `--branch` write
-and `shep lookout` edits; the dog reads them again every tick. A `deploy.toml`
+sheep's `[app.dogs.deploy]` table, or of the dog's `[deploy]` section for every
+sheep at once, which `init`, `--watch` and `--branch` write to the sheep's own
+table and `shep lookout` edits at either level; the dog reads them again every
+tick. A `deploy.toml`
 that still carries one of them is refused, naming the key.
 
 The sheep's `cwd` is `current`, permanently. Set it explicitly when you
@@ -326,6 +334,49 @@ keys from `[dog.deploy]` in `shep.toml`; a newer one moves that section into
 dog's row. It has one because of the `--schema` answer above. None of the five
 keys is a credential, so the pane redacts nothing. `passthrough` names
 variables and never carries their values.
+
+### Setting a key once, for every sheep
+
+`[deploy]` holds more than those five keys. `branch`, `watch`, `verify`,
+`command`, `artifacts`, `reload`, `release` and `after` can be set there too,
+and every sheep this dog serves takes the value:
+
+```toml
+# $SHEP_HOME/dogs.toml
+[deploy]
+interval = "30s"
+branch = "main"
+command = "npm ci && npm run build"
+```
+
+A sheep's own `[app.dogs.deploy]` overrides any key that is not dog-wide, and
+only the keys it names:
+
+```toml
+# the sheep's own config
+[[app]]
+name = "api"
+script = "server.js"
+
+[app.dogs.deploy]
+branch = "release"
+```
+
+`api` follows `release` and builds with the shared `command`. A sheep with no
+table of its own follows `main`. A nested table layers key by key, so a sheep
+can add one entry to the `env` of a `[deploy]` hook every sheep shares.
+
+The five dog-wide keys are the exception, and a sheep that sets one is refused,
+by name:
+
+```text
+web: `[app.dogs.deploy]` sets interval, which is dog-wide. Set it in `[deploy]`
+in dogs.toml, where every sheep this dog serves shares it
+```
+
+The pane draws both levels, and marks the five as dog-wide where it offers
+them. A hook's `env` is marked secret, so the pane shows `<set>` there and
+never the value it holds.
 
 `retention` is how many of the newest releases each target keeps. Two are
 spared whatever their age: the one `current` points at, and the one
@@ -608,9 +659,10 @@ So the default arrangement is a repository's build script running as root, once
 per deploy.
 
 The build command, the hooks and the reload paths are not in the release at
-all: they come from the sheep's `[app.dogs.deploy]` table, so a commit cannot
-choose them. Nothing is read from a release's `Flockfile.toml` either: the app
-config is the one the shepherd holds for the sheep.
+all: they come from the sheep's `[app.dogs.deploy]` table or the dog's
+`[deploy]` section, both of which are yours rather than the repository's, so a
+commit cannot choose them. Nothing is read from a release's `Flockfile.toml`
+either: the app config is the one the shepherd holds for the sheep.
 
 Set `user` on the app and the build drops to that user's uid and primary group,
 with the shepherd's supplementary groups cleared, before it runs anything. A

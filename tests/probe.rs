@@ -83,7 +83,13 @@ fn the_schema_answer_is_json_describing_this_dogs_own_section() {
     // and a field whose value the pane must never print. `src/settings.rs`
     // checks the same marks on the schema it derives; what is pinned here is
     // that the answer this binary publishes carries them.
-    for key in ["interval", "retention", "git_timeout", "build_timeout", "passthrough"] {
+    for key in [
+        "interval",
+        "retention",
+        "git_timeout",
+        "build_timeout",
+        "passthrough",
+    ] {
         assert_eq!(
             schema
                 .pointer(&format!("/properties/{key}/x-shep-dog-wide"))

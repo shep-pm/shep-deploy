@@ -180,48 +180,61 @@ class rather than the instances.
 ## Gotchas
 
 - **`deploy.toml` holds state only; `branch`, `watch` and `verify` live in
-  the sheep's `[app.dogs.deploy]`.** `State` keeps the three in memory, filled
+  the settings, at either level.** `State` keeps the three in memory, filled
   by `State::adopt` from `Settings` (`settings::adopted` reads and adopts in one
   call, every tick), and they are `#[serde(skip)]`, so `State::write` never
   emits them. A record that still carries one is refused by `State::read`,
   naming the key and `[app.dogs.deploy]`. An absent `branch` is refused rather
-  than defaulted, since a guess deploys a branch nobody chose. `--watch`,
-  `--branch` and `init --verify` write the table through
-  `settings::change`, a read-modify-write of the whole table because
-  `SetSheepDogSettings` replaces it. The record keeps `deny_unknown_fields` so
+  than defaulted, since a guess deploys a branch nobody chose, and the refusal
+  names both places it could have been set. `--watch`,
+  `--branch` and `init --verify` write the sheep's own table through
+  `settings::change`, which reads that table and writes back only the keys it
+  changed: `SetSheepDogSettings` replaces the whole table, and writing the
+  layered result back would pin an inherited `[deploy]` value into every sheep
+  it touched. The record keeps `deny_unknown_fields` so
   an older shep-deploy refuses a record with a field it does not know instead
   of dropping it.
 - **`Error::Config` is built at dozens of sites across ten modules.** It is
   not the dog-section variant its doc used to claim.
 - **`main` answers `--version` and `--schema` before it does anything else.**
-  `shep_client::dogs::probe::<config::Section>` is the first line, ahead of
+  `shep_client::dogs::probe::<settings::Settings>` is the first line, ahead of
   the runtime, and it exits the process when the run is a probe. Order is the
   whole point: `shep adopt` and `shep restart deploy` both spawn the binary
   with `--version`, and a dog that does not recognise the flag starts its
   ordinary poll loop against the live shepherd until shep kills its process
   group a second or two later. `route` never sees either flag, which is why
-  neither has an arm there.
-- **`config::Section` is the schema, so its field docs are operator-facing.**
+  neither has an arm there. The probe also declares `Serves::OptedIn`, which
+  is what makes `[deploy]` a layer over the sheep `init` took over rather than
+  over the whole flock; `Serves::OptedIn` is skipped on the wire, so the
+  manifest test asserts its absence.
+- **`settings::Settings` is the schema, so its field docs are operator-facing.**
   They are what `shep lookout`'s settings pane prints, not commentary for the
   next reader; the reasoning belongs on `config::DogConfig`. The type-level
   doc is overridden with `#[schemars(description = ...)]` for the same
   reason, since schemars would otherwise publish the Rust doc verbatim.
-  `#[shep(secret)]` marks a credential, and this section has none. Since
+  `#[shep(dog_wide)]` marks a key only `[deploy]` may set, and
+  `#[shep(secret)]` marks a credential: each hook's `env` carries it, so the
+  pane shows `<set>`. Since
   shep-pm/shep#594 the mark rides the field rather than naming it, so it
   reaches a renamed property and a nested one, and the old runtime failure
   it could produce is gone: `dogs::config_schema` no longer returns a
-  `Result`.
-- **shep-client is pinned at 0.16.1, and floored at 0.10.0 for
+  `Result`. `HookSpec` is one type used by both hooks, so its schema lands in
+  `$defs` and the mark is found there rather than under each property.
+- **shep-client is pinned at 0.24.0, and floored at 0.10.0 for
   `dogs::dog_config`, and at 0.7.3 under that for its `schema` feature.
-  Neither floor is a protocol number.** 0.10.0 replaced the `DogConfig` derive
+  Neither floor is a protocol number.** 0.24.0 is the first published release
+  carrying shep-pm/shep#1428, the dog settings standard: `sheep_dog_table`
+  reads a sheep's own table with its secret references resolved,
+  `DogTable::layered` layers it over `[deploy]`, and `#[shep(dog_wide)]` says
+  which keys only `[deploy]` may set. 0.10.0 replaced the `DogConfig` derive
   with the `dog_config`
   attribute (shep-pm/shep#594), and `dogs::probe` is bounded on the trait
   the attribute implements, so a dog cannot answer `--schema` without it.
   The attribute belongs ABOVE the derives, since it rewrites the fields it
   marks and `JsonSchema` expanding first would render them unmarked. It
-  refuses the wrong order only when some field really carries the mark, so
-  this dog's section, which marks nothing, compiles either way and the
-  order is convention rather than something the compiler checks. Below
+  refuses the wrong order only when some field really carries the mark, and
+  this dog's settings type now marks five keys dog-wide and `HookSpec` marks
+  `env`, so the order is checked. Below
   that, 0.7.2's `schema` did not forward to `shep-core/schema`,
   so `UpDuration` had no `JsonSchema` impl and this dog's section had no
   schema to publish; the workaround was a direct shep-core dependency whose
@@ -234,7 +247,9 @@ class rather than the instances.
   `#[serde(default)]` on the wire, so an older peer's row still decodes as
   no channel, and the only place this crate names the variant is the
   `daemon.rs` test fixture, which says `channel: false`: this dog does not
-  ask for one.
+  ask for one. 0.24.0 added `events` beside it, and that one is not
+  defaulted in the struct, so the same fixture names it: `events: Vec::new()`,
+  because this dog publishes none.
 - **The dog's section is `[deploy]` in `$SHEP_HOME/dogs.toml`**, since shep
   0.1.32; before that it was `[dog.deploy]` in `shep.toml`, and a shepherd
   migrates the old spelling only at boot. A test that writes the section
