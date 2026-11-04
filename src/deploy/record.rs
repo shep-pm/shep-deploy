@@ -1,6 +1,9 @@
 //! What a deploy writes into `deploy.toml`, and the one setting an operator
 //! can change without deploying.
 
+use shep_client::shep_core::config::DogTable;
+
+use crate::config::DogConfig;
 use crate::daemon::Daemon;
 use crate::deploy::Outcome;
 use crate::error::Error;
@@ -38,7 +41,7 @@ pub(crate) async fn record<D: Daemon>(
     state: &mut State,
     head: &str,
     outcome: &Result<Outcome, Error>,
-    keep: usize,
+    config: &DogConfig,
 ) {
     let sheep = tree.sheep();
     let landed = matches!(outcome, Ok(Outcome::Deployed { .. }));
@@ -85,7 +88,7 @@ pub(crate) async fn record<D: Daemon>(
         }
     }
 
-    adopt_operator_fields(daemon, tree, state).await;
+    adopt_operator_fields(daemon, tree, state, &config.shared).await;
 
     // Both the record in memory and the one on disk. They differ after the
     // one write this module swallows, a verified deploy whose record could
@@ -111,8 +114,9 @@ pub(crate) async fn record<D: Daemon>(
     // `git worktree remove` per doomed release, off the runtime's thread
     // like every other git call.
     let pruned = {
-        let (tree, spared): (Tree, Vec<String>) = (
+        let (tree, keep, spared): (Tree, usize, Vec<String>) = (
             tree.clone(),
+            config.retention,
             spared.iter().map(|sha| (*sha).to_owned()).collect(),
         );
         shared::off_thread(move || {
@@ -137,8 +141,13 @@ pub(crate) async fn record<D: Daemon>(
 /// use, which can be a build's worth of time. A table that cannot be read or
 /// adopted leaves `state` as it is: there is nothing to adopt, and the next
 /// tick reports why.
-async fn adopt_operator_fields<D: Daemon>(daemon: &D, tree: &Tree, state: &mut State) {
-    if let Ok(held) = settings::read(daemon, tree.sheep()).await {
+async fn adopt_operator_fields<D: Daemon>(
+    daemon: &D,
+    tree: &Tree,
+    state: &mut State,
+    shared: &DogTable,
+) {
+    if let Ok(held) = settings::read(daemon, tree.sheep(), shared).await {
         let _ = state.adopt(tree.sheep(), &held);
     }
 }
@@ -262,9 +271,10 @@ pub async fn set_watch<D: Daemon>(
     daemon: &D,
     tree: &Tree,
     watch: Watch,
+    shared: &DogTable,
 ) -> Result<(Watch, State), Error> {
     let mut state = State::read(&tree.state_file())?;
-    let was = settings::read(daemon, tree.sheep()).await?.watch;
+    let was = settings::read(daemon, tree.sheep(), shared).await?.watch;
 
     if watch == Watch::Auto && state.deployed.is_none() {
         return Err(Error::Config(format!(
@@ -338,7 +348,7 @@ mod tests {
             &mut straggler,
             &second,
             &Err(Error::Protocol("lost the checkout race".to_owned())),
-            fixtures::dog_config().retention,
+            &fixtures::dog_config(),
         )
         .await;
 
@@ -446,7 +456,7 @@ mod tests {
             &mut state,
             fixtures::OTHER_SHA,
             &raced,
-            5,
+            &fixtures::dog_config(),
         )
         .await;
 
@@ -508,7 +518,7 @@ mod tests {
             &mut in_flight,
             fixtures::OTHER_SHA,
             &failed,
-            5,
+            &fixtures::dog_config(),
         )
         .await;
 
@@ -553,7 +563,7 @@ mod tests {
             &mut fixture.state,
             "unused",
             &landed,
-            2,
+            &fixtures::dog_config(),
         )
         .await;
 
@@ -655,9 +665,14 @@ mod tests {
         let daemon = Shepherd::ready().with_setting("watch", "auto");
         let before = fs::read(fixture.tree.state_file()).expect("deploy.toml");
 
-        let (was, after) = set_watch(&daemon, &fixture.tree, Watch::Manual)
-            .await
-            .expect("sets");
+        let (was, after) = set_watch(
+            &daemon,
+            &fixture.tree,
+            Watch::Manual,
+            &fixtures::no_section(),
+        )
+        .await
+        .expect("sets");
 
         assert_eq!(was, Watch::Auto, "what the table held before");
         assert_eq!(after.watch, Watch::Manual);
@@ -690,7 +705,7 @@ mod tests {
         let fixture = fixture_before_any_release();
         let daemon = Shepherd::ready();
 
-        let err = set_watch(&daemon, &fixture.tree, Watch::Auto)
+        let err = set_watch(&daemon, &fixture.tree, Watch::Auto, &fixtures::no_section())
             .await
             .expect_err("refuses");
 
@@ -699,9 +714,14 @@ mod tests {
         assert!(shown.contains("shep-deploy init web"), "{shown}");
         assert_eq!(daemon.settings().watch, Watch::Manual, "unchanged");
 
-        set_watch(&daemon, &fixture.tree, Watch::Manual)
-            .await
-            .expect("manual is allowed");
+        set_watch(
+            &daemon,
+            &fixture.tree,
+            Watch::Manual,
+            &fixtures::no_section(),
+        )
+        .await
+        .expect("manual is allowed");
     }
 
     /// fails if a prune failure fails the deploy that triggered it. The

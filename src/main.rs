@@ -73,6 +73,7 @@ mod optin;
 mod ownership;
 mod paths;
 mod poll;
+mod probe;
 mod restore;
 mod retarget;
 mod retention;
@@ -92,7 +93,7 @@ mod window;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use shep_client::dogs::{DogIdentity, DogRuntime, Permission, Probe};
+use shep_client::dogs::{DogIdentity, DogRuntime};
 use shep_client::shep_core::paths::ShepPaths;
 use shep_client::{Client, LinkState, RECONNECT_MAX_DELAY};
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -116,54 +117,9 @@ use crate::state::{State, Verify, Watch};
 const DRAIN: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn main() -> ExitCode {
-    // Answers shep's two probes and ends the process when this run is one of
-    // them: `--version` with the version and the protocol number this binary
-    // was compiled against, `--schema` with the JSON Schema of
-    // `config::Section`. It returns on every ordinary run.
-    //
-    // First, before the runtime is built and before anything is opened,
-    // because that is the whole point of the call. `shep restart deploy`
-    // probes the binary on disk to see whether it has been upgraded under
-    // the running process, and a dog that does not recognise `--version`
-    // ignores it and starts doing its ordinary job instead - here, a poll
-    // loop against the live shepherd, killed a second or two later. This
-    // dog builds and cuts over releases, so "runs briefly and is then
-    // killed" is not a harmless overlap.
-    //
-    // `route` never sees either flag as a result, which is also why neither
-    // needs an arm there: a leading `-` is not a sheep name, so both used to
-    // land on `USAGE` and exit 2, and shep read that as a dog with no
-    // protocol and no schema.
-    //
-    // The name and the version are passed rather than read inside
-    // shep-client because `env!` expands where it is written, and there it
-    // would report shep-client's own version.
-    //
-    // The manifest is also where the dog's grants come from. Since shep 0.21
-    // the shepherd refuses a request outside them, and a dog that asks for
-    // nothing is adopted with `grants: []` and then refused its first
-    // `sheep_config`, so each request `daemon.rs` sends is covered here:
-    // reads for `ListFlock`, `Describe` and `SheepConfig`, control for
-    // `Start`, `Reload`, `Restart` and `SaveRoll`, and edit for `Delete` and
-    // `SetSmit`. Its own section (`DogConfigResolved`,
-    // `SetSheepDogSettings`) needs no grant.
-    Probe::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
-        .permission(Permission::new(
-            "flock.read",
-            true,
-            "reads each sheep's registered definition and status",
-        ))
-        .permission(Permission::new(
-            "flock.control",
-            true,
-            "starts, reloads and restarts sheep, and saves the roll",
-        ))
-        .permission(Permission::new(
-            "flock.edit",
-            true,
-            "deletes the sheep a cutover replaces and sets their smit",
-        ))
-        .answer::<config::Section>();
+    // Answers shep's probes and ends the process when this run is one of them,
+    // ahead of the runtime and ahead of anything opened: see [`probe`].
+    probe::declare();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -509,9 +465,11 @@ async fn deploy_once(sheep: &str) -> Result<u8, Error> {
 
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
-    let (mut state, ..) = settings::adopted(&daemon, &tree).await?;
-
+    // The dog's section first: it is the layer each sheep's own table is put
+    // over, so the settings cannot be read without it.
     let config = config::read(&daemon).await?;
+    let (mut state, ..) = settings::adopted(&daemon, &tree, &config.shared).await?;
+
     let outcome = deploy::deploy(&daemon, &tree, &mut state, &config).await?;
     Ok(report(sheep, &state, &outcome))
 }
@@ -541,9 +499,9 @@ async fn promote_once(sheep: &str) -> Result<u8, Error> {
 
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
-    let (mut state, ..) = settings::adopted(&daemon, &tree).await?;
-
     let config = config::read(&daemon).await?;
+    let (mut state, ..) = settings::adopted(&daemon, &tree, &config.shared).await?;
+
     let outcome = stage::promote(&daemon, &tree, &mut state, &config).await?;
     Ok(report(sheep, &state, &outcome))
 }
@@ -562,8 +520,8 @@ async fn stage_once(sheep: &str) -> Result<u8, Error> {
 
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
-    let (mut state, ..) = settings::adopted(&daemon, &tree).await?;
     let config = config::read(&daemon).await?;
+    let (mut state, ..) = settings::adopted(&daemon, &tree, &config.shared).await?;
     match stage::stage(&daemon, &tree, &mut state, &config).await? {
         Staged::Built { sha } => println!(
             "{sheep} staged {sha}, still deployed at {}",
@@ -705,7 +663,8 @@ async fn set_watch(sheep: &str, mode: &str) -> Result<u8, Error> {
     // Both the watch before and the record after come back from the write:
     // `set_watch` reads immediately before writing, and a read made here
     // would be the older copy the "was already" line must not be true of.
-    let (was, state) = deploy::set_watch(&daemon, &tree, watch).await?;
+    let config = config::read(&daemon).await?;
+    let (was, state) = deploy::set_watch(&daemon, &tree, watch, &config.shared).await?;
 
     if was == watch {
         println!("{sheep} was already watch = {}", named(watch));
@@ -730,7 +689,9 @@ async fn set_watch(sheep: &str, mode: &str) -> Result<u8, Error> {
 async fn branch_once(sheep: &str, name: &str) -> Result<u8, Error> {
     let tree = Tree::for_sheep(&shep_home()?, sheep);
     let client = Client::connect(&socket()?).await?;
-    retarget::branch_once(&Live::command(client), &tree, name).await
+    let daemon = Live::command(client);
+    let config = config::read(&daemon).await?;
+    retarget::branch_once(&daemon, &tree, name, &config.shared).await
 }
 
 /// `$SHEP_HOME`, absolute.

@@ -290,6 +290,17 @@ impl Shepherd {
         }
     }
 
+    /// The same shepherd, resolving the table's `{{secret:KEY}}` references to
+    /// `secrets` on its `sheep_dog_table` answer while `sheep_config` still
+    /// carries them written out. See [`fixtures::Sheep::resolving`].
+    #[must_use]
+    pub(crate) fn resolving(self, secrets: &[(&str, &str)]) -> Self {
+        Self {
+            held: self.held.resolving(secrets),
+            ..self
+        }
+    }
+
     /// The same shepherd, with `key` set to `value` in the sheep's table.
     pub(crate) fn with_setting(self, key: &str, value: &str) -> Self {
         self.set_setting(key, value);
@@ -558,6 +569,9 @@ impl Daemon for Shepherd {
         table: DogTable,
     ) -> Result<(), Error> {
         self.held.replace(dog, table)
+    }
+    async fn sheep_dog_table(&self, _sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
+        Ok(self.held.table(dog))
     }
     async fn describe(&self, sheep: &str) -> Result<Vec<ProcessInfo>, Error> {
         // `exists()` follows the link, and this one dangles on purpose,

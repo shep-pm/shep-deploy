@@ -25,21 +25,18 @@
 //! lift this into a library and it starts firing, at which point the
 //! trade-off wants deciding rather than silencing.
 //!
-//! Do not add trait methods speculatively. These are the surface plan
-//! one and plan two need between them, not ones that looked useful:
-//! `list_flock`, `describe` and `reload` are exercised inside plan one
-//! (`adopted_name` below, probe-based verification, and the deploy
-//! sequence). `dog_config` reads the `[dog.<name>]` section that names the
-//! poll loop's interval and retention, via `crate::config::read` and
-//! `adopted_name` below. `start` and `delete` are the cutover's, in
-//! `crate::optin`: it registers the sheep against `current` and then
-//! removes the instances that `Start` was added beside. `restart` is the
-//! one with no caller at all; Task 10 chose `Reload` for the whole deploy
-//! sequence, and it stays because plan one's own brief named it up front.
-//! `sheep_config` is the tenth, added for `crate::settings`: a deploy reads
-//! the sheep's `[app.dogs.deploy]` table from the shepherd's own record of it.
-//! `set_sheep_dog_settings` is the eleventh, its writing twin: `--watch`,
-//! `--branch`, `setup --verify` and the cutover's promotion write the table.
+//! Do not add trait methods speculatively. Every one here has a caller:
+//! `list_flock`, `describe` and `reload` for the poll loop, probe-based
+//! verification and the deploy sequence; `dog_config` for the `[deploy]`
+//! section, via `crate::config::read` and `adopted_name` below; `start` and
+//! `delete` for the cutover in `crate::optin`, which registers the sheep
+//! against `current` and removes the instances `Start` was added beside.
+//! `restart` is the one with no caller at all: the deploy sequence reloads, and
+//! it stays because a dog that can reload should be able to restart.
+//! `sheep_config` and `sheep_dog_table` are the settings pair - the app a
+//! deploy builds as, and the sheep's own table with its secrets resolved - and
+//! `set_sheep_dog_settings` is their writing twin, used by `--watch`,
+//! `--branch`, `init --verify` and the cutover's promotion.
 //!
 //! # Self-identification
 //!
@@ -73,7 +70,7 @@ use crate::error::Error;
 
 /// Everything this dog asks the shepherd for.
 ///
-/// Narrow on purpose: eleven methods cover the whole plan, and each is written
+/// Narrow on purpose: twelve methods cover the whole plan, and each is written
 /// against whatever the shepherd itself calls the operation (`shep reload`,
 /// `shep restart`, ...) rather than against this crate's own vocabulary for
 /// it, so a reader who knows shep already knows what each one does.
@@ -174,6 +171,22 @@ pub trait Daemon {
     /// As [`Self::dog_config`]; a name no sheep has is a
     /// [`RpcErrorCode::NotFound`](shep_client::shep_core::protocol::RpcErrorCode).
     async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error>;
+
+    /// `sheep`'s own table for `dog`, with every `{{secret:...}}` in it
+    /// resolved in that sheep's environment. `None` when it carries none.
+    ///
+    /// What a deploy reads the settings from, rather than the same table as
+    /// [`Self::sheep_config`] holds it: read that way a hook would run with a
+    /// secret's NAME as its password. By name rather than out of the config,
+    /// because the shepherd resolves references in the sheep's own environment
+    /// and this dog has no way to do that itself.
+    ///
+    /// # Errors
+    /// As [`Self::dog_config`]; a name no sheep has is a
+    /// [`RpcErrorCode::NotFound`](shep_client::shep_core::protocol::RpcErrorCode),
+    /// and a reference the shepherd cannot resolve is an
+    /// [`RpcErrorCode::InvalidConfig`](shep_client::shep_core::protocol::RpcErrorCode).
+    async fn sheep_dog_table(&self, sheep: &str, dog: &str) -> Result<Option<DogTable>, Error>;
 
     /// Replace `dog`'s whole table on `sheep` with `table`.
     ///
@@ -309,6 +322,22 @@ impl Link {
             Self::Command(client) => client.dog_config(name).await,
         }
     }
+
+    /// The table `sheep` carries for `dog`, with its secrets resolved, over
+    /// whichever connection this is.
+    ///
+    /// Through shep-client's `sheep_dog_table` rather than a hand-built
+    /// [`Request::DogSheepSettings`], which answers the table as stored: read
+    /// that way a hook runs with a secret's name as its password. The client
+    /// asks the resolving request and falls back for a shepherd too old to know
+    /// it, refusing a table that still holds a reference rather than handing it
+    /// over unresolved.
+    async fn sheep_table(&self, sheep: &str, dog: &str) -> Result<Option<DogTable>, RequestError> {
+        match self {
+            Self::Dog(client) => client.sheep_dog_table(sheep, dog).await,
+            Self::Command(client) => client.sheep_dog_table(sheep, dog).await,
+        }
+    }
 }
 
 impl Daemon for Live {
@@ -385,6 +414,10 @@ impl Daemon for Live {
             Response::SheepConfig(view) => Ok(view.config),
             other => Err(unexpected("SheepConfig", &other)),
         }
+    }
+
+    async fn sheep_dog_table(&self, sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
+        Ok(self.0.sheep_table(sheep, dog).await?)
     }
 
     async fn set_sheep_dog_settings(
@@ -526,6 +559,8 @@ mod tests {
                 path: "/usr/local/bin/shep-deploy".to_owned(),
                 channel: false,
                 grants: None,
+                // This dog publishes no events of its own.
+                events: Vec::new(),
             }))
             .build()
     }
@@ -538,7 +573,8 @@ mod tests {
         }
 
         crate::fixtures::daemon_methods!(unimplemented;
-            dog_config, describe, start, delete, reload, restart, save_roll, sheep_config, set_sheep_dog_settings, set_smit,
+           dog_config, describe, start, delete, reload, restart, save_roll, sheep_config,
+           sheep_dog_table, set_sheep_dog_settings, set_smit,
         );
     }
 
@@ -550,7 +586,7 @@ mod tests {
     impl Daemon for Unreachable {
         crate::fixtures::daemon_methods!(
             answering Err(Error::Protocol("no session".to_owned()));
-            dog_config, list_flock, describe, start, delete, reload, restart, save_roll, sheep_config, set_sheep_dog_settings, set_smit,
+            dog_config, list_flock, describe, start, delete, reload, restart, save_roll, sheep_config, sheep_dog_table, set_sheep_dog_settings, set_smit,
         );
     }
 

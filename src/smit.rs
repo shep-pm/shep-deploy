@@ -287,8 +287,8 @@ mod tests {
         }
 
         crate::fixtures::daemon_methods!(unimplemented;
-            dog_config, list_flock, describe, start, delete, reload, restart, save_roll, sheep_config,
-            set_sheep_dog_settings,
+           dog_config, list_flock, describe, start, delete, reload, restart, save_roll, sheep_config,
+           sheep_dog_table, set_sheep_dog_settings,
         );
     }
 

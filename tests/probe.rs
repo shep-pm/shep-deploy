@@ -78,15 +78,50 @@ fn the_schema_answer_is_json_describing_this_dogs_own_section() {
         schema.pointer("/properties/interval").is_some(),
         "the section's own keys are what the schema describes"
     );
+
+    // The two marks `shep lookout` draws on: a key only `[deploy]` may set,
+    // and a field whose value the pane must never print. `src/settings.rs`
+    // checks the same marks on the schema it derives; what is pinned here is
+    // that the answer this binary publishes carries them.
+    for key in [
+        "interval",
+        "retention",
+        "git_timeout",
+        "build_timeout",
+        "passthrough",
+    ] {
+        assert_eq!(
+            schema
+                .pointer(&format!("/properties/{key}/x-shep-dog-wide"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "`{key}` is dog-wide, so the pane must not offer it per sheep"
+        );
+    }
+    assert_eq!(
+        schema
+            .pointer("/$defs/HookSpec/properties/env/x-shep-secret")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "a hook's env is where an operator keeps a password"
+    );
 }
 
-/// fails if the manifest stops asking for the flock permissions this dog
-/// uses.
+/// fails if the manifest stops asking for the permissions this dog uses.
 ///
 /// Since shep 0.21 a dog's grants are what its manifest asked for, and the
 /// shepherd refuses any request outside them. A manifest that asks for
 /// nothing adopts cleanly and then fails every tick on its first
 /// `sheep_config`, with the refusal only in the dog's own log.
+///
+/// `secrets.read:production` is the one entry an operator has to read twice,
+/// and it is the one that was missing on 2026-11-03: the read of a sheep's
+/// table that resolves its `{{secret:...}}` references takes `secrets.read`
+/// scoped to the environment that sheep resolves in, so a dog that never
+/// asked for it was refused on every target of every tick. The gate is only
+/// on a dog's own connection, so the integration tier's one-shot deploys
+/// cannot see this missing - only the supervised dog's tests can, and they
+/// fail as a timeout rather than as a refusal.
 #[test]
 fn the_manifest_asks_for_the_flock_permissions_the_dog_uses() {
     let output = probe(shep_client::shep_core::dogs::MANIFEST_FLAG);
@@ -106,8 +141,24 @@ fn the_manifest_asks_for_the_flock_permissions_the_dog_uses() {
         [
             ("flock.read", true),
             ("flock.control", true),
-            ("flock.edit", true)
+            ("flock.edit", true),
+            // Scoped, because the permission is: `secrets.read` in one named
+            // environment, and `production` is the shepherd's default. A flock
+            // that changed `[daemon] environment` needs the matching scope
+            // granted by hand, and `poll::a_supervised_dog_runs_a_sheeps_hook_with_its_secret_resolved`
+            // is what fails if this line goes missing.
+            ("secrets.read:production", true)
         ]
+    );
+
+    // The dog's `[deploy]` section is a settings layer for the sheep `init`
+    // took over, not for every sheep in the flock. `Serves::OptedIn` is the
+    // default and is skipped on the wire, so its absence is the declaration:
+    // a flip to `EverySheep` would print `"serves": "every-sheep"` here and
+    // make this fail.
+    assert!(
+        manifest.get("serves").is_none(),
+        "the manifest offers this dog's settings to opted-in sheep only: {manifest}"
     );
 }
 

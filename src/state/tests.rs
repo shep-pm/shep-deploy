@@ -206,8 +206,9 @@ fn a_table_with_no_branch_is_refused_naming_the_key() {
 
     let shown = err.to_string();
     assert!(matches!(err, Error::Config(_)), "{shown}");
-    assert!(shown.contains("sets no `branch`"), "{shown}");
+    assert!(shown.contains("`branch`"), "{shown}");
     assert!(shown.contains("[app.dogs.deploy]"), "{shown}");
+    assert!(shown.contains("[deploy]"), "{shown}");
 }
 
 /// fails if a `refs/` value that git would refuse as a ref name, or that

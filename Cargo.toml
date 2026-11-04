@@ -16,21 +16,25 @@ categories = ["command-line-utilities"]
 exclude = ["/docs/"]
 
 [dependencies]
-# 0.23.0, the published shep-client that matches the published shep CI
-# installs. It is also the floor for `AppConfig::sandbox`, the `sandbox =
-# "<file>"` key shep 0.21 added to `[[app]]`: an older `AppConfig` drops the
-# key without an error, so `init` and an undo would register a sandboxed sheep
-# with no sandbox and run it bare. The 0.10.0 floor underneath it still holds, for
-# `dogs::dog_config`: the attribute that replaced the `DogConfig` derive in
-# shep-pm/shep#594, and the bound `dogs::probe` takes now. The older reason
-# sits underneath it and still holds, since this crate
+# 0.24.0, the first published shep-client carrying shep-pm/shep#1428: one
+# settings type for both `[deploy]` in dogs.toml and a sheep's
+# `[app.dogs.deploy]`, read through `sheep_dog_table`, which resolves the
+# table's secret references on the way. It is also the published shep-client
+# that matches the published shep CI installs. It is still the floor for
+# `AppConfig::sandbox`, the `sandbox = "<file>"` key shep 0.21 added to
+# `[[app]]`: an older `AppConfig` drops the key without an error, so `init`
+# and an undo would register a sandboxed sheep with no sandbox and run it
+# bare. The 0.10.0 floor underneath it still holds, for `dogs::dog_config`:
+# the attribute that replaced the `DogConfig` derive in shep-pm/shep#594, and
+# the bound `dogs::probe` takes now. The older reason sits underneath it and
+# still holds, since this crate
 # would floor at 0.7.3 without the newer one: shep-client's `schema` feature
 # forwards to `shep-core/schema`, which is where `UpDuration`'s `JsonSchema`
-# impl lives, and 0.7.2's did not, so publishing `config::Section`'s schema
+# impl lives, and 0.7.2's did not, so publishing the settings type's schema
 # at all meant naming shep-core directly, as a dependency whose only job was
 # to turn that feature on. See shep-pm/shep#198.
-shep-client = "0.23.0"
-# The `JsonSchema` derive on `config::Section`. Still needed, and not the
+shep-client = "0.24.0"
+# The `JsonSchema` derive on `settings::Settings`. Still needed, and not the
 # same question the line above answers: shep-client does not re-export
 # schemars, so a dog derives against its own. Version-matched to the one
 # shep-client resolves, since `dogs::probe` takes a `T: schemars::JsonSchema`
