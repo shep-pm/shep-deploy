@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-04
+
+### Added
+
+- One settings type, set in [deploy] or per sheep **(BREAKING)**
+
+### Changed
+
+- Move what the dog declares to shep into probe.rs
+
+### Fixed
+
+- Name the crate each doc link points into
+- Read a sheep's table through the request that resolves it
+- Ask for the grant the resolved table read takes
+
+
 ### Added
 
 - Set any setting once in `[deploy]` for every sheep the dog serves, or per
