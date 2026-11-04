@@ -30,6 +30,7 @@
 //! the cost of the boundary; six inside one target was not.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -415,6 +416,14 @@ pub fn gated_app(sheep: &str, settings: &str) -> AppConfig {
 #[derive(Debug)]
 pub struct Sheep {
     app: RefCell<AppConfig>,
+    /// What `sheep_dog_table` resolves the table's `{{secret:KEY}}` references
+    /// to, as the shepherd does for that request and NOT for `sheep_config`.
+    ///
+    /// Empty answers both requests from one copy, which is what a sheep whose
+    /// table carries no reference really is. Set it and the two requests
+    /// differ, which is the only way a test can tell a dog that reads the
+    /// resolved table from one that reads the stored one.
+    secrets: RefCell<BTreeMap<String, String>>,
 }
 
 impl Sheep {
@@ -426,6 +435,7 @@ impl Sheep {
     pub fn of(sheep: &str, settings: &str) -> Self {
         Self {
             app: RefCell::new(app_with_settings(sheep, settings)),
+            secrets: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -433,7 +443,25 @@ impl Sheep {
     pub fn holding(app: AppConfig) -> Self {
         Self {
             app: RefCell::new(app),
+            secrets: RefCell::new(BTreeMap::new()),
         }
+    }
+
+    /// The same sheep, with every `{{secret:KEY}}` in its table resolved to
+    /// what `secrets` names for `KEY`, on the `sheep_dog_table` answer only.
+    ///
+    /// `sheep_config` still hands over the table as it is stored, references
+    /// and all, because that is what a shepherd hands over: resolution is a
+    /// property of the table request, not of the sheep's config.
+    #[must_use]
+    pub fn resolving(mut self, secrets: &[(&str, &str)]) -> Self {
+        self.secrets = RefCell::new(
+            secrets
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+        );
+        self
     }
 
     /// The config as the shepherd holds it now.
@@ -472,9 +500,17 @@ impl Sheep {
         Ok(self.app())
     }
 
-    /// The `sheep_dog_table` answer: `dog`'s table as the shepherd holds it.
+    /// The `sheep_dog_table` answer: `dog`'s table as the shepherd holds it,
+    /// with every `{{secret:KEY}}` swapped for what [`resolving`](Self::resolving)
+    /// named for `KEY`. A reference with no name there is left as written.
     pub fn table(&self, dog: &str) -> Option<DogTable> {
-        self.app.borrow().dogs.get(dog).cloned()
+        let held = self.app.borrow().dogs.get(dog).cloned()?;
+        let secrets = self.secrets.borrow();
+        if secrets.is_empty() {
+            return Some(held);
+        }
+        held.try_map_strings::<core::convert::Infallible>("", |_, text| Ok(resolve(text, &secrets)))
+            .ok()
     }
 
     /// The `set_sheep_dog_settings` answer: replaces `dog`'s whole table, as
@@ -506,6 +542,30 @@ impl Daemon for Sheep {
     crate::fixtures::daemon_methods!(unimplemented;
         dog_config, list_flock, describe, start, delete, reload, restart, save_roll, set_smit,
     );
+}
+
+/// `text` with every `{{secret:KEY}}` in it swapped for what `secrets` names
+/// for `KEY`, or `None` when it names one `secrets` has no value for, which
+/// [`DogTable::try_map_strings`] reads as "leave that string alone".
+///
+/// The shape shep resolves, written here rather than called from shep-core so
+/// the double stays a double: what a test needs is two answers that differ,
+/// not a second copy of the shepherd's resolver.
+fn resolve(text: &str, secrets: &BTreeMap<String, String>) -> Option<String> {
+    const OPEN: &str = "{{secret:";
+    const CLOSE: &str = "}}";
+
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(OPEN) {
+        out.push_str(&rest[..at]);
+        let key = &rest[at + OPEN.len()..];
+        let end = key.find(CLOSE)?;
+        out.push_str(secrets.get(&key[..end])?);
+        rest = &key[end + CLOSE.len()..];
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 /// The shared settings layer of a dog with no `[deploy]` section at all: what

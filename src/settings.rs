@@ -279,7 +279,8 @@ pub(crate) async fn held<D: Daemon>(
     shared: &DogTable,
 ) -> Result<(AppConfig, Settings), Error> {
     let app = daemon.sheep_config(sheep).await?;
-    let settings = from_app(sheep, shared, &app)?;
+    let own = daemon.sheep_dog_table(sheep, TABLE).await?;
+    let settings = from_tables(sheep, shared, own.as_ref())?;
     Ok((app, settings))
 }
 
@@ -335,8 +336,14 @@ fn from_tables(sheep: &str, shared: &DogTable, own: Option<&DogTable>) -> Result
 ///
 /// For a caller that already holds the sheep's config - the muster roll, and
 /// the config a cutover is about to replace - and so need not ask the shepherd
-/// for the table a second time. What it reads is unresolved: a roll carries the
-/// table as the shepherd stored it, `{{secret:...}}` references and all.
+/// for the table a second time.
+///
+/// What it reads is unresolved: a roll carries the table as the shepherd
+/// stored it, `{{secret:...}}` references and all. So it is for a caller that
+/// reports on the settings or builds from them, and never for one that runs a
+/// hook. A hook's `env` is where an operator keeps a credential, and a
+/// reference handed to `sh -c` is a wrong password on every deploy with nothing
+/// pointing at the cause. [`read`] and [`held`] are the resolved reads.
 ///
 /// # Errors
 /// As [`from_tables`].

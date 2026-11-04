@@ -330,6 +330,8 @@ pub async fn prepare_with<D: Daemon>(
 
     // The registered config already holds the table, so setup asks the
     // shepherd for nothing more. Before the lock, so a typo costs no tree.
+    // Unresolved, which is safe here and nowhere else: init runs no hook, so
+    // nothing secret-bearing is executed from what this reads.
     let settings = crate::settings::from_app(sheep, &config.shared, &previous_config)?;
 
     // Same hold a deploy takes, for the same reason: everything below writes

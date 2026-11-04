@@ -61,6 +61,53 @@ async fn a_release_hook_runs_after_the_build_and_before_the_swap() {
     );
 }
 
+/// fails if a hook runs with a `{{secret:...}}` reference as its password.
+///
+/// Through a whole deploy, because that is the path that matters: `deploy`
+/// reads its settings through [`crate::settings::held`], and a hook's `env` is
+/// the one place in the table an operator keeps a credential. The reference is
+/// what the shepherd stores, and only the table request resolves it, so a dog
+/// that takes the table out of the config it asked for runs every migration
+/// with `{{secret:DB}}` as the password.
+///
+/// Not paused, for the same reason as the hook tests above: a paused clock
+/// fires `build_timeout` while the real `sh` the hook spawns is still running,
+/// so the test fails on the timeout rather than on what the hook saw.
+#[tokio::test]
+async fn a_hook_runs_with_the_resolved_secret_and_not_the_reference() {
+    let mut fixture = fixture_with_previous_release();
+    let second = commit_on_origin(&fixture, "second.txt");
+    let daemon = Shepherd::ready()
+        .with_settings(
+            "[release]\ncommand = 'printenv DB_PASSWORD > secret.txt'\n\
+             env = { DB_PASSWORD = '{{secret:DB}}' }\n",
+        )
+        .resolving(&[("DB", "hunter2")]);
+
+    let outcome = deploy(
+        &daemon,
+        &fixture.tree,
+        &mut fixture.state,
+        &fixtures::dog_config(),
+    )
+    .await
+    .expect("completes");
+
+    assert_eq!(
+        outcome,
+        Outcome::Deployed {
+            sha: second.clone()
+        }
+    );
+    let seen =
+        fs::read_to_string(fixture.tree.release(&second).join("secret.txt")).expect("the hook ran");
+    assert_eq!(
+        seen.trim(),
+        "hunter2",
+        "the hook's env carries the password the reference names"
+    );
+}
+
 /// fails if a failed migration can reach the swap, or if its sha is retried
 /// by the loop. A held sha is the same ending a failed build has.
 #[tokio::test]

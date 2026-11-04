@@ -290,6 +290,17 @@ impl Shepherd {
         }
     }
 
+    /// The same shepherd, resolving the table's `{{secret:KEY}}` references to
+    /// `secrets` on its `sheep_dog_table` answer while `sheep_config` still
+    /// carries them written out. See [`fixtures::Sheep::resolving`].
+    #[must_use]
+    pub(crate) fn resolving(self, secrets: &[(&str, &str)]) -> Self {
+        Self {
+            held: self.held.resolving(secrets),
+            ..self
+        }
+    }
+
     /// The same shepherd, with `key` set to `value` in the sheep's table.
     pub(crate) fn with_setting(self, key: &str, value: &str) -> Self {
         self.set_setting(key, value);

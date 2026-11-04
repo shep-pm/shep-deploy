@@ -369,11 +369,21 @@ async fn a_sheep_with_no_table_of_its_own_takes_the_dogs_section() {
 }
 
 /// fails if a sheep's own table stops being read through the request that
-/// resolves its secret references: a hook would run with `{{secret:DB}}` as its
-/// password.
+/// resolves its secret references: a hook would run with `{{secret:DB}}` as
+/// its password.
+///
+/// The two requests are answered differently here on purpose. A double that
+/// hands one copy to both cannot tell a dog that reads the resolved table from
+/// one that reads the copy inside `sheep_config`, and the copy inside the
+/// config is unresolved: resolution is a property of the table request, not of
+/// the sheep's config.
 #[tokio::test(start_paused = true)]
 async fn a_sheeps_table_is_read_resolved_and_its_config_is_read_whole() {
-    let sheep = fixtures::Sheep::of("web", "branch = 'main'\n[release]\nenv = { DB = 'x' }\n");
+    let sheep = fixtures::Sheep::of(
+        "web",
+        "branch = 'main'\n[release]\nenv = { DB = '{{secret:DB}}' }\n",
+    )
+    .resolving(&[("DB", "hunter2")]);
     let shared = section("branch = 'main'\n");
 
     let (app, settings) = held(&sheep, "web", &shared).await.expect("held");
@@ -381,6 +391,17 @@ async fn a_sheeps_table_is_read_resolved_and_its_config_is_read_whole() {
     assert_eq!(app.name, "web", "the build and verify steps need the app");
     assert_eq!(
         settings.release.env.get("DB").map(String::as_str),
-        Some("x")
+        Some("hunter2"),
+        "the hook runs with the password, not with the reference to it"
+    );
+    assert_eq!(
+        app.dogs
+            .get("deploy")
+            .and_then(|table| table.as_map().get("release"))
+            .and_then(|release| release.get("env"))
+            .and_then(|env| env.get("DB"))
+            .and_then(Value::as_str),
+        Some("{{secret:DB}}"),
+        "the config is handed over whole, as the shepherd stores it"
     );
 }
