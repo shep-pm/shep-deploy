@@ -166,3 +166,75 @@ fn a_moved_branch_is_deployed_within_one_interval(dogs_toml: &str, secrets: &[(&
         },
     );
 }
+
+/// fails if the supervised dog is refused the read that resolves a sheep's
+/// table, or takes the reference where the credential should be.
+///
+/// `settings::held` reads a sheep's `[app.dogs.deploy]` through
+/// `Daemon::sheep_dog_table`, the only read that resolves a `{{secret:...}}`
+/// in it, and the shepherd gates that request on `secrets.read` scoped to the
+/// environment the sheep resolves in. The gate exists only on a dog's own
+/// connection, so nothing else in this tier touches it: a one-shot
+/// `shep-deploy deploy web` is not a dog and is refused nothing, and a unit
+/// test's fake `Daemon` has no gate at all. That is how this reached CI - the
+/// manifest declared no such permission, every target of every tick was
+/// refused before it fetched, and the two tests above timed out on a
+/// `FETCH_HEAD` that never came back.
+///
+/// So the hook is the assertion, and the supervised dog is the only way to
+/// reach it. An unresolved reference is not a password: a dog that was refused
+/// the read either never deploys at all, which the `POLL_WINDOW` wait catches,
+/// or deploys with the literal text of the reference as the credential.
+#[test]
+fn a_supervised_dog_runs_a_sheeps_hook_with_its_secret_resolved() {
+    let shepherd = Shepherd::new();
+    let origin = origin_with_app("v1", Readiness::Probe, "");
+    let sha = build_tree(shepherd.home(), "web", origin.path());
+    write_state(shepherd.home(), "web", origin.path(), &sha);
+    register_web_with_settings(
+        &shepherd,
+        Readiness::Probe,
+        "probed",
+        "",
+        // A dotted path, not `[release]`: this file is a Flockfile, and a
+        // bare `[release]` after the table opens a top-level one instead.
+        "[app.dogs.deploy.release]\ncommand = 'printenv DEPLOY_DB > secret.txt'\n\
+         env = { DEPLOY_DB = '{{secret:DEPLOY_DB}}' }\n",
+    );
+    wait_until("web to come up", || described_online(&shepherd, "web"));
+    let out_log = out_file(&shepherd, "web");
+
+    shepherd.ok(&["secret", "set", "DEPLOY_DB", "hunter2"]);
+    fs::write(
+        shepherd.home().join("dogs.toml"),
+        "[deploy]\ninterval = \"1s\"\n",
+    )
+    .expect("write dogs.toml");
+    shepherd.ok(&["adopt", DEPLOY_BIN, "--style", "bare", "--yes"]);
+    wait_until("the dog to be supervised", || {
+        described_instances(&shepherd, "deploy") == 1
+    });
+
+    write_run_script(origin.path(), "v2");
+    git(origin.path(), &["commit", "-qam", "v2"]);
+    let second = head_of(origin.path());
+
+    wait_within(
+        "the supervised dog to deploy v2 on its own tick",
+        POLL_WINDOW,
+        || last_line(&out_log).as_deref() == Some("v2"),
+    );
+
+    let secret_file = shepherd
+        .home()
+        .join("deploy/web/releases")
+        .join(&second)
+        .join("secret.txt");
+    let seen = fs::read_to_string(&secret_file)
+        .expect("the release hook ran in the new release and wrote its environment");
+    assert_eq!(
+        seen.trim(),
+        "hunter2",
+        "the hook's env carries the secret the reference names, not the reference: {seen}"
+    );
+}

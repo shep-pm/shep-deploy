@@ -378,6 +378,23 @@ The pane draws both levels, and marks the five as dog-wide where it offers
 them. A hook's `env` is marked secret, so the pane shows `<set>` there and
 never the value it holds.
 
+A `{{secret:KEY}}` in a sheep's table is resolved by the shepherd before the
+dog reads the table, and that read is one the shepherd gates: `secrets.read`,
+scoped to the environment that sheep resolves in. `shep adopt` writes the
+`secrets.read:production` this dog's manifest asks for into
+`[daemon.dog_grants.deploy]` in `shep.toml`. `production` is the shepherd's
+own `[daemon] environment`, so a flock that changed it, or a sheep with an
+`environment` of its own, needs that scope named in the same list:
+
+```toml
+# $SHEP_HOME/shep.toml
+[daemon.dog_grants.deploy]
+granted = ["flock.read", "flock.control", "flock.edit", "secrets.read:staging"]
+```
+
+Without the scope the dog is refused its read of that sheep's table, names the
+scope it needs in its own log, and deploys every other sheep as before.
+
 `retention` is how many of the newest releases each target keeps. Two are
 spared whatever their age: the one `current` points at, and the one
 `deploy.toml` names. They are the same release except after a deploy died

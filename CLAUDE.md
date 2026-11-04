@@ -220,6 +220,18 @@ class rather than the instances.
   it could produce is gone: `dogs::config_schema` no longer returns a
   `Result`. `HookSpec` is one type used by both hooks, so its schema lands in
   `$defs` and the mark is found there rather than under each property.
+- **`Daemon::sheep_dog_table` is the read that resolves a sheep's table, and
+  the shepherd gates it on `secrets.read:<environment>`.** The manifest asks
+  for `secrets.read:production`, which is the shepherd's `[daemon] environment`
+  default; a flock or a sheep set to another environment is refused on every
+  target of every tick until the operator names the scope in
+  `[daemon.dog_grants.deploy]` in `shep.toml`, and the refusal names the scope.
+  The gate is only on a dog's own connection: a one-shot `shep-deploy deploy
+  web` is refused nothing, and a fake `Daemon` has no gate at all, so only the
+  supervised poll tests can see a missing grant. They fail as a timeout on a
+  `FETCH_HEAD` that never comes back, not as a refusal, which is how CI caught
+  it on 2026-11-03 with every local gate green. `poll::a_supervised_dog_runs_a_sheeps_hook_with_its_secret_resolved`
+  is the one that fails fast.
 - **shep-client is pinned at 0.24.0, and floored at 0.10.0 for
   `dogs::dog_config`, and at 0.7.3 under that for its `schema` feature.
   Neither floor is a protocol number.** 0.24.0 is the first published release

@@ -147,6 +147,16 @@ fn main() -> ExitCode {
     // `Start`, `Reload`, `Restart` and `SaveRoll`, and edit for `Delete` and
     // `SetSmit`. Its own section (`DogConfigResolved`,
     // `SetSheepDogSettings`) needs no grant.
+    //
+    // `SheepDogSettingsResolved`, the read of a sheep's table that
+    // `settings::held` goes through, is the one request here that takes a
+    // scoped permission: `secrets.read` in the environment that sheep
+    // resolves in, which is the shepherd's `[daemon] environment` unless the
+    // sheep names its own. `production` is that default, so this covers an
+    // ordinary flock; a flock or a sheep set to another environment needs the
+    // matching scope granted by hand under `[daemon.dog_grants.deploy]`, and
+    // the refusal says which one. Without any grant the poll loop is refused
+    // on every target, which is what broke the integration tier on 2026-11-03.
     Probe::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
         .permission(Permission::new(
             "flock.read",
@@ -162,6 +172,13 @@ fn main() -> ExitCode {
             "flock.edit",
             true,
             "deletes the sheep a cutover replaces and sets their smit",
+        ))
+        .permission(Permission::new(
+            "secrets.read:production",
+            true,
+            "reads each sheep's `[app.dogs.deploy]` table with its `{{secret:...}}` \
+             references resolved, so a hook's `env` carries the credential rather than \
+             the text of a reference to it",
         ))
         // The dog's `[deploy]` section is the value for every sheep, but a
         // sheep only takes part once it carries a table of its own, which is

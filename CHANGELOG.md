@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `shep-client` 0.24.0, the first published release carrying shep's dog
   settings standard (shep-pm/shep#1428)
 
+### Fixed
+
+- Ask for `secrets.read:production`, the grant the shepherd takes for the read
+  of a sheep's table that resolves its `{{secret:...}}` references. Without it
+  a supervised dog was refused on every target of every tick and deployed
+  nothing, while every one-shot verb kept working
+
 ## [0.6.6] - 2026-11-03
 
 ### Fixed
