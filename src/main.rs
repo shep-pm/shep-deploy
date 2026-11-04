@@ -73,6 +73,7 @@ mod optin;
 mod ownership;
 mod paths;
 mod poll;
+mod probe;
 mod restore;
 mod retarget;
 mod retention;
@@ -92,7 +93,7 @@ mod window;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use shep_client::dogs::{DogIdentity, DogRuntime, Permission, Probe, Serves};
+use shep_client::dogs::{DogIdentity, DogRuntime};
 use shep_client::shep_core::paths::ShepPaths;
 use shep_client::{Client, LinkState, RECONNECT_MAX_DELAY};
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -116,75 +117,9 @@ use crate::state::{State, Verify, Watch};
 const DRAIN: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn main() -> ExitCode {
-    // Answers shep's two probes and ends the process when this run is one of
-    // them: `--version` with the version and the protocol number this binary
-    // was compiled against, `--schema` with the JSON Schema of
-    // `settings::Settings`. It returns on every ordinary run.
-    //
-    // First, before the runtime is built and before anything is opened,
-    // because that is the whole point of the call. `shep restart deploy`
-    // probes the binary on disk to see whether it has been upgraded under
-    // the running process, and a dog that does not recognise `--version`
-    // ignores it and starts doing its ordinary job instead - here, a poll
-    // loop against the live shepherd, killed a second or two later. This
-    // dog builds and cuts over releases, so "runs briefly and is then
-    // killed" is not a harmless overlap.
-    //
-    // `route` never sees either flag as a result, which is also why neither
-    // needs an arm there: a leading `-` is not a sheep name, so both used to
-    // land on `USAGE` and exit 2, and shep read that as a dog with no
-    // protocol and no schema.
-    //
-    // The name and the version are passed rather than read inside
-    // shep-client because `env!` expands where it is written, and there it
-    // would report shep-client's own version.
-    //
-    // The manifest is also where the dog's grants come from. Since shep 0.21
-    // the shepherd refuses a request outside them, and a dog that asks for
-    // nothing is adopted with `grants: []` and then refused its first
-    // `sheep_config`, so each request `daemon.rs` sends is covered here:
-    // reads for `ListFlock`, `Describe` and `SheepConfig`, control for
-    // `Start`, `Reload`, `Restart` and `SaveRoll`, and edit for `Delete` and
-    // `SetSmit`. Its own section (`DogConfigResolved`,
-    // `SetSheepDogSettings`) needs no grant.
-    //
-    // `SheepDogSettingsResolved`, the read of a sheep's table that
-    // `settings::held` goes through, is the one request here that takes a
-    // scoped permission: `secrets.read` in the environment that sheep
-    // resolves in, which is the shepherd's `[daemon] environment` unless the
-    // sheep names its own. `production` is that default, so this covers an
-    // ordinary flock; a flock or a sheep set to another environment needs the
-    // matching scope granted by hand under `[daemon.dog_grants.deploy]`, and
-    // the refusal says which one. Without any grant the poll loop is refused
-    // on every target, which is what broke the integration tier on 2026-11-03.
-    Probe::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
-        .permission(Permission::new(
-            "flock.read",
-            true,
-            "reads each sheep's registered definition and status",
-        ))
-        .permission(Permission::new(
-            "flock.control",
-            true,
-            "starts, reloads and restarts sheep, and saves the roll",
-        ))
-        .permission(Permission::new(
-            "flock.edit",
-            true,
-            "deletes the sheep a cutover replaces and sets their smit",
-        ))
-        .permission(Permission::new(
-            "secrets.read:production",
-            true,
-            "reads each sheep's `[app.dogs.deploy]` table with its `{{secret:...}}` \
-             references resolved, so a hook's `env` carries the credential rather than \
-             the text of a reference to it",
-        ))
-        // The dog's `[deploy]` section is the value for every sheep, but a
-        // sheep only takes part once it carries a table of its own, which is
-        // what `init` gives it. `sheep_settings` reads the same value back.
-        .serves(Serves::OptedIn)
-        .answer::<settings::Settings>();
+    // Answers shep's probes and ends the process when this run is one of them,
+    // ahead of the runtime and ahead of anything opened: see [`probe`].
+    probe::declare();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();

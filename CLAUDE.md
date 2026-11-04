@@ -115,7 +115,7 @@ SHEP_BIN="$(command -v shep)" cargo test --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
 
-405 unit tests, 7 integration and 3 probe as of 2026-09-22, ~24s, ~32s and instant. The number moves with every task; treat it as a shape, not a checksum.
+565 unit tests, 9 integration and 7 probe as of 2026-11-03, ~27s, ~32s and instant. The number moves with every task; treat it as a shape, not a checksum.
 
 ### Commit subjects
 
@@ -129,10 +129,14 @@ git config core.hooksPath .githooks
 
 ## Architecture
 
-Binary crate, no library target. Twenty-four modules under `src/`, the big three
+Binary crate, no library target. Thirty-one modules under `src/`, the big three
 being `deploy/` (the state machine, a directory), `optin/` (first cutover, a directory)
 and `poll/` (the dog's loop, with `report.rs` for what it says). `route.rs` holds `Route`, `route`, `deprecation` (the notice for `setup`, the old name of `init`) and `USAGE`, and `exit.rs`
-the exit-code mapping; both left `main.rs` to keep it under 800 lines.
+the exit-code mapping; both left `main.rs` to keep it under 800 lines. `probe.rs`
+holds what the dog declares to shep, the four permissions, `Serves::OptedIn` and the
+settings schema, and left it too on 2026-11-03, when `main.rs` reached 1002 lines and
+IR-48's gate refused it. Nothing may cross 1000; `.github/rust-file-size-baseline.txt`
+lists files that may only shrink.
 
 `#[cfg(test)] mod fixtures` is declared from `main.rs`, which is the only way a
 binary crate with no lib target can share test helpers. Use
@@ -197,8 +201,9 @@ class rather than the instances.
 - **`Error::Config` is built at dozens of sites across ten modules.** It is
   not the dog-section variant its doc used to claim.
 - **`main` answers `--version` and `--schema` before it does anything else.**
-  `shep_client::dogs::probe::<settings::Settings>` is the first line, ahead of
-  the runtime, and it exits the process when the run is a probe. Order is the
+  `probe::declare()` is the first line, ahead of the runtime, and it exits the
+  process when the run is a probe. The declaration itself lives in `probe.rs`,
+  which is where the four permissions and their reasons are read. Order is the
   whole point: `shep adopt` and `shep restart deploy` both spawn the binary
   with `--version`, and a dog that does not recognise the flag starts its
   ordinary poll loop against the live shepherd until shep kills its process
