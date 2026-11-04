@@ -94,7 +94,8 @@ fn dog_wide() -> &'static BTreeSet<String> {
 ///
 /// One type for both: `[deploy]` is the value for every sheep, and a sheep's
 /// `[app.dogs.deploy]` table overrides any key of it that is not dog-wide.
-/// Nothing merges the two by hand - [`layered`] does it once, per sheep.
+/// Nothing merges the two by hand - [`DogTable::layered`](shep_client::shep_core::config::DogTable::layered)
+/// does it once, per sheep.
 ///
 /// This is also the type shep asks this binary about. [`crate::main`] hands it
 /// to `shep_client::dogs::probe`, which answers `--schema` with the JSON Schema
@@ -111,7 +112,9 @@ fn dog_wide() -> &'static BTreeSet<String> {
 ///
 /// The five dog-wide keys are read for one sheep as their defaults, never as
 /// the value in force: `[deploy]`'s copy of them is taken out before a sheep's
-/// table is layered over it, exactly as [`DogRuntime::sheep_settings`] does.
+/// table is layered over it, exactly as
+/// [`DogRuntime::sheep_settings`](shep_client::dogs::DogRuntime::sheep_settings)
+/// does.
 /// The values in force are the dog's own, in [`crate::config::DogConfig`], and
 /// they are validated once there rather than once per sheep.
 ///
