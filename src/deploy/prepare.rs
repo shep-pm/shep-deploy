@@ -409,7 +409,8 @@ mod tests {
         )
         .expect("fetch");
         let stored = fixtures::gated_app("web", FIXTURE_TABLE);
-        let settings = crate::settings::from_app("web", &stored).expect("settings");
+        let settings = crate::settings::from_app("web", &crate::fixtures::no_section(), &stored)
+            .expect("settings");
 
         let staged = super::stage_release(
             &fixture.tree,

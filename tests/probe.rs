@@ -78,6 +78,27 @@ fn the_schema_answer_is_json_describing_this_dogs_own_section() {
         schema.pointer("/properties/interval").is_some(),
         "the section's own keys are what the schema describes"
     );
+
+    // The two marks `shep lookout` draws on: a key only `[deploy]` may set,
+    // and a field whose value the pane must never print. `src/settings.rs`
+    // checks the same marks on the schema it derives; what is pinned here is
+    // that the answer this binary publishes carries them.
+    for key in ["interval", "retention", "git_timeout", "build_timeout", "passthrough"] {
+        assert_eq!(
+            schema
+                .pointer(&format!("/properties/{key}/x-shep-dog-wide"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "`{key}` is dog-wide, so the pane must not offer it per sheep"
+        );
+    }
+    assert_eq!(
+        schema
+            .pointer("/$defs/HookSpec/properties/env/x-shep-secret")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "a hook's env is where an operator keeps a password"
+    );
 }
 
 /// fails if the manifest stops asking for the flock permissions this dog
@@ -108,6 +129,16 @@ fn the_manifest_asks_for_the_flock_permissions_the_dog_uses() {
             ("flock.control", true),
             ("flock.edit", true)
         ]
+    );
+
+    // The dog's `[deploy]` section is a settings layer for the sheep `init`
+    // took over, not for every sheep in the flock. `Serves::OptedIn` is the
+    // default and is skipped on the wire, so its absence is the declaration:
+    // a flip to `EverySheep` would print `"serves": "every-sheep"` here and
+    // make this fail.
+    assert!(
+        manifest.get("serves").is_none(),
+        "the manifest offers this dog's settings to opted-in sheep only: {manifest}"
     );
 }
 

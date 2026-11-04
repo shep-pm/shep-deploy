@@ -1,5 +1,7 @@
 //! Changing the branch a target tracks, without deploying.
 
+use shep_client::shep_core::config::DogTable;
+
 use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::lock;
@@ -43,13 +45,14 @@ pub async fn set_branch<D: Daemon>(
     daemon: &D,
     tree: &Tree,
     branch: &str,
+    shared: &DogTable,
 ) -> Result<(Option<String>, State), Error> {
     let sheep = tree.sheep();
     if let Some(why) = branch_refusal(branch) {
         return Err(Error::Config(format!("{sheep}: `branch` {why}")));
     }
 
-    let held = settings::read(daemon, sheep).await?;
+    let held = settings::read(daemon, sheep, shared).await?;
     if State::read(&tree.state_file())?.deployed.is_none() {
         return Err(Error::Config(format!(
             "{sheep} has a deploy tree but was never cut over to it, so a branch set now \
@@ -79,8 +82,13 @@ pub async fn set_branch<D: Daemon>(
 ///
 /// # Errors
 /// As [`set_branch`].
-pub async fn branch_once<D: Daemon>(daemon: &D, tree: &Tree, branch: &str) -> Result<u8, Error> {
-    let (was, state) = set_branch(daemon, tree, branch).await?;
+pub async fn branch_once<D: Daemon>(
+    daemon: &D,
+    tree: &Tree,
+    branch: &str,
+    shared: &DogTable,
+) -> Result<u8, Error> {
+    let (was, state) = set_branch(daemon, tree, branch, shared).await?;
     println!(
         "{} branch: {} -> {}, still deployed at {}",
         tree.sheep(),
@@ -129,7 +137,9 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         let (tree, sheep) = deployed_tree(home.path());
 
-        let (was, after) = set_branch(&sheep, &tree, "release").await.expect("sets");
+        let (was, after) = set_branch(&sheep, &tree, "release", &fixtures::no_section())
+            .await
+            .expect("sets");
 
         assert_eq!(was.as_deref(), Some("main"), "what the table held before");
         let held = sheep.settings();
@@ -153,7 +163,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         let (tree, sheep) = deployed_tree(home.path());
 
-        set_branch(&sheep, &tree, "refs/pull/1/head")
+        set_branch(&sheep, &tree, "refs/pull/1/head", &fixtures::no_section())
             .await
             .expect("sets");
 
@@ -168,7 +178,9 @@ mod tests {
         let (tree, sheep) = deployed_tree(home.path());
 
         for name in ["--upload-pack=x", "", "  ", "refs/heads/a..b"] {
-            let err = set_branch(&sheep, &tree, name).await.expect_err("refuses");
+            let err = set_branch(&sheep, &tree, name, &fixtures::no_section())
+                .await
+                .expect_err("refuses");
             assert!(matches!(err, Error::Config(_)), "{name:?}: {err}");
         }
 
@@ -189,7 +201,7 @@ mod tests {
             .expect("the record before");
         let sheep = fixtures::Sheep::of("web", TABLE);
 
-        let err = set_branch(&sheep, &tree, "release")
+        let err = set_branch(&sheep, &tree, "release", &fixtures::no_section())
             .await
             .expect_err("refuses");
 
@@ -218,6 +230,7 @@ mod tests {
                         &sheep,
                         &Tree::for_sheep(&home, "web"),
                         "release",
+                        &fixtures::no_section(),
                     ));
                 tx.send(()).expect("report");
                 result

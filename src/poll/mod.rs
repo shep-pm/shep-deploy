@@ -140,7 +140,7 @@ async fn tick<D: Daemon>(daemon: &D, shep_home: &Path, config: &DogConfig) -> Ti
     }
     for name in found.named {
         let tree = Tree::for_sheep(shep_home, &name);
-        let mut state = match settings::adopted(daemon, &tree).await {
+        let mut state = match settings::adopted(daemon, &tree, &config.shared).await {
             Ok((state, ..)) => state,
             Err(err) => {
                 results.push((name, Err(err)));

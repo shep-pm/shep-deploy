@@ -11,7 +11,7 @@
 //! what a stage built, reloads and verifies it, and takes the daemon a stage
 //! never does.
 
-use shep_client::shep_core::config::AppConfig;
+use shep_client::shep_core::config::{AppConfig, DogTable};
 
 use crate::build;
 use crate::config::DogConfig;
@@ -89,7 +89,7 @@ pub async fn stage<D: Daemon>(
     // The caller read `state` before the lock, and a deploy or another stage
     // may have written the record since. Answering from the older copy would
     // rebuild a head that is already staged or call a landed one new.
-    let (fresh, app, settings) = settings::adopted(daemon, tree).await?;
+    let (fresh, app, settings) = settings::adopted(daemon, tree, &config.shared).await?;
     *state = fresh;
 
     if state.deployed.is_none() {
@@ -182,7 +182,7 @@ pub async fn promote<D: Daemon>(
 
     // The caller read `state` before the lock, and a deploy or a stage may
     // have written the record since.
-    let (fresh, app, settings) = settings::adopted(daemon, tree).await?;
+    let (fresh, app, settings) = settings::adopted(daemon, tree, &config.shared).await?;
     *state = fresh;
 
     if state.deployed.is_none() {
@@ -204,7 +204,7 @@ pub async fn promote<D: Daemon>(
     }
 
     let outcome = land_staged(daemon, tree, state, &head, &app, &settings, config).await;
-    record(daemon, tree, state, &head, &outcome, config.retention).await;
+    record(daemon, tree, state, &head, &outcome, config).await;
     outcome
 }
 
@@ -263,7 +263,7 @@ async fn build_and_record<D: Daemon>(
     }
     built?;
 
-    record_staged(daemon, tree, state, head).await
+    record_staged(daemon, tree, state, head, &config.shared).await
 }
 
 /// Writes `head` as `staged` into the record on disk, under the record lock,
@@ -286,8 +286,9 @@ async fn record_staged<D: Daemon>(
     tree: &Tree,
     state: &mut State,
     head: &str,
+    shared: &DogTable,
 ) -> Result<(), Error> {
-    let held = settings::read(daemon, tree.sheep()).await?;
+    let held = settings::read(daemon, tree.sheep(), shared).await?;
     let _record = lock::hold_record(tree)?;
     let mut on_disk = State::read(&tree.state_file())?;
     on_disk.adopt(tree.sheep(), &held)?;
@@ -852,12 +853,18 @@ mod tests {
         let mut in_flight = fixture.state.clone();
         let daemon = Shepherd::ready();
 
-        crate::retarget::set_branch(&daemon, &fixture.tree, "release")
+        crate::retarget::set_branch(&daemon, &fixture.tree, "release", &fixtures::no_section())
             .await
             .expect("--branch release");
-        let err = record_staged(&daemon, &fixture.tree, &mut in_flight, fixtures::SHA)
-            .await
-            .expect_err("the branch moved");
+        let err = record_staged(
+            &daemon,
+            &fixture.tree,
+            &mut in_flight,
+            fixtures::SHA,
+            &fixtures::no_section(),
+        )
+        .await
+        .expect_err("the branch moved");
 
         assert!(matches!(err, Error::Config(_)), "{err:?}");
         let shown = err.to_string();
@@ -888,6 +895,7 @@ mod tests {
             &fixture.tree,
             &mut in_flight,
             fixtures::SHA,
+            &fixtures::no_section(),
         )
         .await
         .expect("records");

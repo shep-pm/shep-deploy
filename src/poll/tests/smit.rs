@@ -60,6 +60,9 @@ impl Daemon for SmitRecording {
     async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
         self.ready.sheep_config(sheep).await
     }
+    async fn sheep_dog_table(&self, sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
+        self.ready.sheep_dog_table(sheep, dog).await
+    }
     async fn set_sheep_dog_settings(
         &self,
         sheep: &str,
@@ -91,6 +94,9 @@ impl Daemon for RefusingSmits {
     async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
         self.0.sheep_config(sheep).await
     }
+    async fn sheep_dog_table(&self, sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
+        self.0.sheep_dog_table(sheep, dog).await
+    }
     async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), Error> {
         Err(Error::Request(RequestError::Rpc(RpcError {
             code: RpcErrorCode::Internal,
@@ -100,7 +106,7 @@ impl Daemon for RefusingSmits {
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, start, delete, restart, save_roll, set_sheep_dog_settings,
+       dog_config, list_flock, start, delete, restart, save_roll, set_sheep_dog_settings,
     );
 }
 
@@ -119,6 +125,9 @@ impl Daemon for RefusingRepaints {
     async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
         self.0.sheep_config(sheep).await
     }
+    async fn sheep_dog_table(&self, sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
+        self.0.sheep_dog_table(sheep, dog).await
+    }
     async fn set_smit(&self, sheep: &str, text: &str) -> Result<(), Error> {
         if self.0.smits().is_empty() {
             return self.0.set_smit(sheep, text).await;
@@ -127,7 +136,7 @@ impl Daemon for RefusingRepaints {
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, start, delete, restart, save_roll, set_sheep_dog_settings,
+       dog_config, list_flock, start, delete, restart, save_roll, set_sheep_dog_settings,
     );
 }
 

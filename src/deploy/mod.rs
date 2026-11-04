@@ -332,7 +332,7 @@ async fn go<D: Daemon>(
     // nothing new asks the shepherd for nothing. Returned rather than
     // recorded: the branch will not move to repair it, so a hold on this sha
     // would outlive the operator's fix.
-    let (app, settings) = settings::held(daemon, sheep).await?;
+    let (app, settings) = settings::held(daemon, sheep, &config.shared).await?;
 
     // After the hold, so a sha that already failed is still said once rather
     // than judged again, and only for the poll loop: a hand deploy means now.
@@ -344,7 +344,7 @@ async fn go<D: Daemon>(
         daemon, tree, state, &head, started_at, &app, &settings, config,
     )
     .await;
-    record(daemon, tree, state, &head, &outcome, config.retention).await;
+    record(daemon, tree, state, &head, &outcome, config).await;
     outcome
 }
 

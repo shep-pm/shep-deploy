@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use shep_client::shep_core::config::AppConfig;
+use shep_client::shep_core::config::{AppConfig, DogTable};
 
 use crate::daemon::Daemon;
 use crate::error::Error;
@@ -112,7 +112,7 @@ pub enum Standing {
 /// offering it again invites a second opt-in that would clone over a live
 /// tree. Then a missing `cwd`, then a `cwd` that is not a checkout.
 #[must_use]
-pub fn classify(shep_home: &Path, app: &AppConfig) -> Standing {
+pub fn classify(shep_home: &Path, app: &AppConfig, shared: &DogTable) -> Standing {
     let tree = Tree::for_sheep(shep_home, &app.name);
     let state = match State::read(&tree.state_file()) {
         Ok(state) => Some(state),
@@ -124,8 +124,8 @@ pub fn classify(shep_home: &Path, app: &AppConfig) -> Standing {
     if let Some(mut state) = state {
         // The roll carries the sheep's `dogs` table, which is where `branch`
         // and `watch` live now.
-        if let Err(err) =
-            settings::from_app(&app.name, app).and_then(|held| state.adopt(&app.name, &held))
+        if let Err(err) = settings::from_app(&app.name, shared, app)
+            .and_then(|held| state.adopt(&app.name, &held))
         {
             return Standing::BadSettings(err.to_string());
         }
@@ -313,6 +313,7 @@ fn short(sha: &str) -> &str {
 /// Whatever [`crate::roll::registered`] returns.
 pub async fn survey<D: Daemon>(daemon: &D, shep_home: &Path) -> Result<String, Error> {
     let apps = roll::registered(daemon).await?;
+    let config = crate::config::read(daemon).await?;
     // A deploy directory that cannot be listed is a row, not a refusal: this
     // is the read-only command whose one job is to say where everything
     // stands, and one unreadable entry must not cost every other row.
@@ -323,7 +324,7 @@ pub async fn survey<D: Daemon>(daemon: &D, shep_home: &Path) -> Result<String, E
             Some((shep_home.join("deploy"), err.to_string())),
         ),
     };
-    let mut rows = rows(shep_home, &apps, &targets);
+    let mut rows = rows(shep_home, &apps, &targets, &config.shared);
     if let Some((dir, why)) = unlisted {
         rows.push((dir.display().to_string(), Standing::Unlisted(why)));
     }
@@ -341,6 +342,7 @@ fn rows(
     shep_home: &Path,
     apps: &std::collections::BTreeMap<String, AppConfig>,
     targets: &paths::Targets,
+    shared: &DogTable,
 ) -> Vec<(String, Standing)> {
     let mut rows: Vec<(String, Standing)> = apps
         .values()
@@ -349,7 +351,7 @@ fn rows(
             // a name is not this dog's: a name with a separator in it would
             // build a tree outside the deploy directory.
             if paths::is_sheep_name(&app.name) {
-                (app.name.clone(), classify(shep_home, app))
+                (app.name.clone(), classify(shep_home, app, shared))
             } else {
                 (crate::shared::printable(&app.name), Standing::BadName)
             }
@@ -391,7 +393,7 @@ mod tests {
             Err(err) => (paths::Targets::default(), Some(err.to_string())),
         };
         let why = unlisted.expect("a file where a directory belongs cannot be listed");
-        let mut rows = rows(home.path(), &apps, &targets);
+        let mut rows = rows(home.path(), &apps, &targets, &fixtures::no_section());
         rows.push((
             home.path().join("deploy").display().to_string(),
             Standing::Unlisted(why),
@@ -415,7 +417,12 @@ mod tests {
             apps.insert(name.to_owned(), app(name, Some("/srv/x")));
         }
 
-        let rows = rows(home.path(), &apps, &paths::Targets::default());
+        let rows = rows(
+            home.path(),
+            &apps,
+            &paths::Targets::default(),
+            &fixtures::no_section(),
+        );
 
         assert_eq!(rows.len(), 2, "{rows:?}");
         for (name, standing) in &rows {
@@ -455,7 +462,11 @@ mod tests {
         .expect("a record from the future");
         let checkout = checkout_fixture(&[]);
 
-        let standing = classify(home.path(), &app("web", checkout.path().to_str()));
+        let standing = classify(
+            home.path(),
+            &app("web", checkout.path().to_str()),
+            &fixtures::no_section(),
+        );
 
         assert!(
             matches!(&standing, Standing::Unreadable(why) if why.contains("newer_key")),
@@ -476,7 +487,7 @@ mod tests {
         let mut app = app("web", None);
         app.dogs = Default::default();
 
-        let standing = classify(home.path(), &app);
+        let standing = classify(home.path(), &app, &fixtures::no_section());
 
         assert!(
             matches!(&standing, Standing::BadSettings(why) if why.contains("branch")),
@@ -500,7 +511,7 @@ mod tests {
             [("web".to_owned(), app("web", None))].into_iter().collect();
         let targets = paths::targets(home.path()).expect("lists");
 
-        let rows = rows(home.path(), &registered, &targets);
+        let rows = rows(home.path(), &registered, &targets, &fixtures::no_section());
 
         assert!(
             rows.iter()
@@ -528,7 +539,12 @@ mod tests {
         let targets = paths::targets(home.path()).expect("lists");
         assert_eq!(targets.unnamed, vec![dir]);
 
-        let rows = rows(home.path(), &std::collections::BTreeMap::new(), &targets);
+        let rows = rows(
+            home.path(),
+            &std::collections::BTreeMap::new(),
+            &targets,
+            &fixtures::no_section(),
+        );
         let shown = render(&rows);
 
         assert!(shown.contains("unnamed"), "{shown}");
@@ -604,7 +620,11 @@ mod tests {
     fn a_cwd_that_is_not_a_checkout_is_not_eligible_and_says_why() {
         let home = tempfile::tempdir().expect("tempdir");
         let plain = tempfile::tempdir().expect("tempdir");
-        let standing = classify(home.path(), &app("legacy", plain.path().to_str()));
+        let standing = classify(
+            home.path(),
+            &app("legacy", plain.path().to_str()),
+            &fixtures::no_section(),
+        );
         let Standing::NotEligible(why) = standing else {
             panic!("expected NotEligible, got {standing:?}");
         };
@@ -619,7 +639,7 @@ mod tests {
     fn a_sheep_with_no_recorded_cwd_is_not_eligible() {
         let home = tempfile::tempdir().expect("tempdir");
         assert!(matches!(
-            classify(home.path(), &app("odd", None)),
+            classify(home.path(), &app("odd", None), &fixtures::no_section()),
             Standing::NotEligible(_)
         ));
     }
@@ -637,7 +657,11 @@ mod tests {
 
         for (name, checkout) in [("reactmap", &declared), ("koji", &bare)] {
             assert!(matches!(
-                classify(home.path(), &app(name, checkout.path().to_str())),
+                classify(
+                    home.path(),
+                    &app(name, checkout.path().to_str()),
+                    &fixtures::no_section()
+                ),
                 Standing::Eligible
             ));
         }
@@ -669,6 +693,7 @@ mod tests {
         let standing = classify(
             home.path(),
             &app_watching("bpm", current.path().to_str(), Watch::Manual),
+            &fixtures::no_section(),
         );
         assert!(matches!(standing, Standing::Manual { .. }), "{standing:?}");
     }
@@ -707,7 +732,11 @@ mod tests {
         assert!(worktree.path().join(".git").is_file(), "not a worktree");
 
         assert!(matches!(
-            classify(home.path(), &app("bpm", worktree.path().to_str())),
+            classify(
+                home.path(),
+                &app("bpm", worktree.path().to_str()),
+                &fixtures::no_section()
+            ),
             Standing::Eligible
         ));
     }
@@ -733,7 +762,11 @@ mod tests {
 
         let row = render(&[(
             "bpm".to_owned(),
-            classify(home.path(), &app("bpm", current.path().to_str())),
+            classify(
+                home.path(),
+                &app("bpm", current.path().to_str()),
+                &fixtures::no_section(),
+            ),
         )]);
 
         assert!(row.contains("held"), "{row}");
@@ -768,6 +801,7 @@ mod tests {
             classify(
                 home.path(),
                 &app_watching("bpm", current.path().to_str(), Watch::Manual),
+                &fixtures::no_section(),
             ),
         )]);
 
@@ -794,6 +828,7 @@ mod tests {
             classify(
                 home.path(),
                 &app_watching("bpm", current.path().to_str(), Watch::Manual),
+                &fixtures::no_section(),
             ),
         )]);
 
@@ -822,6 +857,7 @@ mod tests {
             classify(
                 home.path(),
                 &app_watching("bpm", current.path().to_str(), Watch::Manual),
+                &fixtures::no_section(),
             ),
         )]);
 

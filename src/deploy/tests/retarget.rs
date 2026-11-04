@@ -21,7 +21,7 @@ async fn a_branch_set_while_a_deploy_runs_is_followed_by_its_record() {
     let mut in_flight = fixture.state.clone();
 
     // The operator, mid-deploy.
-    set_branch(&daemon, &fixture.tree, "release")
+    set_branch(&daemon, &fixture.tree, "release", &fixtures::no_section())
         .await
         .expect("--branch release");
 
@@ -35,7 +35,7 @@ async fn a_branch_set_while_a_deploy_runs_is_followed_by_its_record() {
         &Ok(Outcome::Deployed {
             sha: fixtures::OTHER_SHA.to_owned(),
         }),
-        5,
+        &fixtures::dog_config(),
     )
     .await;
 
@@ -62,10 +62,10 @@ async fn a_retargeted_tree_deploys_the_new_branchs_head() {
     assert_ne!(main_head, release_head);
 
     let daemon = Shepherd::ready();
-    set_branch(&daemon, &fixture.tree, "release")
+    set_branch(&daemon, &fixture.tree, "release", &fixtures::no_section())
         .await
         .expect("--branch release");
-    let (mut state, ..) = settings::adopted(&daemon, &fixture.tree)
+    let (mut state, ..) = settings::adopted(&daemon, &fixture.tree, &fixtures::no_section())
         .await
         .expect("reads");
 

@@ -45,7 +45,11 @@ use crate::error::Error;
 /// struct, which [`run`] treats as a no-op. Unknown keys are refused, as in
 /// [`crate::build::BuildSpec`], so a typo does not become a hook that never
 /// runs.
-#[derive(Clone, PartialEq, Eq, Default, Deserialize)]
+///
+/// `env` carries the operator's credentials, so it carries `#[shep(secret)]`:
+/// `shep lookout` shows `<set>` for it and never the value it holds.
+#[shep_client::dogs::dog_config]
+#[derive(Clone, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct HookSpec {
     /// The command, run through `sh -c` inside the release. `None` is a
@@ -53,6 +57,7 @@ pub struct HookSpec {
     pub command: Option<String>,
     /// Environment for the hook, layered over `BASE_ENV` and the dog's
     /// `passthrough`. The dog's own three variables are set after it and win.
+    #[shep(secret)]
     pub env: BTreeMap<String, String>,
 }
 

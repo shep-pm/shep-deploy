@@ -34,7 +34,9 @@ const MOVED: [&str; 3] = ["branch", "watch", "verify"];
 
 /// How a freshly deployed release is judged healthy before traffic (or the
 /// old release) is torn down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Verify {
     /// Wait for the app's configured readiness probe to answer before
@@ -59,7 +61,9 @@ impl Verify {
 
 /// Whether this sheep is polled for new commits automatically, or only
 /// deployed on request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Watch {
     /// The poll loop deploys new commits on the tracked branch as they
@@ -247,13 +251,15 @@ impl State {
     pub fn adopt(&mut self, sheep: &str, settings: &Settings) -> Result<(), Error> {
         let Some(branch) = &settings.branch else {
             return Err(Error::Config(format!(
-                "{sheep}: `[app.dogs.deploy]` sets no `branch`, and a branch used to live in \
-                 `deploy.toml`. Set the one this sheep follows"
+                "{sheep}: nothing sets a `branch`, neither its `[app.dogs.deploy]` table nor the \
+                 dog's `[deploy]` section, and a branch used to live in `deploy.toml`. Set the \
+                 one this sheep follows, or the one every sheep follows"
             )));
         };
         if let Some(why) = branch_refusal(branch) {
             return Err(Error::Config(format!(
-                "{sheep}: `branch` in `[app.dogs.deploy]` {why}"
+                "{sheep}: `branch` {why}. Check its `[app.dogs.deploy]` table and the dog's \
+                 `[deploy]` section, either of which can set it"
             )));
         }
         self.branch.clone_from(branch);

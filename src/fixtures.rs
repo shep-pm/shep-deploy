@@ -80,6 +80,7 @@ pub fn dog_config() -> DogConfig {
         git_timeout: Duration::from_secs(60),
         build_timeout: Duration::from_secs(60),
         passthrough: Vec::new(),
+        shared: no_section(),
     }
 }
 
@@ -321,6 +322,15 @@ macro_rules! daemon_methods {
             $body
         }
     };
+    (@method sheep_dog_table, $body:expr) => {
+        async fn sheep_dog_table(
+            &self,
+            _sheep: &str,
+            _dog: &str,
+        ) -> Result<Option<shep_client::shep_core::config::DogTable>, crate::error::Error> {
+            $body
+        }
+    };
     (@method set_sheep_dog_settings, $body:expr) => {
         async fn set_sheep_dog_settings(
             &self,
@@ -437,7 +447,7 @@ impl Sheep {
     /// If the table no longer parses as [`Settings`].
     #[track_caller]
     pub fn settings(&self) -> Settings {
-        settings::from_app("web", &self.app.borrow()).expect("the table parses")
+        settings::from_app("web", &no_section(), &self.app.borrow()).expect("the table parses")
     }
 
     /// Sets `key` in the table to `value`, as an operator's pane would,
@@ -462,6 +472,11 @@ impl Sheep {
         Ok(self.app())
     }
 
+    /// The `sheep_dog_table` answer: `dog`'s table as the shepherd holds it.
+    pub fn table(&self, dog: &str) -> Option<DogTable> {
+        self.app.borrow().dogs.get(dog).cloned()
+    }
+
     /// The `set_sheep_dog_settings` answer: replaces `dog`'s whole table, as
     /// the shepherd does.
     pub fn replace(&self, dog: &str, table: DogTable) -> Result<(), Error> {
@@ -473,6 +488,10 @@ impl Sheep {
 impl Daemon for Sheep {
     async fn sheep_config(&self, _sheep: &str) -> Result<AppConfig, Error> {
         self.answer()
+    }
+
+    async fn sheep_dog_table(&self, _sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
+        Ok(self.table(dog))
     }
 
     async fn set_sheep_dog_settings(
@@ -487,6 +506,13 @@ impl Daemon for Sheep {
     crate::fixtures::daemon_methods!(unimplemented;
         dog_config, list_flock, describe, start, delete, reload, restart, save_roll, set_smit,
     );
+}
+
+/// The shared settings layer of a dog with no `[deploy]` section at all: what
+/// every test that is not about a dog-wide value passes to `settings`.
+#[must_use]
+pub fn no_section() -> DogTable {
+    DogTable::from(serde_json::Map::new())
 }
 
 /// A bare throwaway directory, for tests that need a path rather than a
@@ -582,8 +608,8 @@ impl Daemon for Sections {
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        list_flock, describe, start, delete, reload, restart, save_roll, sheep_config,
-        set_sheep_dog_settings, set_smit,
+       list_flock, describe, start, delete, reload, restart, save_roll, sheep_config,
+       sheep_dog_table, set_sheep_dog_settings, set_smit,
     );
 }
 

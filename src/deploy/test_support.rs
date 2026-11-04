@@ -559,6 +559,9 @@ impl Daemon for Shepherd {
     ) -> Result<(), Error> {
         self.held.replace(dog, table)
     }
+    async fn sheep_dog_table(&self, _sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
+        Ok(self.held.table(dog))
+    }
     async fn describe(&self, sheep: &str) -> Result<Vec<ProcessInfo>, Error> {
         // `exists()` follows the link, and this one dangles on purpose,
         // so ask about the link itself or every poll plants it again.

@@ -92,7 +92,7 @@ mod window;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use shep_client::dogs::{DogIdentity, DogRuntime, Permission, Probe};
+use shep_client::dogs::{DogIdentity, DogRuntime, Permission, Probe, Serves};
 use shep_client::shep_core::paths::ShepPaths;
 use shep_client::{Client, LinkState, RECONNECT_MAX_DELAY};
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -119,7 +119,7 @@ fn main() -> ExitCode {
     // Answers shep's two probes and ends the process when this run is one of
     // them: `--version` with the version and the protocol number this binary
     // was compiled against, `--schema` with the JSON Schema of
-    // `config::Section`. It returns on every ordinary run.
+    // `settings::Settings`. It returns on every ordinary run.
     //
     // First, before the runtime is built and before anything is opened,
     // because that is the whole point of the call. `shep restart deploy`
@@ -163,7 +163,11 @@ fn main() -> ExitCode {
             true,
             "deletes the sheep a cutover replaces and sets their smit",
         ))
-        .answer::<config::Section>();
+        // The dog's `[deploy]` section is the value for every sheep, but a
+        // sheep only takes part once it carries a table of its own, which is
+        // what `init` gives it. `sheep_settings` reads the same value back.
+        .serves(Serves::OptedIn)
+        .answer::<settings::Settings>();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -509,9 +513,11 @@ async fn deploy_once(sheep: &str) -> Result<u8, Error> {
 
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
-    let (mut state, ..) = settings::adopted(&daemon, &tree).await?;
-
+    // The dog's section first: it is the layer each sheep's own table is put
+    // over, so the settings cannot be read without it.
     let config = config::read(&daemon).await?;
+    let (mut state, ..) = settings::adopted(&daemon, &tree, &config.shared).await?;
+
     let outcome = deploy::deploy(&daemon, &tree, &mut state, &config).await?;
     Ok(report(sheep, &state, &outcome))
 }
@@ -541,9 +547,9 @@ async fn promote_once(sheep: &str) -> Result<u8, Error> {
 
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
-    let (mut state, ..) = settings::adopted(&daemon, &tree).await?;
-
     let config = config::read(&daemon).await?;
+    let (mut state, ..) = settings::adopted(&daemon, &tree, &config.shared).await?;
+
     let outcome = stage::promote(&daemon, &tree, &mut state, &config).await?;
     Ok(report(sheep, &state, &outcome))
 }
@@ -562,8 +568,8 @@ async fn stage_once(sheep: &str) -> Result<u8, Error> {
 
     let client = Client::connect(&socket()?).await?;
     let daemon = Live::command(client);
-    let (mut state, ..) = settings::adopted(&daemon, &tree).await?;
     let config = config::read(&daemon).await?;
+    let (mut state, ..) = settings::adopted(&daemon, &tree, &config.shared).await?;
     match stage::stage(&daemon, &tree, &mut state, &config).await? {
         Staged::Built { sha } => println!(
             "{sheep} staged {sha}, still deployed at {}",
@@ -705,7 +711,8 @@ async fn set_watch(sheep: &str, mode: &str) -> Result<u8, Error> {
     // Both the watch before and the record after come back from the write:
     // `set_watch` reads immediately before writing, and a read made here
     // would be the older copy the "was already" line must not be true of.
-    let (was, state) = deploy::set_watch(&daemon, &tree, watch).await?;
+    let config = config::read(&daemon).await?;
+    let (was, state) = deploy::set_watch(&daemon, &tree, watch, &config.shared).await?;
 
     if was == watch {
         println!("{sheep} was already watch = {}", named(watch));
@@ -730,7 +737,9 @@ async fn set_watch(sheep: &str, mode: &str) -> Result<u8, Error> {
 async fn branch_once(sheep: &str, name: &str) -> Result<u8, Error> {
     let tree = Tree::for_sheep(&shep_home()?, sheep);
     let client = Client::connect(&socket()?).await?;
-    retarget::branch_once(&Live::command(client), &tree, name).await
+    let daemon = Live::command(client);
+    let config = config::read(&daemon).await?;
+    retarget::branch_once(&daemon, &tree, name, &config.shared).await
 }
 
 /// `$SHEP_HOME`, absolute.

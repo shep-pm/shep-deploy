@@ -41,7 +41,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use shep_client::RequestError;
-use shep_client::shep_core::config::AppConfig;
+use shep_client::shep_core::config::{AppConfig, DogTable};
 use shep_client::shep_core::protocol::{ProcessInfo, RpcError, RpcErrorCode};
 use shep_client::shep_core::status::ProcStatus;
 use tempfile::TempDir;
@@ -155,6 +155,17 @@ impl Ready {
             .borrow_mut()
             .insert(sheep.to_owned(), table.to_owned());
     }
+
+    /// The TOML of `sheep`'s table: its own if it has one, and `BASE_TABLE`
+    /// plus `extra` otherwise. Both requests read the same sheep, so neither
+    /// can disagree with the other.
+    fn table(&self, sheep: &str) -> String {
+        self.tables
+            .borrow()
+            .get(sheep)
+            .cloned()
+            .unwrap_or_else(|| format!("{BASE_TABLE}{}", self.extra))
+    }
 }
 
 impl Daemon for Ready {
@@ -170,13 +181,10 @@ impl Daemon for Ready {
         Ok(())
     }
     async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
-        let table = self
-            .tables
-            .borrow()
-            .get(sheep)
-            .cloned()
-            .unwrap_or_else(|| format!("{BASE_TABLE}{}", self.extra));
-        Ok(fixtures::gated_app(sheep, &table))
+        Ok(fixtures::gated_app(sheep, &self.table(sheep)))
+    }
+    async fn sheep_dog_table(&self, sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
+        Ok(self.sheep_config(sheep).await?.dogs.get(dog).cloned())
     }
     async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), Error> {
         Ok(())
@@ -241,12 +249,15 @@ impl Daemon for Counting {
     async fn sheep_config(&self, sheep: &str) -> Result<AppConfig, Error> {
         Ok(fixtures::gated_app(sheep, BASE_TABLE))
     }
+    async fn sheep_dog_table(&self, sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
+        Ok(self.sheep_config(sheep).await?.dogs.get(dog).cloned())
+    }
     async fn set_smit(&self, _sheep: &str, _text: &str) -> Result<(), Error> {
         Ok(())
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
-        dog_config, list_flock, start, delete, reload, restart, save_roll, set_sheep_dog_settings,
+       dog_config, list_flock, start, delete, reload, restart, save_roll, set_sheep_dog_settings,
     );
 }
 

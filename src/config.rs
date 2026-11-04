@@ -1,14 +1,15 @@
-//! The dog's own `[dog.<name>]` section: how often to poll, and how many
-//! releases to keep.
+//! The dog-wide half of the dog's settings: what `[deploy]` in `dogs.toml`
+//! says about polling, timeouts, retention, and what a build may inherit.
 //!
-//! Deliberately the only two settings here, and deliberately nothing
-//! per-target. Per-target state lives in the deploy tree's own
-//! `deploy.toml` (see [`crate::state`]) because keying it to the dog's name
-//! means renaming or re-adopting the dog destroys the record of every
-//! deployment it manages, and those are unrelated things.
+//! [`crate::settings::Settings`] is the whole settings type and is read at two
+//! levels; this module is the half of it a sheep cannot set for itself, held
+//! once, validated, and passed to every deploy. The per-sheep half is layered
+//! onto each sheep's own table there rather than here, because a value shared
+//! by every sheep and a value one sheep overrides are read differently: one
+//! once per tick, the other once per target.
 //!
-//! Both values are refused rather than clamped when they name something
-//! that cannot work. That is the same choice
+//! Every value here is refused rather than clamped when it names something that
+//! cannot work. That is the same choice
 //! [`crate::shared::shepignore::shepignore_patterns`] makes about a glob and
 //! [`crate::deploy`] makes about an ungated `probed` target: a setting that
 //! silently does something other than what it says is a setting an operator
@@ -16,11 +17,12 @@
 
 use std::time::Duration;
 
-use serde::Deserialize;
+use shep_client::shep_core::config::DogTable;
 use shep_client::shep_core::values::UpDuration;
 
 use crate::daemon::{Daemon, adopted_name};
 use crate::error::Error;
+use crate::settings::{self, Settings};
 
 /// How often the poll loop looks for new commits, absent a config saying
 /// otherwise.
@@ -29,10 +31,10 @@ use crate::error::Error;
 /// for a single host, and it needs no inbound port, no HMAC verification
 /// and no public exposure, which is the whole argument for polling over
 /// webhooks at this scale.
-const DEFAULT_INTERVAL: UpDuration = UpDuration::from_millis(30_000);
+pub(crate) const DEFAULT_INTERVAL: UpDuration = UpDuration::from_millis(30_000);
 
 /// How many releases retention keeps, absent a config saying otherwise.
-const DEFAULT_RETENTION: usize = 5;
+pub(crate) const DEFAULT_RETENTION: usize = 5;
 
 /// How long a single git subprocess may run before it is abandoned, absent a
 /// config saying otherwise.
@@ -46,7 +48,7 @@ const DEFAULT_RETENTION: usize = 5;
 /// Five rather than something tighter because a cold clone of a large
 /// repository legitimately runs minutes, and failing honest work is worse
 /// than a late failure on a remote that was never going to answer.
-const DEFAULT_GIT_TIMEOUT: UpDuration = UpDuration::from_millis(300_000);
+pub(crate) const DEFAULT_GIT_TIMEOUT: UpDuration = UpDuration::from_millis(300_000);
 
 /// How long a build, or a release hook, may run before it is abandoned.
 ///
@@ -61,13 +63,13 @@ const DEFAULT_GIT_TIMEOUT: UpDuration = UpDuration::from_millis(300_000);
 /// holds the loop forever: no other target deploys, no smit refreshes, and
 /// nothing is logged, because nothing has failed. That is exactly the shape
 /// `git_timeout` was added for, one subprocess over.
-const DEFAULT_BUILD_TIMEOUT: UpDuration = UpDuration::from_millis(3_600_000);
+pub(crate) const DEFAULT_BUILD_TIMEOUT: UpDuration = UpDuration::from_millis(3_600_000);
 
 /// The fewest releases a target can keep and still be able to roll back.
 ///
 /// Two: the one that is live, and the one before it. Retention keeps the
 /// newest N, so N of one prunes the rollback target.
-const MINIMUM_RETENTION: usize = 2;
+pub(crate) const MINIMUM_RETENTION: usize = 2;
 
 /// The shortest interval, git timeout or build timeout accepted.
 ///
@@ -77,18 +79,19 @@ const MINIMUM_RETENTION: usize = 2;
 /// thirty times a second, which is the exact harm the zero refusal below
 /// names, one keystroke away. Anything under a second is that mistake and
 /// not a setting anybody meant.
-const MINIMUM_DURATION: Duration = Duration::from_secs(1);
+pub(crate) const MINIMUM_DURATION: Duration = Duration::from_secs(1);
 
-/// The `[dog.<name>]` section, parsed.
+/// The dog-wide half of `[deploy]`, parsed and validated, plus the rest of the
+/// section as the layer every sheep's own table is put over.
 ///
-/// `Debug` is derived: a poll interval and a count are not secrets, and
-/// unlike the raw section text this type never holds the whole table. The
-/// raw text is a different matter and `crate::daemon::named` already
-/// refuses to print it, because a `[dog.<name>]` section routinely carries
-/// webhook credentials for other dogs.
+/// `Debug` is derived: a poll interval and a count are not secrets, and the
+/// table prints its key count and never a value, because a hook's `env` in a
+/// section is a credential. The raw section text is a different matter and
+/// `crate::daemon::named` already refuses to print it, because a dog's section
+/// in `dogs.toml` routinely carries webhook credentials for other dogs.
 ///
-/// Not `Copy`: `passthrough` is a `Vec`. Cloning a config once per tick is
-/// not a cost worth designing around.
+/// Not `Copy`: `passthrough` is a `Vec`. Cloning a config once per tick is not a
+/// cost worth designing around.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DogConfig {
     /// How long the poll loop sleeps between ticks.
@@ -112,104 +115,18 @@ pub struct DogConfig {
     /// dog's own environment is opted into here by name and is visible in
     /// `dogs.toml` rather than inherited invisibly.
     pub passthrough: Vec<String>,
-}
-
-/// The `[deploy]` section as an operator types it, kept separate from
-/// [`DogConfig`] so the validated type cannot be constructed without going
-/// through [`DogConfig::parse`].
-///
-/// Also the type shep asks this binary about. `crate::main` hands it to
-/// `shep_client::dogs::probe`, which answers `--schema` with the JSON
-/// Schema `schemars` derives from it, and `shep lookout`'s settings pane
-/// draws a form from that answer. Two consequences worth knowing before
-/// editing this type:
-///
-/// - **The doc comment on each field below is what an operator reads** in
-///   that pane, so they are written to be read there rather than here.
-///   The reasoning about why a value is what it is stays on [`DogConfig`],
-///   which is the type this crate's own code passes around.
-/// - **The field names are the section's keys**, so renaming one is a
-///   breaking change to a hand-edited file whatever `deny_unknown_fields`
-///   is doing.
-///
-/// No field carries `#[shep(secret)]`, and none should: an interval, a
-/// count and a list of variable NAMES are not credentials. `passthrough`
-/// is the one worth pausing on, and it names variables rather than
-/// carrying their values - the values stay in the dog's environment and
-/// never enter this file. The attribute is here all the same, because
-/// `dogs::probe` is bounded on the trait it implements, so a config type
-/// with nothing to mark still needs it for shep to have a schema to ask
-/// for at all. It is also why `Debug` is derived rather than hand-written
-/// to redact something (IR-41): there is nothing here to redact.
-///
-/// The attribute goes above the derives because it rewrites the fields it
-/// marks, and `JsonSchema` expanding first would render them unmarked. It
-/// refuses the wrong order only when a field really carries the mark, so
-/// here the order is convention the compiler has nothing to check.
-#[shep_client::dogs::dog_config]
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-// `rename` sets the root schema's title, which the settings pane heads its
-// form with. `Section` alone would name this crate's Rust type at an
-// operator who is looking at a section of a TOML file.
-#[schemars(rename = "deploy")]
-// `description` overrides the doc comment above, which schemars would
-// otherwise publish verbatim as the section's description: that text is
-// addressed to whoever edits this file, and it would arrive in the settings
-// pane as several paragraphs about Rust types. The field docs need no such
-// override - those were written for the pane in the first place.
-#[schemars(
-    description = "How the deploy dog polls, how long it lets git and a build run, and how many \
-                   releases it keeps. Every target this dog manages shares these; what to deploy \
-                   and where lives in each target's own deploy.toml."
-)]
-pub struct Section {
-    /// How often to look for new commits, for example `"30s"`. A bare
-    /// number is MILLISECONDS, so `30` is thirty milliseconds and not
-    /// thirty seconds. At least one second.
-    interval: UpDuration,
-    /// How many of the newest releases to keep per target. The live release
-    /// and the one named in the target's `deploy.toml` are kept whatever
-    /// their age, so a target can hold up to two more than this. At least
-    /// two, since a rollback needs somewhere to go back to.
-    // The floor `DogConfig::parse` refuses below, stated to the pane as
-    // well so a section can be rejected while it is being typed rather
-    // than at the next startup.
-    #[schemars(range(min = 2))]
-    retention: usize,
-    /// How long any single git command may run before it is abandoned, for
-    /// example `"5m"`. It bounds a remote that stops answering; a cold
-    /// clone of a large repository legitimately runs minutes. At least one
-    /// second.
-    git_timeout: UpDuration,
-    /// How long a build, or a release hook, may run before it is abandoned,
-    /// for example `"1h"`. It exists to turn a build that will never finish
-    /// into an ordinary per-target failure, not to put a schedule on honest
-    /// work, so it is set far longer than any build it is meant to bound. At
-    /// least one second.
-    build_timeout: UpDuration,
-    /// Environment variables to copy from this dog's own environment into
-    /// a build, by name. A build otherwise starts from a cleared
-    /// environment plus a small fixed set, so anything a build needs from
-    /// the dog is named here and is visible in this file rather than
-    /// inherited invisibly. Names, never values.
-    passthrough: Vec<String>,
-}
-
-impl Default for Section {
-    fn default() -> Self {
-        Self {
-            interval: DEFAULT_INTERVAL,
-            retention: DEFAULT_RETENTION,
-            git_timeout: DEFAULT_GIT_TIMEOUT,
-            build_timeout: DEFAULT_BUILD_TIMEOUT,
-            passthrough: Vec::new(),
-        }
-    }
+    /// The section's keys a sheep may set for itself, as the table each sheep's
+    /// own is layered over. Its dog-wide keys are taken out, so nothing here
+    /// can hand a sheep a copy of a value that was validated once for the dog.
+    ///
+    /// Held as a table rather than as `Settings` because the merge is a table
+    /// merge: a sheep's `[release]` table adds to the section's key by key, and
+    /// a struct cannot say that.
+    pub shared: DogTable,
 }
 
 impl DogConfig {
-    /// Parses a `[dog.<name>]` section's body.
+    /// Parses `[deploy]`'s body.
     ///
     /// An empty string is the ordinary case, not an edge one:
     /// [`Daemon::dog_config`] answers an absent section that way, and a dog
@@ -234,8 +151,10 @@ impl DogConfig {
     /// replaced by [`withheld`]'s, and a `passthrough` entry is named by its
     /// position.
     pub fn parse(toml: &str) -> Result<Self, Error> {
-        let raw: Section =
-            toml::from_str(toml).map_err(|source| Error::Config(withheld(toml, &source)))?;
+        let raw: Settings = as_settings(toml)?;
+        // Read again as a table rather than rebuilt out of `raw`: `Settings`
+        // serializes nothing, and a hook's `env` is not something to serialize.
+        let shared = settings::shared(as_table(toml)?);
 
         if raw.retention < MINIMUM_RETENTION {
             return Err(Error::Config(format!(
@@ -293,8 +212,19 @@ impl DogConfig {
             git_timeout,
             build_timeout,
             passthrough: raw.passthrough,
+            shared,
         })
     }
+}
+
+/// `[deploy]`'s body as the settings type, refused without quoting it.
+fn as_settings(text: &str) -> Result<Settings, Error> {
+    toml::from_str(text).map_err(|source| Error::Config(withheld(text, &source)))
+}
+
+/// The same body as a table, which is what a sheep's own is layered onto.
+fn as_table(text: &str) -> Result<DogTable, Error> {
+    toml::from_str(text).map_err(|source| Error::Config(withheld(text, &source)))
 }
 
 /// What to say about a section that would not parse, without saying any of
@@ -329,8 +259,8 @@ fn withheld(text: &str, source: &toml::de::Error) -> String {
         |key| format!("line {line_number}, key `{key}`"),
     );
     format!(
-        "[dog.<name>]: {at} is not valid here. The parser's detail is withheld because the \
-         section arrives with its secrets resolved"
+        "[deploy] in dogs.toml: {at} is not valid here. The parser's detail is withheld because \
+         the section arrives with its secrets resolved"
     )
 }
 
@@ -649,45 +579,6 @@ mod tests {
         }
     }
 
-    /// fails if the schema stops describing the keys `parse` accepts.
-    ///
-    /// The two come from one struct and cannot drift by accident, but they
-    /// can by edit: a `#[serde(rename)]` moves both together and a
-    /// `#[schemars(rename)]` moves only one. The consequence is specific
-    /// and quiet. `shep lookout`'s settings pane writes the section from
-    /// the schema's property names, and the section is
-    /// `deny_unknown_fields`, so a name only the schema knows produces a
-    /// `dogs.toml` this dog refuses at its next startup - written by shep's
-    /// own form, on a key the operator never typed.
-    #[test]
-    fn every_property_the_schema_publishes_is_a_key_the_parser_takes() {
-        let schema = shep_client::dogs::config_schema::<Section>();
-        let schema = schema.as_value();
-        let properties = schema
-            .get("properties")
-            .and_then(serde_json::Value::as_object)
-            .expect("a derived struct schema has properties");
-
-        assert_eq!(
-            properties.len(),
-            5,
-            "a property was added or removed without this test being read"
-        );
-        for name in properties.keys() {
-            // The value is deliberately one no field is required to accept:
-            // an unknown key is refused before any value is looked at, so
-            // whether this one type-checks is beside the point and only the
-            // `unknown field` half is asserted. `passthrough = []` really is
-            // valid, and a key that parses is a key the parser knows.
-            if let Err(err) = DogConfig::parse(&format!("{name} = []")) {
-                assert!(
-                    !err.to_string().contains("unknown field"),
-                    "the schema publishes `{name}`, which the parser does not know: {err}"
-                );
-            }
-        }
-    }
-
     /// fails if the floor the schema advertises stops being the floor the
     /// parser enforces. The pane refuses below `minimum` while the operator
     /// is typing; `parse` refuses below `MINIMUM_RETENTION` at startup. Two
@@ -695,7 +586,7 @@ mod tests {
     /// cheerfully writes a section the dog will not boot on.
     #[test]
     fn the_schemas_retention_floor_is_the_one_the_parser_enforces() {
-        let schema = shep_client::dogs::config_schema::<Section>();
+        let schema = shep_client::dogs::config_schema::<Settings>();
         let minimum = schema
             .as_value()
             .pointer("/properties/retention/minimum")
