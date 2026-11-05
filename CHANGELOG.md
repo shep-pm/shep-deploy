@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-05
+
+### Fixed
+
+- Ship the prebuilt binaries without Windows
+
+
 ## [0.7.1] - 2026-11-05
 
 ### Added
