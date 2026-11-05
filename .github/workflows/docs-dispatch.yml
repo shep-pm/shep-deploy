@@ -1,0 +1,20 @@
+name: docs dispatch
+# Asks shep's docs site to rebuild the README it reads from this crate's latest
+# full release. Publishing here does not push to shep's own docs.
+#
+# release-plz-release.yml creates the release with RELEASE_PLZ_TOKEN, so its
+# published event starts this workflow. A GITHUB_TOKEN release would not
+# trigger it because of GitHub's anti-recursion rule.
+on:
+  release:
+    types: [published]
+jobs:
+  docs-dispatch:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - run: gh workflow run pages.yml -R shep-pm/shep
+        env:
+          GH_TOKEN: ${{ secrets.SHEP_PAGES_DISPATCH_TOKEN }}
