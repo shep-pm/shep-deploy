@@ -741,7 +741,8 @@ Unix only. This is deliberate, not a gap waiting to be filled by accident: the
 deploy model is `rename(2)` over a symlink, the build's privilege drop is a uid
 and a gid, and both are Unix concepts the code uses directly rather than
 through a portability layer. Building on Windows fails with one sentence saying
-so. Windows support is planned and will be scoped on its own.
+so. Windows support is planned and will be scoped on its own. Releases ship
+prebuilt binaries for Linux and macOS only.
 
 ## Status
 

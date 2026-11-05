@@ -112,10 +112,11 @@ jobs:
     permissions:
       contents: write
       actions: read
-    uses: shep-pm/shep/.github/workflows/dog-release.yml@1b249795a392c8bc4ab361f1cf33731fc079da8e
+    uses: shep-pm/shep/.github/workflows/dog-release.yml@a7f820b77087377bd254e919e859e611a2e90264
     with:
       package: shep-deploy
       tag: ${{ needs.release-plz-release.outputs.tag }}
+      skip-targets: x86_64-pc-windows-msvc
     secrets:
       index-token: ${{ secrets.SHEP_INDEX_TOKEN }}
 
@@ -130,8 +131,9 @@ jobs:
     permissions:
       contents: write
       actions: read
-    uses: shep-pm/shep/.github/workflows/dog-release.yml@1b249795a392c8bc4ab361f1cf33731fc079da8e
+    uses: shep-pm/shep/.github/workflows/dog-release.yml@a7f820b77087377bd254e919e859e611a2e90264
     with:
       package: shep-deploy
       tag: ${{ inputs.dry-run-tag }}
+      skip-targets: x86_64-pc-windows-msvc
       dry-run: true
