@@ -43,9 +43,26 @@
 //! `poll::a_supervised_dog_runs_a_sheeps_hook_with_its_secret_resolved` is the
 //! one that fails fast.
 
-use shep_client::dogs::{Permission, Probe, Serves};
+use shep_client::dogs::{Permission, Probe, Serves, Subcommand, Verb};
 
 use crate::settings;
+
+/// How `shep deploy` is described in `shep --help`, its help page and completion.
+fn verb() -> Verb {
+    let mut verb = Verb::new("Deploy a git branch and roll back if it does not come up")
+        .with_examples([
+            "shep deploy api",
+            "shep deploy init api --verify alive",
+            "shep deploy survey",
+        ]);
+    verb.subcommands = vec![
+        Subcommand::new("deploy", "deploy one sheep, or set how it is watched")
+            .with_usage("<sheep> [--watch auto|manual] [--branch <name>] [--stage] [--promote]"),
+        Subcommand::new("init", "take a sheep over").with_usage("<sheep> [--verify probed|alive]"),
+        Subcommand::new("survey", "report where every registered sheep stands"),
+    ];
+    verb
+}
 
 /// Answers shep's probes, and returns on every run that is not one of them.
 ///
@@ -70,6 +87,7 @@ use crate::settings;
 /// Ends the process with status 0 on a probe run, before `main` opens anything.
 pub(crate) fn declare() {
     Probe::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+        .verb(verb())
         .permission(Permission::new(
             "flock.read",
             true,
@@ -97,4 +115,17 @@ pub(crate) fn declare() {
         // what `init` gives it. `sheep_settings` reads the same value back.
         .serves(Serves::OptedIn)
         .answer::<settings::Settings>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_verb_fits_shep_help_and_names_each_operator_verb() {
+        let verb = verb();
+        assert!(verb.description.chars().count() <= 60);
+        let names: Vec<_> = verb.subcommands.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["deploy", "init", "survey"]);
+    }
 }

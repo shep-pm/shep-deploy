@@ -33,7 +33,7 @@ exclude = ["/docs/"]
 # impl lives, and 0.7.2's did not, so publishing the settings type's schema
 # at all meant naming shep-core directly, as a dependency whose only job was
 # to turn that feature on. See shep-pm/shep#198.
-shep-client = "0.24.0"
+shep-client = "0.24.2"
 # The `JsonSchema` derive on `settings::Settings`. Still needed, and not the
 # same question the line above answers: shep-client does not re-export
 # schemars, so a dog derives against its own. Version-matched to the one
