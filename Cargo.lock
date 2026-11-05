@@ -745,9 +745,9 @@ dependencies = [
 
 [[package]]
 name = "shep-channel"
-version = "0.24.0"
+version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47fdd532d3d6d58183c4da07181e866a9870e9df4985570bb0a0f9143fede5a3"
+checksum = "35e4831b9346e83bb7ea304f082586ab974caf84ac5304b7a7abd171ac891353"
 dependencies = [
  "serde",
  "serde_json",
@@ -756,9 +756,9 @@ dependencies = [
 
 [[package]]
 name = "shep-client"
-version = "0.24.0"
+version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66d0241721ffef82666eee4a9bec83c1354cb9ff7c53752e903e675622d2c0b1"
+checksum = "e5649e85712bfab1cf7ffb535e77de655cb6e37a7cc82111c45c07911bae5f0b"
 dependencies = [
  "futures-util",
  "schemars",
@@ -775,9 +775,9 @@ dependencies = [
 
 [[package]]
 name = "shep-core"
-version = "0.24.0"
+version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a46a3d59cfb615b5eccca21a0da1949c2b76f7d1dfa3e227cb19cd4e52c93baa"
+checksum = "42dea2836f42d2d043f1f28a346d3d230f7ab3ef797392e5ea9e5e7e50338f9a"
 dependencies = [
  "annotate-snippets",
  "anstyle",
@@ -822,9 +822,9 @@ dependencies = [
 
 [[package]]
 name = "shep-macros"
-version = "0.24.0"
+version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ce82cb625e54908547435f46580a02d63a59a1143ad5707b29ad36279665351"
+checksum = "3a545dddb95b3e81626921e7d7bf4be1afe7a3c3e506265f2a883a2c8ce30e1d"
 dependencies = [
  "proc-macro2",
  "quote 1.0.47",
