@@ -119,7 +119,8 @@ pub struct BuildSpec {
     /// The build command, run through `sh -c` inside the release. `None`
     /// is a no-op, not an error - see [`run`] for why.
     pub command: Option<String>,
-    /// Environment for the build, layered over [`env::BASE_ENV`] and the
+    /// Environment for the build, the sheep's `build_env` setting with its
+    /// secret references resolved, layered over [`env::BASE_ENV`] and the
     /// operator's `passthrough`. The build inherits nothing else from the
     /// process running this dog: see [`run`]. `CARGO_TARGET_DIR` is the one
     /// entry this crate's design gives special meaning to - see

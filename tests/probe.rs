@@ -105,6 +105,13 @@ fn the_schema_answer_is_json_describing_this_dogs_own_section() {
         Some(true),
         "a hook's env is where an operator keeps a password"
     );
+    assert_eq!(
+        schema
+            .pointer("/properties/build_env/x-shep-secret")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "build_env is where an operator keeps a database URL or an API key"
+    );
 }
 
 /// fails if the manifest stops asking for the permissions this dog uses.

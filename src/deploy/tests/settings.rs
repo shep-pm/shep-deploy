@@ -142,3 +142,76 @@ async fn no_table_deploys_with_no_build_and_no_hooks() {
         assert!(!release.join(ran).exists(), "{ran}");
     }
 }
+
+/// fails if a build gets a `{{secret:...}}` reference in `build_env` instead
+/// of the secret's value, or no `build_env` at all.
+///
+/// Through a whole deploy, because `deploy` reads its settings through
+/// [`crate::settings::held`], the request that resolves the table's references:
+/// a dog that took the table out of the stored config would build with
+/// `{{secret:SUPABASE_ANON}}` as the key.
+///
+/// Not paused, for the reason on `a_current_that_moved_during_the_build_is_not_swapped_over`.
+#[tokio::test]
+async fn a_build_env_secret_reaches_the_build_resolved() {
+    let mut fixture = fixture_with_previous_release();
+    let second = commit_on_origin(&fixture, "second.txt");
+    let daemon = Shepherd::ready()
+        .with_settings(
+            "command = 'printenv VITE_KEY > key.txt'\n\
+             build_env = { VITE_KEY = '{{secret:SUPABASE_ANON}}' }\n",
+        )
+        .resolving(&[("SUPABASE_ANON", "anon-key-value")]);
+
+    let outcome = deploy(
+        &daemon,
+        &fixture.tree,
+        &mut fixture.state,
+        &fixtures::dog_config(),
+    )
+    .await
+    .expect("completes");
+
+    assert_eq!(
+        outcome,
+        Outcome::Deployed {
+            sha: second.clone()
+        }
+    );
+    let seen =
+        fs::read_to_string(fixture.tree.release(&second).join("key.txt")).expect("the build ran");
+    assert_eq!(seen.trim(), "anon-key-value");
+}
+
+/// fails if a `build_env` reference to a secret the sheep's environment lacks
+/// still builds, or if the refusal quotes a value.
+///
+/// The refusal is the shepherd's, as in a real run: it cannot resolve the key,
+/// so the table request fails and the deploy never reaches the build. The
+/// secret that does exist is there so the test can see that no value, the
+/// resolved one or the reference's neighbour, turns up in the message.
+#[tokio::test]
+async fn a_build_env_secret_that_does_not_exist_refuses_the_deploy_naming_the_key() {
+    let mut fixture = fixture_with_previous_release();
+    let _second = commit_on_origin(&fixture, "second.txt");
+    let daemon = Shepherd::ready()
+        .with_settings(
+            "command = 'touch built'\n\
+             build_env = { PROD_DB_URL = '{{secret:MISSING_DB}}', \
+             OTHER = '{{secret:PRESENT}}' }\n",
+        )
+        .resolving(&[("PRESENT", "hunter2")]);
+
+    let err = deploy(
+        &daemon,
+        &fixture.tree,
+        &mut fixture.state,
+        &fixtures::dog_config(),
+    )
+    .await
+    .expect_err("refused");
+
+    let shown = err.to_string();
+    assert!(shown.contains("MISSING_DB"), "{shown}");
+    assert!(!shown.contains("hunter2"), "{shown}");
+}
