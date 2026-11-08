@@ -341,7 +341,12 @@ class rather than the instances.
   build over that replacement would then be skipped by the next attempt.
   `paths::release_sha` strips the key back off a directory name, which is why
   `deploy.toml` still stores a plain sha and why `deploy::reload::sha_of` and
-  `optin::prepare`'s repair-current branch call it. `<tree>/releases/` and
+  `optin::prepare`'s repair-current branch call it. A record names a sha and
+  never a build, so `deploy::rollback::another_build_of` reads it back off every
+  directory of that sha under `releases/`: change `command` or rotate a secret in
+  `build_env` and the path the settings name now was never created, while the
+  release the sheep was serving from sits there under its old key.
+  `<tree>/releases/` and
   `<tree>/complete/` are what a tree filled while its clone was its own; only
   `optin::clone::drop_unregistered_releases` sweeps them, and nothing removes
   those directories otherwise, because a live release may serve from one.

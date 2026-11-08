@@ -678,3 +678,87 @@ async fn a_swap_back_that_fails_reports_both_failures() {
     assert!(shown.contains("did not come up"), "{shown}");
     assert!(shown.contains("current.tmp"), "{shown}");
 }
+
+/// fails if the record's branch of a rollback looks the release up under the
+/// build key the settings name now. A record names a sha and never a build, and
+/// the directory holding that sha's release carries the key of the build that
+/// made it: rotate a secret in `build_env` and the path the settings name was
+/// never created, while the release the sheep was serving from sits on disk
+/// under its old name.
+#[tokio::test(start_paused = true)]
+async fn a_recorded_release_under_another_build_key_is_still_a_rollback_target() {
+    let mut fixture = fixture_with_previous_release();
+    let previous = fixture.state.deployed.clone().expect("a previous release");
+    let attempted = commit_on_origin(&fixture, "second.txt");
+    // The sheep's build changed since `previous` was built.
+    let daemon = Shepherd::never_ready().with_settings("build_env = { TOKEN = 'rotated' }\n");
+
+    // As a deploy killed between its swap and its record write leaves it:
+    // `current` on the attempted release, the record still on `previous`.
+    swap::point_at(
+        &fixture.tree.current(),
+        &fixture.release_of(&daemon, &attempted),
+    )
+    .expect("point current at the attempted release");
+
+    let outcome = deploy(
+        &daemon,
+        &fixture.tree,
+        &mut fixture.state,
+        &fixtures::dog_config(),
+    )
+    .await
+    .expect("the recorded release is on disk, under the key that built it");
+
+    assert!(
+        matches!(&outcome, Outcome::RolledBack { to, .. } if *to == previous),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        swap::resolve(&fixture.tree.current()).unwrap(),
+        Some(fixture.release(&previous)),
+        "current goes back to the release that is there, not to the one the new settings name"
+    );
+    assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
+}
+
+/// fails if a rollback cannot find the release a target built before releases
+/// moved into the repository directory. Those sit as bare shas under
+/// `<tree>/releases/`, and nothing removes them while a `current` may be serving
+/// from one, so a record naming one still has a release on disk.
+#[tokio::test(start_paused = true)]
+async fn a_recorded_release_from_before_the_shared_layout_is_still_a_rollback_target() {
+    let mut fixture = fixture_before_any_release();
+    let previous = crate::git::remote_head(&fixture.tree.git(), "main").expect("head");
+    let before = fixture.tree.superseded_releases().join(&previous);
+    crate::git::worktree_add(&fixture.tree.git(), &before, &previous).expect("the old release");
+    swap::point_at(&fixture.tree.current(), &before).expect("current");
+    fixture.state.deployed = Some(previous.clone());
+    fixture
+        .state
+        .write(&fixture.tree.state_file())
+        .expect("deploy.toml");
+
+    let attempted = commit_on_origin(&fixture, "second.txt");
+    swap::point_at(&fixture.tree.current(), &fixture.release(&attempted))
+        .expect("point current at the attempted release");
+
+    let outcome = deploy(
+        &Shepherd::never_ready(),
+        &fixture.tree,
+        &mut fixture.state,
+        &fixtures::dog_config(),
+    )
+    .await
+    .expect("the release the record means is on disk");
+
+    assert!(
+        matches!(&outcome, Outcome::RolledBack { to, .. } if *to == previous),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        swap::resolve(&fixture.tree.current()).unwrap(),
+        Some(before)
+    );
+    assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
+}

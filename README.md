@@ -468,7 +468,9 @@ record's `deployed` or `staged`, or from the `current.claim` file a deploy write
 under that turn for the window between letting go of it and swapping. A record
 names a sha and no build key, so it spares every build variant of that sha: a
 stale variant costs disk, and a live one removed costs a running service its
-working directory. The number itself is
+working directory. A rollback reads a recorded sha the same way, and takes the
+newest directory of it under `releases/` rather than only the one the current
+settings name. The number itself is
 whichever deploying sheep's settings say, so two sheep of one repository with
 different `retention` prune the same directory to different depths. The clone
 and the build cache beside it are reclaimed the same way, and never while any
