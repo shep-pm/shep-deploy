@@ -15,6 +15,7 @@
 //! `FromCheckout` and `to_link` share this file because the type's field is
 //! private, and field privacy is per module.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -223,15 +224,12 @@ pub fn link_into(release: &Path, checkout: &Path, paths: &FromCheckout) -> Resul
 /// than a mode) collides in `link_into` where the error can name the fix,
 /// rather than here where it cannot.
 ///
-/// A release that already has a `target` path is left exactly as it is and
-/// gets no cache, with one exception: a link naming `superseded`, the cache
-/// directory this dog kept in the tree before the cache moved to
-/// [`crate::paths::Repo::cache`]. That link is this dog's own doing, and
-/// leaving it is not neutral. `checkout_release` reuses a finished checkout,
-/// so the first release built after the upgrade arrives with the old link
-/// still on it while the build is confined to the new cache, and every
-/// artifact of the form `target/release/app` is then refused as landing
-/// outside both roots. A release that used to deploy stops deploying.
+/// A `target` path already in the release is left exactly as it is and gets no
+/// cache, with one exception: a link this dog made at one of the two cache
+/// directories it has linked at. One at `superseded`, the per-tree cache the
+/// cache moved out of, is repointed at `cache_target`. One at `cache_target`
+/// keeps its link and gets the directory back if the directory is gone. See
+/// [`existing_target`] for what counts as this dog's own.
 ///
 /// A `target` the repository itself ships is still left alone, directory or
 /// link. Overruling it would be this crate deciding the repository's layout
@@ -243,33 +241,37 @@ pub fn link_into(release: &Path, checkout: &Path, paths: &FromCheckout) -> Resul
 /// link, if it cannot be read, removed, or made.
 pub fn link_cache(release: &Path, cache_target: &Path, superseded: &Path) -> Result<(), Error> {
     let link = release.join("target");
-    if existing_target(&link, cache_target, superseded)? == Target::Leave {
-        return Ok(());
+    match existing_target(&link, cache_target, superseded)? {
+        Target::Leave => Ok(()),
+        Target::Keep => fs::create_dir_all(cache_target).map_err(Error::at(cache_target)),
+        Target::Relink => {
+            fs::create_dir_all(cache_target).map_err(Error::at(cache_target))?;
+            symlink(cache_target, &link).map_err(Error::at(link))
+        }
     }
-
-    fs::create_dir_all(cache_target).map_err(Error::at(cache_target))?;
-
-    symlink(cache_target, &link).map_err(Error::at(link))
 }
 
 /// What [`link_cache`] does with whatever is already at `release/target`.
 #[derive(Debug, PartialEq, Eq)]
 enum Target {
-    /// Nothing is there, or what is there is this dog's own link at the cache
-    /// it used before the cache moved per repository. Both end with a link at
+    /// Nothing is there, or what is there is this dog's link at the cache it
+    /// used before the cache moved per repository. Both end with a link at
     /// `cache_target`.
     Relink,
-    /// A directory or file the release ships, a link naming some other place,
-    /// or already this dog's link at `cache_target`.
+    /// This dog's link at `cache_target`, kept exactly as it is. The directory
+    /// it names is made again if it is gone, which is what un-dangles it.
+    Keep,
+    /// A directory or file the release ships, or a link naming some other place.
     Leave,
 }
 
 /// What is already at `link`, decided as [`Target`].
 ///
-/// `superseded` is the only thing that decides it: a link naming a place
-/// outside it is somebody else's, and this crate does not move what it did not
-/// make. Every path is compared by [`resolved`], because the dog and the daemon
-/// can reach one directory through different spellings of `$SHEP_HOME`.
+/// A link is this dog's own when it names `target` directly inside one of the
+/// two cache directories this crate has linked at. The parent decides it, not
+/// the whole target: a link whose cache is gone canonicalizes to nothing, and
+/// two spellings of one directory only agree one level up. Anything else is
+/// somebody else's, and this crate does not move what it did not make.
 fn existing_target(link: &Path, cache_target: &Path, superseded: &Path) -> Result<Target, Error> {
     // `symlink_metadata` answers for a directory, a file, a live link and a
     // dangling one alike, which is every "something is already there".
@@ -282,25 +284,24 @@ fn existing_target(link: &Path, cache_target: &Path, superseded: &Path) -> Resul
         return Ok(Target::Leave);
     }
     let named = fs::read_link(link).map_err(Error::at(link))?;
-    if resolved(&named) == resolved(cache_target) {
-        return Ok(Target::Leave);
+    if names_the_cache(&named, cache_target.parent().unwrap_or(cache_target)) {
+        return Ok(Target::Keep);
     }
-    // The link an earlier version of this dog made named `<tree>/cache/target`
-    // and nothing else, so what identifies it is the directory its own parent
-    // resolves to. Comparing the parent rather than the whole target is what
-    // keeps a dangling one recognisable: neither it nor its cache canonicalizes,
-    // and two spellings of one directory only agree one level up.
-    let superseded = resolved(superseded);
-    let made_here = named
-        .parent()
-        .is_some_and(|parent| resolved(parent) == superseded);
-    if !made_here {
-        return Ok(Target::Leave);
+    if names_the_cache(&named, superseded) {
+        // The old link is gone before the new one is made, so the two are never
+        // both at the path, and `symlink` cannot fail with `EEXIST`.
+        fs::remove_file(link).map_err(Error::at(link))?;
+        return Ok(Target::Relink);
     }
-    // The old link is gone before the new one is made, so the two are never
-    // both at the path, and `symlink` below cannot fail with `EEXIST`.
-    fs::remove_file(link).map_err(Error::at(link))?;
-    Ok(Target::Relink)
+    Ok(Target::Leave)
+}
+
+/// Whether `named` is the path this crate links at inside cache directory `dir`.
+fn names_the_cache(named: &Path, dir: &Path) -> bool {
+    named.file_name() == Some(OsStr::new("target"))
+        && named
+            .parent()
+            .is_some_and(|parent| resolved(parent) == resolved(dir))
 }
 
 #[cfg(test)]
@@ -607,6 +608,35 @@ mod tests {
         assert!(
             cache.join("artifact").is_file(),
             "the warm cache is not thrown away"
+        );
+    }
+
+    /// fails if a link at the cache is left dangling because the cache directory
+    /// is gone. `crate::retention::release_clone` removes a whole repository
+    /// directory, cache included, and so does an operator's own `rm -rf`. The next
+    /// build of a release that survived writes through a link at nothing, cargo's
+    /// own `create_dir_all("target/...")` fails on it, and every retry of that
+    /// release fails until someone recreates the directory by hand.
+    #[test]
+    fn a_target_link_at_a_cache_that_is_gone_gets_the_cache_back() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (release, cache) = (
+            root.path().join("deploy/web/releases/abc"),
+            root.path().join("deploy/repos/k/cache/target"),
+        );
+        fs::create_dir_all(&release).expect("release dir");
+        symlink(&cache, release.join("target")).expect("the link this dog made");
+
+        link_cache(&release, &cache, &superseded(root.path())).expect("makes the cache again");
+
+        assert!(cache.is_dir(), "the directory the link names exists again");
+        assert_eq!(
+            fs::read_link(release.join("target")).expect("still the same link"),
+            cache
+        );
+        assert!(
+            fs::canonicalize(release.join("target")).is_ok(),
+            "and the link resolves, so a build can write through it"
         );
     }
 
