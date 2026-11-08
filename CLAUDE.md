@@ -115,7 +115,8 @@ SHEP_BIN="$(command -v shep)" cargo test --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
 
-565 unit tests, 9 integration and 7 probe as of 2026-11-03, ~27s, ~32s and instant. The number moves with every task; treat it as a shape, not a checksum.
+565 unit tests, 9 integration and 7 probe as of 2026-11-03, ~27s, ~32s and instant.
+606 unit tests and ~45s as of 2026-11-08, after the shared-release slice. The number moves with every task; treat it as a shape, not a checksum.
 
 ### Commit subjects
 
@@ -131,7 +132,10 @@ git config core.hooksPath .githooks
 
 Binary crate, no library target. Thirty-one modules under `src/`, the big three
 being `deploy/` (the state machine, a directory), `optin/` (first cutover, a directory)
-and `poll/` (the dog's loop, with `report.rs` for what it says). `route.rs` holds `Route`, `route`, `deprecation` (the notice for `setup`, the old name of `init`) and `USAGE`, and `exit.rs`
+and `poll/` (the dog's loop, with `report.rs` for what it says). `paths/` is a
+directory too as of 2026-11-08, for the same reason `probe.rs` left `main.rs`:
+`paths.rs` reached 1027 lines, and `build_key.rs`, `repo.rs` and `tree.rs` are
+its three halves. `route.rs` holds `Route`, `route`, `deprecation` (the notice for `setup`, the old name of `init`) and `USAGE`, and `exit.rs`
 the exit-code mapping; both left `main.rs` to keep it under 800 lines. `probe.rs`
 holds what the dog declares to shep, the four permissions, `Serves::OptedIn` and the
 settings schema, and left it too on 2026-11-03, when `main.rs` reached 1002 lines and
@@ -275,12 +279,19 @@ class rather than the instances.
   migrates the old spelling only at boot. A test that writes the section
   after the shepherd is up has to write the new file, or the dog runs at its
   default interval. Cost the integration job on 2026-09-04.
-- **`retention` keeps the newest N, and spares two more by name.** The release
-  `current` points at and the one `deploy.toml` names are never removed,
-  whatever their age. In the ordinary case the live release is the newest, so
-  a target holds N directories; only after a deploy died between its swap and
-  its record write can it hold up to N + 2. README.md and the config doc said
-  "N besides the live one" until 2026-09-03; the code never did that.
+- **`retention` keeps the newest N of a repository's releases, and spares two
+  more by name.** Releases live under `repos/<key>/releases/`, shared by every
+  sheep that deploys that remote, so one sheep's prune sweeps directories other
+  sheep are serving from. `retention::spared` reads every tree under `deploy/`
+  before anything is removed: what each `current` resolves to, which spares that
+  exact directory name, and what each record names as `deployed` or `staged`,
+  which spares every build variant of that sha because a record carries no build
+  key (`State::releases_at` answers both halves). The release `current` points
+  at and the one `deploy.toml` names are never removed, whatever their age. In
+  the ordinary case the live release is the newest, so a target holds N
+  directories; only after a deploy died between its swap and its record write
+  can it hold up to N + 2. README.md and the config doc said "N besides the live
+  one" until 2026-09-03; the code never did that.
 - **`State::read` validates values, not only shape.** A sha has to be 40 (or
   64) hex characters, `remote` and `branch` cannot be empty or begin with `-`,
   `checkout` has to be absolute, and `origin_cwd`/`origin_script` come as a
@@ -304,6 +315,21 @@ class rather than the instances.
   `remote` is not the one its link was keyed by (`Tree::clone_serves`). Only
   `optin::clone::share_clone` migrates a tree that owns its clone, and only one
   with no record: `prepare` refuses a target, so the poll loop moves nothing.
+- **A release is the repository's, not the sheep's.** `Tree::release(remote, sha,
+  build)` is `deploy/repos/<key>/releases/<sha>-<build key>`, and its completion
+  marker is `repos/<key>/complete/<sha>-<build key>`. The key is
+  `BuildKey::of(command, user, build_env)` with length-prefixed fields, so a
+  sheep whose command, build `user` or resolved `build_env` differs gets a
+  directory of its own, and one whose three match lands a build another sheep
+  already paid for. A marker means checked out AND built: `checkout_release`
+  reuses a release only when the marker is a file and the directory is there,
+  and `mark_built` writes it after a successful build, inside the build turn.
+  `paths::release_sha` strips the key back off a directory name, which is why
+  `deploy.toml` still stores a plain sha and why `deploy::reload::sha_of` and
+  `optin::prepare`'s repair-current branch call it. `<tree>/releases/` and
+  `<tree>/complete/` are what a tree filled while its clone was its own; only
+  `optin::clone::drop_unregistered_releases` sweeps them, and nothing removes
+  those directories otherwise, because a live release may serve from one.
 - **The build cache is keyed by remote, not by sheep.** `Tree::cache_target(remote)`
   is `deploy/repos/<key>/cache/target`, the same `<key>` the clone is keyed by
   (`Tree::repo`), and `shared::link_cache` symlinks `release/target` there, so
@@ -314,7 +340,7 @@ class rather than the instances.
   each then copying out what the other left. `retention::release_clone` removes
   the clone, and the cache with it only when no other tree owns a clone with a
   record naming that remote (`another_tree_deploys`, which reads each record's
-  `remote` through `State::remote_at` and treats an unreadable one as a tree
+  `remote` through `State::releases_at` and treats an unreadable one as a tree
   that is deploying): a put-back sheep's link is gone and its record stays, so
   it keeps nothing, while a legacy tree that owns its clone keeps the cache its
   live `current/target` names. `ownership::hand_over` hands only the cache
@@ -333,9 +359,11 @@ class rather than the instances.
   link naming anywhere else, is left exactly where it is, and
   `build::contain::lands_within` is what covers where such a link walks. Nothing
   removes the superseded directory: a live release may still be serving from it.
-- **Never derive the markers directory from `Tree::completion("")`.** The
-  result has a trailing separator and its `parent()` is the tree root; a sweep
-  written that way removed `current`. `Tree::completions()` is the directory.
+- **Never derive the markers directory from a marker path.** `Repo::completions()`
+  is the directory `retention` sweeps. A name built by joining an empty sha
+  carries a trailing separator, and its `parent()` is the directory above the one
+  wanted, which for a tree root is the tree's parent. A sweep written that way
+  removed `current`.
 - **`deploy.toml` carries the pre-adoption `AppConfig` as `origin`.** It
   serialises as `[origin]` plus its sub-tables at the END of the file
   whatever the field's position, because this crate's `toml` hoists every
@@ -395,10 +423,11 @@ class rather than the instances.
   this tree's own clone is that one, so two sheep of one remote queue for the
   build turn, a tree that still owns its clone queues with them, and a reload
   never does. `deploy::attempt`, `stage::build_and_record` and `optin::prepare`
-  each take it after their fetch and drop it before their swap or their record
-  write; nothing holding it waits for a tree's, a record's or a clone's. A write
-  to the sheep's table
-  is one request and takes no lock. The
+  each take it after their fetch and hold it over the checkout AND the build,
+  because a shared release directory and a shared cache are both things two
+  sheep of one remote can be inside at once, and drop it before their swap or
+  their record write; nothing holding it waits for a tree's, a record's or a
+  clone's. A write to the sheep's table is one request and takes no lock. The
   cutover's promotion writes `watch = auto` to the table on the clean path
   only, over whatever `prepare` left there, so a `--watch manual` typed during
   `init` is overwritten and belongs after init returns.
