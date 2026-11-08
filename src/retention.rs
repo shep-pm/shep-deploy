@@ -56,7 +56,7 @@ use std::time::SystemTime;
 use crate::error::Error;
 use crate::paths::{self, Repo, Tree};
 use crate::state::State;
-use crate::{git, shared, swap};
+use crate::{git, lock, shared, swap};
 
 /// Removes every release of the repository `remote` names beyond the newest
 /// `keep`, and answers with the release names it removed.
@@ -84,6 +84,20 @@ pub fn prune(
     recorded: &[&str],
 ) -> Result<Vec<String>, Error> {
     let repo = tree.repo(remote);
+    // The repository build turn, held for the whole sweep. Without it this reads
+    // `deploy/` and removes directories with nothing synchronising the two, and a
+    // deploy that has let go of the turn but not yet swapped is holding a release
+    // no `current` names and no record names yet - exactly the one a `keep` count
+    // has no witness for. Holding the turn means a prune either runs before that
+    // deploy takes it, in which case the release it removes carries no completion
+    // marker either and the deploy checks out and builds afresh, or after its
+    // claim (see [`crate::swap::claim`]) is written, in which case the claim is a
+    // witness and the release is not a candidate.
+    //
+    // So a prune queues behind the repository's builds. It costs disk, not
+    // correctness, when one is skipped or delayed, and this module's own rule is
+    // that a prune never fails the deploy that triggered it.
+    let _building = lock::hold_build(&repo)?;
     let (releases, completions) = (repo.releases(), repo.completions());
     let spared = spared(tree.deploy_dir(), &repo, recorded)?;
 
@@ -226,6 +240,9 @@ fn spared(deploy: &Path, repo: &Repo, recorded: &[&str]) -> Result<Spared, Error
         if let Some(name) = serving(&root.join("current"), &releases) {
             spared.names.insert(name);
         }
+        if let Some(name) = claiming(&root.join("current"), &releases) {
+            spared.names.insert(name);
+        }
         let record = root.join("deploy.toml");
         if !record.is_file() {
             continue;
@@ -248,7 +265,23 @@ fn spared(deploy: &Path, repo: &Repo, recorded: &[&str]) -> Result<Spared, Error
 /// `current` pointing anywhere else - an operator's own checkout, say - is not
 /// this dog's release and spares nothing.
 fn serving(current: &Path, releases: &Path) -> Option<String> {
-    let named = shared::resolved(&swap::resolve(current).ok()??);
+    named_in(&shared::resolved(&swap::resolve(current).ok()??), releases)
+}
+
+/// The release directory name a tree claims it is about to serve, for the window
+/// between a deploy letting go of the repository build turn and repointing
+/// `current`. See [`crate::swap::claim`].
+///
+/// A claim that cannot be read is no claim, which is the same rule [`spared`]
+/// applies to a record it cannot read: the tree is asked nothing, and the tree
+/// whose own deploy is holding that release spares it by its `current` a moment
+/// later anyway.
+fn claiming(current: &Path, releases: &Path) -> Option<String> {
+    named_in(&shared::resolved(&swap::claimed(current)?), releases)
+}
+
+/// The file name of `named`, when its parent is `releases`.
+fn named_in(named: &Path, releases: &Path) -> Option<String> {
     let (name, parent) = (named.file_name()?, named.parent()?);
     shared::same_path(parent, releases).then(|| name.to_string_lossy().into_owned())
 }

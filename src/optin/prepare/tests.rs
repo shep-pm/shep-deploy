@@ -11,7 +11,7 @@ fn release_of(tree: &Tree, sha: &str) -> std::path::PathBuf {
     tree.release(
         &fixtures::state().remote,
         sha,
-        &fixtures::default_build_key(),
+        &fixtures::default_build_key(&fixtures::state().checkout),
     )
 }
 
@@ -175,7 +175,7 @@ async fn current_ends_up_on_a_release_carrying_the_shared_files() {
         prepared.tree.release(
             &prepared.state.remote,
             &prepared.sha,
-            &fixtures::default_build_key(),
+            &fixtures::default_build_key(&prepared.state.checkout),
         ),
     );
     assert_eq!(

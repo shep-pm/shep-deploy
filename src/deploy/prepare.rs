@@ -12,7 +12,7 @@ use crate::hook::Hooks;
 use crate::paths::{BuildKey, Tree};
 use crate::settings::Settings;
 use crate::state::Verify;
-use crate::{git, linkcheck, shared};
+use crate::{git, linkcheck, shared, swap};
 
 /// What [`stage_release`] hands its callers: the app to register, the build
 /// to run and the hooks to run after it (both from the sheep's
@@ -41,6 +41,12 @@ pub(crate) struct Staged {
     pub(crate) build: BuildKey,
     /// `release` was found carrying that marker, so its build can be skipped.
     pub(crate) reused: bool,
+    /// This tree's claim on `release`, held for as long as `Staged` is. See
+    /// [`crate::swap::claim`] for what it stops retention from doing. Bound by
+    /// name rather than by `..` wherever a caller destructures this and has to
+    /// hold the claim past the `Staged` itself, which is
+    /// [`crate::optin::prepare_with`].
+    pub(crate) claim: swap::Claim,
 }
 
 /// The key of the release `settings` builds `app`'s script into, and the three
@@ -49,10 +55,11 @@ fn staged_paths(
     tree: &Tree,
     remote: &str,
     sha: &str,
+    checkout: &Path,
     app: &AppConfig,
     settings: &Settings,
 ) -> (BuildKey, PathBuf, PathBuf, PathBuf) {
-    let build = settings.build_key(app.user.as_deref());
+    let build = settings.build_key(app.user.as_deref(), checkout);
     (
         build.clone(),
         tree.release(remote, sha, &build),
@@ -90,7 +97,11 @@ pub(crate) fn stage_release(
     app: &AppConfig,
     settings: &Settings,
 ) -> Result<Staged, Error> {
-    let (build, release, marker, cache) = staged_paths(tree, remote, sha, app, settings);
+    let (build, release, marker, cache) = staged_paths(tree, remote, sha, checkout, app, settings);
+    // Claimed before the release is touched, so a prune that has to queue behind
+    // the build turn this staging happens under cannot decide this release is
+    // unreferenced while this function is deciding to reuse it.
+    let claim = swap::claim(&tree.current(), &release)?;
     let reused = checkout_release(tree, remote, sha, &build)?;
     shared::link_cache(&release, &cache, &tree.superseded_cache())?;
     let linked = shared::to_link(checkout)?;
@@ -106,6 +117,7 @@ pub(crate) fn stage_release(
         marker,
         build,
         reused,
+        claim,
     };
     // Printed here rather than returned, as `build::root_warning` is: nothing
     // is refused, and `deploy` and `setup` both come through this function.
@@ -130,7 +142,8 @@ pub(crate) fn read_staged(
     app: &AppConfig,
     settings: &Settings,
 ) -> Result<Staged, Error> {
-    let (build, release, marker, cache) = staged_paths(tree, remote, sha, app, settings);
+    let (build, release, marker, cache) = staged_paths(tree, remote, sha, checkout, app, settings);
+    let claim = swap::claim(&tree.current(), &release)?;
     let linked = shared::to_link(checkout)?;
     shared::link_into(&release, checkout, &linked)?;
     Ok(Staged {
@@ -143,6 +156,7 @@ pub(crate) fn read_staged(
         marker,
         build,
         reused: true,
+        claim,
     })
 }
 
@@ -202,6 +216,19 @@ fn checkout_release(tree: &Tree, remote: &str, sha: &str, build: &BuildKey) -> R
 
     if release.exists() {
         fs::remove_dir_all(&release).map_err(Error::at(&release))?;
+    }
+    // The marker is the release's, not the directory's, and a release removed by
+    // an operator's own `rm -rf` or by another sheep's prune leaves it where it
+    // was. Left in place it vouches for the checkout about to be made: this
+    // function would answer `false`, the build would run, and if that build then
+    // failed or was interrupted the directory and the stale marker together
+    // would read as a finished release to the next attempt, which would skip the
+    // build and land whatever the half-finished one left. Removing it first means
+    // a marker is only ever written by the build that just succeeded.
+    match fs::remove_file(&marker) {
+        Ok(()) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => return Err(Error::at(&marker)(source)),
     }
     // Removing the directory is not enough on its own: git still has the
     // path registered and refuses the next add with "missing but already

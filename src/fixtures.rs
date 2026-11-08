@@ -408,24 +408,27 @@ pub fn gated_app(sheep: &str, settings: &str) -> AppConfig {
     .expect("a gated app")
 }
 
-/// The [`crate::paths::BuildKey`] a deploy builds `sheep`'s releases into.
+/// The [`crate::paths::BuildKey`] a deploy builds `sheep`'s releases into, from
+/// `checkout`.
 ///
 /// A release directory is named `<sha>-<key>`, so a test that asserts on where
-/// a build landed has to know the key. It is a fact about the sheep's settings
-/// and its `user`, never about the tree, and this is the one place that reads
-/// them the way a deploy does: the resolved table, and the app's own `user`.
+/// a build landed has to know the key. It is a fact about the sheep's settings,
+/// its `user` and the checkout its record names, never about the tree, and this
+/// is the one place that reads them the way a deploy does: the resolved table,
+/// the app's own `user`, and `State::checkout`.
 #[must_use]
-pub fn build_key_of(sheep: &Sheep) -> crate::paths::BuildKey {
+pub fn build_key_of(sheep: &Sheep, checkout: &Path) -> crate::paths::BuildKey {
     sheep
         .resolved_settings()
-        .build_key(sheep.app().user.as_deref())
+        .build_key(sheep.app().user.as_deref(), checkout)
 }
 
-/// [`build_key_of`] for a sheep that sets nothing at all: no command, no build
-/// environment, no `user`. The key every fixture here builds its releases with.
+/// The key a sheep that sets nothing at all builds `sha`'s release into from
+/// `checkout`: no command, no build environment, no `user`. The key every
+/// fixture here builds its releases with.
 #[must_use]
-pub fn default_build_key() -> crate::paths::BuildKey {
-    build_key_of(&Sheep::holding(app_named("web")))
+pub fn default_build_key(checkout: &Path) -> crate::paths::BuildKey {
+    build_key_of(&Sheep::holding(app_named("web")), checkout)
 }
 
 /// The user running this test process, as `id -un` answers it.

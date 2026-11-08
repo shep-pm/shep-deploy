@@ -123,7 +123,7 @@ pub async fn stage<D: Daemon>(
     // Only while the release is still there to promote: `promote` names this
     // verb as the way back from a release that is gone or unfinished, and
     // answering "already staged" would leave no way to build it again.
-    let build = settings.build_key(app.user.as_deref());
+    let build = settings.build_key(app.user.as_deref(), &state.checkout);
     if state.staged.as_deref() == Some(head.as_str())
         && tree.release(&state.remote, &head, &build).is_dir()
         && tree.completion(&state.remote, &head, &build).is_file()
@@ -201,7 +201,7 @@ pub async fn promote<D: Daemon>(
             "{sheep} has nothing staged. Run `shep-deploy deploy {sheep} --stage` first."
         )));
     };
-    let build = settings.build_key(app.user.as_deref());
+    let build = settings.build_key(app.user.as_deref(), &state.checkout);
     if !tree.release(&state.remote, &head, &build).is_dir()
         || !tree.completion(&state.remote, &head, &build).is_file()
     {
@@ -295,13 +295,19 @@ async fn build_and_record<D: Daemon>(
     for warning in snapshot.after() {
         eprintln!("{warning}");
     }
-    // Let go before the record write, so nothing holding the build turn ever
-    // waits for a record lock.
-    drop(building);
     built?;
+    // Inside the build turn, deliberately, and before it is let go. The marker is
+    // what tells the next sheep of this repository that this release is built, so
+    // publishing it outside the turn leaves a window: another sheep takes the
+    // turn, finds the directory unmarked, removes it and starts its own checkout,
+    // and then this one writes a marker naming a directory it no longer made -
+    // which the next attempt reads as a finished release even if that rival build
+    // failed. Let go after it, and still before the record write, so nothing
+    // holding the build turn ever waits for a record lock.
     if !staged.reused {
         mark_built(&staged.marker)?;
     }
+    drop(building);
 
     record_staged(daemon, tree, state, head, &config.shared).await
 }

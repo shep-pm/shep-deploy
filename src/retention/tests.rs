@@ -19,14 +19,12 @@ struct Target {
 impl Target {
     /// The directory `sha`'s release lives in.
     fn release(&self, sha: &str) -> PathBuf {
-        self.tree
-            .release(&self.remote, sha, &fixtures::default_build_key())
+        self.tree.release(&self.remote, sha, &build())
     }
 
     /// That release's completion marker.
     fn completion(&self, sha: &str) -> PathBuf {
-        self.tree
-            .completion(&self.remote, sha, &fixtures::default_build_key())
+        self.tree.completion(&self.remote, sha, &build())
     }
 
     /// The directory every release of this remote lives in.
@@ -43,6 +41,17 @@ impl Target {
     fn prune(&self, keep: usize, recorded: &[&str]) -> Result<Vec<String>, Error> {
         prune(&self.tree, &self.remote, keep, recorded)
     }
+}
+
+/// The key every release this file lays down is named by: the default settings
+/// over the checkout every record here names.
+///
+/// [`prune`] never reads a build key - it works on directory names - so a test
+/// here needs only one, used consistently for the releases it makes and the ones
+/// it asserts on.
+#[must_use]
+fn build() -> crate::paths::BuildKey {
+    fixtures::default_build_key(&fixtures::state().checkout)
 }
 
 /// A [`Spared`] holding `shas` as what records name, for the tests of
@@ -596,7 +605,7 @@ fn two_sheep_sharing_a_build() -> (tempfile::TempDir, Tree, Tree, Repo, Vec<Stri
 
     // One worktree per sha, in the shared directory, built once. Two sheep
     // of one remote do not each check out their own copy of one commit.
-    let build = fixtures::default_build_key();
+    let build = build();
     for sha in &shas {
         let release = repo.release(sha, &build);
         git::worktree_add(&repo.git(), &release, sha).expect("worktree");
@@ -703,7 +712,7 @@ fn pruning_one_sheep_spares_what_another_sheeps_current_names() {
 
     // api is still serving the oldest release: its `current` names it and its
     // record says so too. web has moved on to the newest.
-    let build = fixtures::default_build_key();
+    let build = build();
     swap::point_at(
         &api.current(),
         &Repo::for_remote(home.path(), &remote).release(&oldest, &build),
@@ -878,5 +887,97 @@ fn pruning_a_tree_never_removes_the_shared_clone() {
 
     assert!(repo.git().join("HEAD").is_file());
     assert!(web.git().join("HEAD").is_file());
+    drop(home);
+}
+
+/// fails if a prune removes the release a sheep is holding between its build
+/// turn and its swap.
+///
+/// The window is short and real: a deploy lets go of the repository build turn
+/// at the swap, and the swap is the first thing that makes the release visible
+/// to a prune. A second sheep of the same repository that finishes first sweeps
+/// `releases/` inside that window, and the release the first one is about to
+/// land has no `current` naming it and no record naming its sha - it is the
+/// oldest by mtime, which is exactly the candidate the keep count hands over.
+/// `swap::claim` is the third witness, written under the build turn before the
+/// release is touched, and `prune` reads it beside `current`.
+#[test]
+fn pruning_one_sheep_spares_what_another_sheep_claims() {
+    let (home, web, api, _repo, shas) = two_sheep_sharing_a_build();
+    let (oldest, live) = (
+        shas.first().expect("three releases").clone(),
+        shas.last().expect("three releases").clone(),
+    );
+    let remote = State::read(&api.state_file())
+        .expect("api's record")
+        .remote
+        .clone();
+    let repo = Repo::for_remote(home.path(), &remote);
+
+    // api has built the oldest release and is between its turn and its swap:
+    // its `current` and its record still name the newest, and only its claim
+    // names the one it is about to serve.
+    let claim = swap::claim(&api.current(), &repo.release(&oldest, &build())).expect("api's claim");
+
+    let removed = Target {
+        tree: web,
+        remote: remote.clone(),
+    }
+    .prune(2, &[live.as_str()])
+    .expect("prunes");
+
+    assert!(
+        removed.is_empty(),
+        "the claimed release is the only candidate: {removed:?}"
+    );
+    assert!(
+        repo.release(&oldest, &build()).is_dir(),
+        "api is about to serve {oldest}, so web's prune must leave it"
+    );
+    drop(claim);
+    drop(home);
+}
+
+/// fails if a prune sweeps `releases/` while another sheep is building in it.
+///
+/// A prune asks every tree what it is serving and then removes directories.
+/// Asked while a build is running, the answer is a window with no witness in
+/// it: the release that build is holding is claimed inside the turn, so a
+/// prune that cannot take the turn cannot read a tree whose claim it has to
+/// queue behind. Holding the turn for the whole sweep is what makes the claim
+/// worth writing.
+#[test]
+fn a_prune_waits_for_the_build_of_its_repository() {
+    let (home, web, _api, repo, shas) = two_sheep_sharing_a_build();
+    let remote = State::read(&web.state_file())
+        .expect("web's record")
+        .remote
+        .clone();
+
+    let held = lock::hold_build(&repo).expect("the build turn");
+    let (done, heard) = std::sync::mpsc::channel();
+    let pruning = {
+        let (tree, remote) = (web.clone(), remote.clone());
+        std::thread::spawn(move || {
+            let doomed = prune(&tree, &remote, 1, &[]).expect("prunes");
+            done.send(doomed.len()).expect("report");
+        })
+    };
+
+    assert!(
+        heard.recv_timeout(Duration::from_millis(300)).is_err(),
+        "a prune of one repository must queue behind that repository's build"
+    );
+
+    drop(held);
+    let removed = heard
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the waiting prune gets its turn once the build lets go");
+    assert_eq!(
+        removed,
+        shas.len() - 1,
+        "and it reclaims every release of the repository but the one each tree          is serving: {shas:?}"
+    );
+    pruning.join().expect("thread");
     drop(home);
 }

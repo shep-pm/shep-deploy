@@ -45,7 +45,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::Deserialize;
@@ -263,14 +263,14 @@ impl Settings {
     }
 
     /// The key of the release these settings build into, for an app built as
-    /// `user`.
+    /// `user` in a release linked out of `checkout`.
     ///
-    /// The three things a release is keyed by, in one place, so the deploy
-    /// that builds a release and the retention that reclaims it cannot disagree
-    /// about which release a sheep is on.
+    /// The four things a release is keyed by, in one place, so the deploy that
+    /// builds a release and the retention that reclaims it cannot disagree about
+    /// which release a sheep is on.
     #[must_use]
-    pub(crate) fn build_key(&self, user: Option<&str>) -> BuildKey {
-        BuildKey::of(self.command.as_deref(), user, &self.build_env)
+    pub(crate) fn build_key(&self, user: Option<&str>, checkout: &Path) -> BuildKey {
+        BuildKey::of(self.command.as_deref(), user, checkout, &self.build_env)
     }
 
     /// The hooks these settings describe.

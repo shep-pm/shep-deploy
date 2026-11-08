@@ -271,7 +271,7 @@ mod tests {
     fn every_path_matches_the_documented_layout() {
         let tree = Tree::for_sheep(Path::new("/srv/shep"), "bpm");
         let remote = "https://github.com/shep-pm/koji";
-        let build = BuildKey::of(Some("make"), None, &BTreeMap::new());
+        let build = BuildKey::of(Some("make"), None, Path::new("/srv/x"), &BTreeMap::new());
         let key = build.as_str().to_owned();
 
         assert_eq!(tree.git(), Path::new("/srv/shep/deploy/bpm/git"));

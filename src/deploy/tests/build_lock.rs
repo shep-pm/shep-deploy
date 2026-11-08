@@ -110,8 +110,7 @@ async fn two_sheep_of_one_remote_build_one_after_the_other() {
     let log = fixture.home.path().join("turns.log");
     let head = commit_on_origin(&fixture, "second.txt");
     let daemon = TwoSheep::holding(&marks("web", &log), &marks("worker", &log));
-    let (worker_tree, mut worker_state) =
-        another_sheep(&fixture, &repo, "worker", &daemon.worker.build_key());
+    let (worker_tree, mut worker_state) = another_sheep(&fixture, &repo, "worker", &daemon.worker);
 
     let config = fixtures::dog_config();
     let (web, worker) = tokio::join!(
@@ -182,8 +181,7 @@ async fn a_stage_build_waits_for_the_build_of_its_repository() {
     let log = fixture.home.path().join("turns.log");
     let head = commit_on_origin(&fixture, "second.txt");
     let daemon = TwoSheep::holding(&marks("web", &log), &marks("worker", &log));
-    let (worker_tree, mut worker_state) =
-        another_sheep(&fixture, &repo, "worker", &daemon.worker.build_key());
+    let (worker_tree, mut worker_state) = another_sheep(&fixture, &repo, "worker", &daemon.worker);
 
     let config = fixtures::dog_config();
     let (web, worker) = tokio::join!(

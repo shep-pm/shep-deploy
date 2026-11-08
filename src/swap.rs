@@ -23,8 +23,10 @@
 //! canonicalising would also resolve through any symlinks in `$SHEP_HOME`
 //! itself, which is not this function's business.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
@@ -124,6 +126,84 @@ pub fn resolve(current: &Path) -> Result<Option<PathBuf>, Error> {
             path: current.to_owned(),
             source,
         }),
+    }
+}
+
+/// `current` with `.claim` appended. See [`claim`].
+fn claim_path(current: &Path) -> PathBuf {
+    debug_assert!(
+        current.file_name().is_some(),
+        "current is always Tree::current, which always ends in a file name"
+    );
+    let mut name = current.file_name().unwrap_or_default().to_os_string();
+    name.push(".claim");
+    current.with_file_name(name)
+}
+
+/// A tree's claim on the release it is about to swap in, held until the swap
+/// has happened.
+///
+/// Between letting go of the repository build turn and repointing `current`
+/// there is a window, and a release the deploy is holding is invisible to
+/// everybody else for the whole of it: no `current` names it yet, and no record
+/// names its sha yet. A second sheep of the same repository that finishes a
+/// deploy inside that window prunes the repository's `releases/`, and the
+/// release the first one is about to land is the one its `keep` count has no
+/// witness for. It removes the directory, and the first sheep swaps `current`
+/// onto a path that is gone.
+///
+/// The claim is what makes the hold visible. It is written under the build turn
+/// and before the release is touched, so a prune that takes that same turn sees
+/// either the claim or nothing at all - and nothing at all means the release it
+/// is about to remove has no marker either, so the deploy that comes after it
+/// checks out and builds afresh instead of reusing what was removed.
+///
+/// A claim outlives its writer only when a deploy is killed between writing one
+/// and swapping. The next deploy of that tree writes another, and a tree whose
+/// directory goes away takes its claim with it - `crate::restore` leaves the tree
+/// in place, so that is an operator removing it - which means the worst a stale
+/// claim does is spare one release from retention. That is the cheap direction to
+/// err in: a spared release costs disk, and a removed one costs a running service
+/// its working directory.
+pub struct Claim {
+    path: PathBuf,
+}
+
+/// Writes `tree`'s claim on `release`, for as long as the returned [`Claim`] is
+/// held.
+///
+/// Take it under the repository build turn (see [`crate::lock::hold_build`]),
+/// before the release is checked out or reused: the claim is only a witness if
+/// every prune that could remove the release has to queue behind it.
+///
+/// # Errors
+/// [`Error::Io`], naming the claim, if it cannot be written.
+pub fn claim(current: &Path, release: &Path) -> Result<Claim, Error> {
+    let path = claim_path(current);
+    fs::write(&path, release.as_os_str().as_bytes()).map_err(Error::at(&path))?;
+    Ok(Claim { path })
+}
+
+/// The release `current`'s tree claims, or `None` when it claims nothing.
+///
+/// The text is read as written, with no resolution, the same convention
+/// [`resolve`] documents. A claim whose file cannot be read is no claim: it
+/// spares nothing, and a tree that cannot be asked what it is holding is not a
+/// reason to skip a whole prune.
+#[must_use]
+pub fn claimed(current: &Path) -> Option<PathBuf> {
+    fs::read(claim_path(current))
+        .ok()
+        .map(|bytes| PathBuf::from(OsString::from_vec(bytes)))
+}
+
+impl Drop for Claim {
+    /// Removes the claim. Its failure is not reported: a claim left behind by a
+    /// deploy that could not delete it spares one release from retention, which
+    /// is the safe direction (see [`Claim`]), and the next deploy of this tree
+    /// writes over it.
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }
 

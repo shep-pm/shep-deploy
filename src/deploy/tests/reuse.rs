@@ -1,6 +1,10 @@
 //! A build belongs to a repository, not to a sheep: every sheep of one remote
-//! whose `command`, `user` and `build_env` match lands the same built release,
-//! and a sheep whose three do not match gets a release of its own.
+//! whose `command`, `user`, `checkout` and `build_env` match lands the same
+//! built release, and a sheep whose four do not match gets a release of its own.
+//! These four are the reuse rule. Separate checkouts are separated in
+//! `crate::optin::shared_clone_tests`; what is here is the sharing, the
+//! rollback that must not reach across it, and the marker that authorises
+//! skipping a build.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -17,7 +21,7 @@ use crate::deploy::test_support::{
 use crate::deploy::{Outcome, deploy};
 use crate::error::Error;
 use crate::fixtures;
-use crate::paths::{BuildKey, Tree};
+use crate::paths::Tree;
 use crate::swap;
 
 /// A shepherd holding every sheep of one repository, each as its own app with
@@ -38,11 +42,6 @@ impl Flock {
 
     fn one(&self, sheep: &str) -> &Shepherd {
         self.held.get(sheep).expect("the flock holds this sheep")
-    }
-
-    /// The key `sheep`'s releases are named by, read the way a deploy reads it.
-    fn build(&self, sheep: &str) -> BuildKey {
-        self.one(sheep).build_key()
     }
 }
 
@@ -118,9 +117,9 @@ async fn three_sheep_of_one_remote_build_one_sha_once() {
             .into_iter()
             .map(|name| (name, a_sheep(name, &settings))),
     );
-    let (api_tree, mut api_state) = another_sheep(&fixture, &repo, "api", &daemon.build("api"));
+    let (api_tree, mut api_state) = another_sheep(&fixture, &repo, "api", daemon.one("api"));
     let (worker_tree, mut worker_state) =
-        another_sheep(&fixture, &repo, "worker", &daemon.build("worker"));
+        another_sheep(&fixture, &repo, "worker", daemon.one("worker"));
 
     let config = fixtures::dog_config();
     let (web, api, worker) = tokio::join!(
@@ -179,7 +178,7 @@ async fn a_different_build_env_builds_a_release_of_its_own() {
         ("web", a_sheep("web", &building("web"))),
         ("api", a_sheep("api", &building("api"))),
     ]);
-    let (api_tree, mut api_state) = another_sheep(&fixture, &repo, "api", &daemon.build("api"));
+    let (api_tree, mut api_state) = another_sheep(&fixture, &repo, "api", daemon.one("api"));
 
     let config = fixtures::dog_config();
     let web = deploy(&daemon, &fixture.tree, &mut fixture.state, &config)
@@ -228,7 +227,7 @@ async fn a_rolled_back_sheep_leaves_the_other_sheeps_current_alone() {
     let repo = shared_clone(&fixture);
     let head = commit_on_origin(&fixture, "second.txt");
     let daemon = Flock::holding([("web", Shepherd::never_ready()), ("api", Shepherd::ready())]);
-    let (api_tree, mut api_state) = another_sheep(&fixture, &repo, "api", &daemon.build("api"));
+    let (api_tree, mut api_state) = another_sheep(&fixture, &repo, "api", daemon.one("api"));
 
     let config = fixtures::dog_config();
     let web = deploy(&daemon, &fixture.tree, &mut fixture.state, &config)
@@ -242,9 +241,7 @@ async fn a_rolled_back_sheep_leaves_the_other_sheeps_current_alone() {
     assert_eq!(api, Outcome::Deployed { sha: head.clone() }, "{api:?}");
 
     let tree: &Tree = &api_tree;
-    let built = fixture
-        .tree
-        .release(&fixture.state.remote, &head, &daemon.build("api"));
+    let built = fixture.release_of(daemon.one("api"), &head);
     assert_eq!(
         swap::resolve(&tree.current()).expect("api's current"),
         Some(built),
@@ -254,5 +251,63 @@ async fn a_rolled_back_sheep_leaves_the_other_sheeps_current_alone() {
         swap::resolve(&fixture.tree.current()).expect("web's current"),
         Some(fixture.release(&first)),
         "and only web's own current moved"
+    );
+}
+
+/// fails if a completion marker outlives the release it vouches for, or is
+/// inherited by the checkout that replaces it.
+///
+/// The marker is a separate file in a separate directory, so an operator's own
+/// `rm -rf` of a release, or another sheep's prune, leaves it where it was. It
+/// is what authorises skipping a build, and a release directory that is there
+/// without its marker is replaced by a fresh checkout. If that build then fails,
+/// the new directory and the stale marker together read as a finished release to
+/// the next attempt, which would skip its build and land whatever the failed one
+/// left. So the marker goes before the replacement is checked out, and only a
+/// build that just succeeded ever writes one.
+///
+/// The build command both writes to the log and fails, so the log is the count
+/// of builds and the failure is the point: a build that never ran would add no
+/// line. Not paused, for the reason on
+/// [`three_sheep_of_one_remote_build_one_sha_once`].
+#[tokio::test]
+async fn a_stale_marker_does_not_vouch_for_a_replacement_checkout() {
+    let mut fixture = fixture_with_previous_release();
+    let head = commit_on_origin(&fixture, "second.txt");
+    let log = fixture.home.path().join("builds.log");
+    let daemon = Shepherd::ready().with_settings(&format!(
+        "command = 'echo built >> {}; exit 3'\n",
+        log.display()
+    ));
+
+    fs::create_dir_all(fixture.completions()).expect("the markers directory");
+    fs::write(fixture.completion_of(&daemon, &head), b"")
+        .expect("a marker with no release behind it");
+
+    for attempt in 1..=2 {
+        let err = deploy(
+            &daemon,
+            &fixture.tree,
+            &mut fixture.state,
+            &fixtures::dog_config(),
+        )
+        .await
+        .expect_err("the build fails on both attempts");
+        assert!(
+            matches!(err, Error::Build { status: Some(3) }),
+            "{attempt}: {err:?}"
+        );
+        assert!(
+            !fixture.completion_of(&daemon, &head).is_file(),
+            "attempt {attempt} left a marker vouching for a release whose build failed"
+        );
+    }
+
+    let built = fs::read_to_string(&log).expect("the build log");
+    assert_eq!(
+        built.lines().count(),
+        2,
+        "the second attempt rebuilt, rather than reusing the checkout the \
+         first one failed to build: {built:?}"
     );
 }

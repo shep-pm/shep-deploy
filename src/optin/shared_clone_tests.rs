@@ -11,12 +11,13 @@ use crate::fixtures;
 use crate::git;
 use crate::paths::{self, Repo, Tree};
 
-/// The directory `sha`'s release lives in for `remote`.
+/// The directory `sha`'s release lives in for `remote`, for a sheep whose
+/// checkout is `checkout`.
 ///
 /// Every `prepare` in this file runs on a sheep that sets nothing, so the key
-/// is the default one.
-fn release_of(tree: &Tree, remote: &str, sha: &str) -> std::path::PathBuf {
-    tree.release(remote, sha, &fixtures::default_build_key())
+/// is the default one over that checkout.
+fn release_of(tree: &Tree, remote: &str, sha: &str, checkout: &Path) -> std::path::PathBuf {
+    tree.release(remote, sha, &fixtures::default_build_key(checkout))
 }
 
 /// A release the tree built into its own `releases/`, and its marker: what
@@ -70,13 +71,21 @@ async fn two_sheep_with_one_remote_leave_one_bare_clone_and_two_links() {
     assert_eq!(clones.len(), 1, "one clone: {clones:?}");
     let clone = Repo::for_remote(home.path(), &bpm.state.remote).git();
     assert!(clone.join("HEAD").is_file(), "a bare repository");
-    for tree in [&bpm.tree, &ctm.tree] {
+    for prepared in [&bpm, &ctm] {
+        let tree = &prepared.tree;
         let link = std::fs::read_link(tree.git()).expect("a link, not a directory");
         assert_eq!(link, clone, "{} links to the shared clone", tree.sheep());
+        let release = release_of(
+            tree,
+            &prepared.state.remote,
+            &prepared.sha,
+            &prepared.state.checkout,
+        );
         assert_eq!(
-            std::fs::read_to_string(release_of(tree, &bpm.state.remote, &bpm.sha).join("run.sh"),)
-                .expect("release"),
-            "#!/bin/sh\necho hi\n"
+            std::fs::read_to_string(release.join("run.sh")).expect("{release:?} is a checkout"),
+            "#!/bin/sh\necho hi\n",
+            "{} built its own release off the shared clone",
+            tree.sheep()
         );
     }
 }
@@ -313,15 +322,15 @@ async fn a_failed_relink_cleanup_invalidates_the_release_before_retrying_setup()
 
     assert_eq!(prepared.sha, sha);
     let repo = Repo::for_remote(home.path(), remote);
-    let built = repo.release(&sha, &fixtures::default_build_key());
+    let build = fixtures::default_build_key(&prepared.state.checkout);
+    let built = repo.release(&sha, &build);
     assert_eq!(
         std::fs::read_to_string(built.join("run.sh")).expect("rebuilt checkout"),
         "#!/bin/sh\necho hi\n",
         "the retry checks the head out again, under the shared releases"
     );
     assert!(
-        repo.completion(&sha, &fixtures::default_build_key())
-            .is_file(),
+        repo.completion(&sha, &build).is_file(),
         "a finished checkout"
     );
     assert!(
@@ -368,4 +377,69 @@ fn changing_remotes_retries_release_cleanup_before_switching_clones() {
         tree.linked_clone(),
         Some(Repo::for_remote(home.path(), new_remote))
     );
+}
+
+/// fails if two sheep of one remote that work from separate checkouts land on
+/// one release directory.
+///
+/// A shared release is built from one checkout as well as one command: the
+/// ignored files a release links in come from the checkout its own record names,
+/// so a second sheep linking `local.json` into a release the first one already
+/// linked would find the name taken by a link aimed at another checkout, and
+/// `init` would fail with a `.shepignore` collision naming a file the operator
+/// never mentioned. Separate checkouts are a different build, and the build key
+/// says so.
+#[tokio::test]
+async fn two_sheep_with_separate_checkouts_get_releases_of_their_own() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let first = checkout_with_commit();
+    let second = checkout_of(first.path());
+    let name_of = |checkout: &tempfile::TempDir| {
+        checkout
+            .path()
+            .file_name()
+            .expect("a named checkout")
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    // One remote, two checkouts of it, each with an ignored file of its own.
+    for checkout in [&first, &second] {
+        std::fs::write(checkout.path().join(".gitignore"), "local.json\n").expect("ignore");
+        std::fs::write(checkout.path().join("local.json"), name_of(checkout))
+            .expect("an ignored file that is present");
+    }
+
+    let entries = [("bpm", first.path()), ("ctm", second.path())];
+    let daemon = RollOf::new(&entries);
+    let bpm = prepare(&daemon, home.path(), "bpm", &fixtures::dog_config())
+        .await
+        .expect("bpm prepares");
+    let ctm = prepare(&daemon, home.path(), "ctm", &fixtures::dog_config())
+        .await
+        .expect("ctm prepares");
+
+    let (bpm_release, ctm_release) = (
+        release_of(&bpm.tree, &bpm.state.remote, &bpm.sha, &bpm.state.checkout),
+        release_of(&ctm.tree, &ctm.state.remote, &ctm.sha, &ctm.state.checkout),
+    );
+    assert_ne!(
+        bpm_release, ctm_release,
+        "one sha and one command, but two checkouts, so two releases"
+    );
+    for (prepared, release, checkout) in
+        [(&bpm, &bpm_release, &first), (&ctm, &ctm_release, &second)]
+    {
+        let (own, linked) = (
+            name_of(checkout),
+            std::fs::read_to_string(release.join("local.json"))
+                .expect("{release:?} links the checkout it was built from"),
+        );
+        assert_eq!(
+            linked,
+            own,
+            "{} links its own checkout, not the other sheep's",
+            prepared.tree.sheep()
+        );
+    }
 }

@@ -235,12 +235,16 @@ What it serves is not inside it. Releases are the repository's, at
 `deploy/repos/<key>/releases/<sha>-<build key>/`, one worktree per sha per
 build, with their completion markers beside them at
 `repos/<key>/complete/<sha>-<build key>`. The build key is a hash of the
-`command`, the build `user` and the resolved `build_env`, so three sheep of one
-repository that build one sha the same way land the same built release: the
-first one checks it out and builds it, and the other two swap to it. Change one
-of the three and you get a directory of your own, because a release built with
-somebody else's environment is not yours. A marker means checked out AND built,
-and a deploy that finds one for its sha and its key skips the build.
+`command`, the build `user`, the operator `checkout` the record names and the
+resolved `build_env`, so three sheep of one repository that build one sha the
+same way land the same built release: the first one checks it out and builds it,
+and the other two swap to it. Change one of the four and you get a directory of
+your own, because a release built with somebody else's environment is not yours.
+The checkout is one of them because a release links the ignored files of the
+checkout it was built from: two checkouts of one remote are two builds, or the
+second sheep's `local.json` would find its name in the release taken by a link
+aimed at the first. A marker means checked out AND built, and a deploy that
+finds one for its sha and its key skips the build.
 
 Sheep deployed from the same remote share one clone, at
 `$SHEP_HOME/deploy/repos/<key>/git`. `init` makes it when no sheep with that
@@ -457,12 +461,14 @@ clamped.
 The count is asked of the repository, because its releases are shared: every
 sheep that deploys one remote builds into one `releases/` directory, so one
 sheep's prune is a sweep over directories another sheep may be serving from. It
-reads every tree under `deploy/` before it removes anything, whether or not that
-tree links this clone, and a release any of them names is not a candidate - from
-its `current`, or from its record's `deployed` or `staged`. A record names a sha
-and no build key, so it spares every build variant of that sha: a stale variant
-costs disk, and a live one
-removed costs a running service its working directory. The number itself is
+takes the repository's build turn for the whole sweep, and reads every tree under
+`deploy/` before it removes anything, whether or not that tree links this clone.
+A release any of them names is not a candidate - from its `current`, from its
+record's `deployed` or `staged`, or from the `current.claim` file a deploy writes
+under that turn for the window between letting go of it and swapping. A record
+names a sha and no build key, so it spares every build variant of that sha: a
+stale variant costs disk, and a live one removed costs a running service its
+working directory. The number itself is
 whichever deploying sheep's settings say, so two sheep of one repository with
 different `retention` prune the same directory to different depths. The clone
 and the build cache beside it are reclaimed the same way, and never while any
@@ -761,7 +767,7 @@ hard link, and the `.git` file at the release root. The build can still replace
 that file, since it owns the directory, so the dog writes it back after the
 build. `git`, the shared clones under `repos/`, `deploy.toml`, the lock files,
 `current` and `repos/<key>/releases/` stay root's. Two sheep never share a
-release across build users, because `user` is one of the three inputs of the
+release across build users, because `user` is one of the four inputs of the
 build key, so a release is handed over at most once, to the one user its build
 ran as. The user also needs search permission on every directory down to
 the release: a `$SHEP_HOME` of mode 700 refuses the build at its first step.

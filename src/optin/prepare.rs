@@ -396,6 +396,9 @@ pub async fn prepare_with<D: Daemon>(
         release,
         marker,
         reused,
+        // Held to the end of this function, so the release is claimed across the
+        // swap at the bottom of it. See [`crate::swap::claim`].
+        claim,
         ..
     } = {
         let (tree, checkout, sha, remote) = (
@@ -432,13 +435,16 @@ pub async fn prepare_with<D: Daemon>(
     for warning in snapshot.after() {
         eprintln!("{warning}");
     }
-    // Let go before the table write and the record write below, so nothing
-    // holding the build turn ever waits for a record lock.
-    drop(building);
     built?;
+    // Inside the build turn, for the reason on [`crate::stage::build_and_record`]:
+    // a marker published after the turn is let go can vouch for a release a rival
+    // has already removed and started rebuilding.
     if !reused {
         crate::deploy::mark_built(&marker)?;
     }
+    // Let go before the table write and the record write below, so nothing
+    // holding the build turn ever waits for a record lock.
+    drop(building);
 
     // Before the swap, so a failure here leaves nothing but a table the next
     // run writes again. `watch` is `manual` for the reason given where the
@@ -467,6 +473,10 @@ pub async fn prepare_with<D: Daemon>(
     // `swap::point_at`'s own atomicity claim rests on its doc rather than
     // on a test.
     swap::point_at(&tree.current(), &release)?;
+    // Only now is the claim let go: until `current` names the release it is the
+    // only thing telling a prune of this repository that this cutover is about to
+    // land it (see [`crate::swap::claim`]).
+    drop(claim);
     // Under the record lock like every other write of the record, though
     // nothing can race a record that does not exist yet: one rule is easier
     // to keep true than one rule with an exception.
