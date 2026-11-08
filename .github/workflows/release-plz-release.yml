@@ -24,8 +24,9 @@ on:
       dry-run-tag:
         description: >-
           An existing tag of this repo, e.g. v0.6.6. Runs only the dog-release
-          dry run against it: builds every target and prints the hashes,
-          uploads nothing, opens no pull request, and skips release-plz.
+          dry run against it: builds every target this dog builds for and
+          prints the hashes, uploads nothing, opens no pull request, and skips
+          release-plz.
         type: string
         default: ""
 
@@ -87,10 +88,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-  # Builds the bare binary for every target shep ships for, attaches each to
-  # the release release-plz just made, and opens the pull request on
-  # shep-pm/shep that sets this row's version and hashes in the index. A
-  # person merging that pull request is the review.
+  # Builds the bare binary for every target shep ships for except Windows,
+  # attaches each to the release release-plz just made, and opens the pull
+  # request on shep-pm/shep that sets this row's version and hashes in the
+  # index. A person merging that pull request is the review.
+  #
+  # Windows is named in `skip-targets` below rather than dropped from the
+  # matrix here: this dog is Unix only and does not compile for
+  # x86_64-pc-windows-msvc, and the callee's own input is what drops a target
+  # from its matrix. Its row then hashes the rest, and `shep install` builds
+  # from source on the skipped target.
   #
   # Called from here, gated on release-plz's outputs, because a release made
   # with a GITHUB_TOKEN fires no `release: published` event for a separate
@@ -99,8 +106,11 @@ jobs:
   #
   # Pinned by commit, like every action in this file: the callee gets
   # SHEP_INDEX_TOKEN and write access to this repository's releases.
-  # 3e217f9 is shep-pm/shep#1463, the merge that added the workflow. Bump it
-  # on purpose when the workflow changes.
+  # a7f820b is shep-pm/shep#1577, the merge that added the `skip-targets`
+  # input, and it is the floor for this pin: GitHub refuses a `with:` key the
+  # callee does not declare, so a pin older than it fails both jobs below
+  # before either builds. The workflow itself came in at 3e217f9
+  # (shep-pm/shep#1463). Bump it on purpose when the workflow changes.
   #
   # SHEP_INDEX_TOKEN has to exist as a repository secret: a GitHub App
   # installation token or a PAT that can push a branch and open a pull
@@ -122,9 +132,10 @@ jobs:
 
   # Dispatch with `dry-run-tag` set to check the build-and-hash step against
   # an existing tag without waiting for a real release. The callee's `dry-run`
-  # builds every target and prints the hashes, uploads nothing and opens no
-  # pull request, so it needs no index token. It is pinned to the same commit
-  # as the job above.
+  # builds every target except those named in `skip-targets`, prints the
+  # hashes, uploads nothing and opens no pull request, so it needs no index
+  # token. It is pinned to the same commit as the job above, and passes the
+  # same `skip-targets`.
   dog-release-dry-run:
     name: Dry-run prebuilt binaries
     if: inputs.dry-run-tag != ''
