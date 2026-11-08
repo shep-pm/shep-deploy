@@ -172,7 +172,7 @@ pub(crate) fn mark_built(marker: &Path) -> Result<(), Error> {
 // syncs the checkout before it is written, which is git's job rather than this
 // crate's.
 
-/// Checks `sha` out into this tree's release for `build`, unless a FINISHED
+/// Checks `sha` out into the repository's release for `build`, unless a FINISHED
 /// release is already there, and answers whether it was.
 ///
 /// "Finished" means the completion marker is there and the directory is too.

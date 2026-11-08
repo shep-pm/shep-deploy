@@ -95,7 +95,7 @@ fn relink_owned_clone(tree: &Tree, shep_home: &Path, repo: &Repo) -> Result<(), 
     tree.link_clone(repo)
 }
 
-/// Remove this tree's own sha-named releases and markers before changing clones
+/// Remove this tree's own sha-named releases and markers before changing clones.
 ///
 /// Only [`Tree::superseded_releases`] and [`Tree::superseded_completions`], the
 /// directories a tree filled while its clone was its own: releases under

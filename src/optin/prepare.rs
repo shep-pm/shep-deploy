@@ -376,6 +376,17 @@ pub async fn prepare_with<D: Daemon>(
     // worktree"), so every run that died anywhere from here onward left a
     // release directory that made the next run fail on git rather than
     // resume, which is the opposite of what the doc above promises.
+    // The build turn for this repository, inside setup's own tree hold and let
+    // go before anything is written. Setup builds, and the cache its build
+    // writes into is the one every sheep of this remote shares, including the
+    // ones a poll tick is deploying. The release directory is shared the same
+    // way, so the turn covers the checkout too: a poll tick deploying another
+    // sheep of this remote with the same command, user and build environment is
+    // checking out the very path this setup is about to. See [`crate::lock`].
+    let building = {
+        let (tree, remote) = (tree.clone(), state.remote.clone());
+        shared::off_thread(move || crate::lock::hold_build(&tree.repo(&remote))).await?
+    };
     // Setup runs no hook: a cutover must not touch the app's database.
     let crate::deploy::Staged {
         app,
@@ -401,14 +412,6 @@ pub async fn prepare_with<D: Daemon>(
     };
     // Before the build, so a refusal costs no build.
     refuse_ungated_at_setup(sheep, &app, verify)?;
-    // The build turn for this repository, inside setup's own tree hold and let
-    // go before anything is written. Setup builds, and the cache its build
-    // writes into is the one every sheep of this remote shares, including the
-    // ones a poll tick is deploying. See [`crate::lock`].
-    let building = {
-        let (tree, remote) = (tree.clone(), state.remote.clone());
-        shared::off_thread(move || crate::lock::hold_build(&tree.repo(&remote))).await?
-    };
     let snapshot = crate::linkcheck::Snapshot::before(sheep, &release, &linked);
     // A release another sheep of this remote already built is not built twice
     // here either. See [`crate::deploy::prepare`].
