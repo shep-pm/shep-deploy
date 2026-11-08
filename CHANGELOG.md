@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-11-08
+
+### Fixed
+
+- Key the build turn by the remote and take it for every build
+- Relink a release whose target link predates the cache move
+- Keep the build cache a tree that owns its clone deploys
+- Make the cache a release's target link already names
+
+
 ## [0.7.4] - 2026-11-08
 
 ### Added
