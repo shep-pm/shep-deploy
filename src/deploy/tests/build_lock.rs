@@ -1,5 +1,6 @@
-//! Builds of one repository run one after the other, and the lock that does
-//! it is let go before the swap.
+//! Builds of one repository run one after the other, the lock that does it is
+//! let go before the swap, and a stage build queues behind them like any other
+//! build of that repository.
 
 use std::fs;
 use std::time::Duration;
@@ -16,6 +17,7 @@ use crate::deploy::{Outcome, deploy};
 use crate::error::Error;
 use crate::fixtures;
 use crate::paths::{Repo, Tree};
+use crate::stage::{self, Staged};
 use crate::state::State;
 use crate::{git, swap};
 
@@ -185,5 +187,77 @@ async fn two_sheep_of_one_remote_build_one_after_the_other() {
         shown[4].ends_with("-landed") && shown[5].ends_with("-landed"),
         "both swaps happen after both builds, so neither holds the turn past \
          its own swap: {shown:?}"
+    );
+}
+
+/// fails if a `--stage` build goes ahead while a deploy of the same repository
+/// is building.
+///
+/// The stage takes its own tree lock, and so does the deploy, and the two trees
+/// are different sheep, so nothing used to meet between them. Now that every
+/// sheep of one remote compiles into one cache beside the shared clone, a stage
+/// that took no turn would write into a cache a deploy's build is still filling,
+/// and each would then copy out what the other left.
+///
+/// The log is the record of what ran: the deploy writes `web`, `web-hook` and
+/// `web-landed`, the stage writes only `worker`, because a stage runs no hook.
+/// A stage build that overlapped the deploy's turn would land `worker` between
+/// `web` and `web-hook`.
+///
+/// Not paused, for the reason on [`two_sheep_of_one_remote_build_one_after_the_other`]:
+/// the build commands are real subprocesses.
+#[tokio::test]
+async fn a_stage_build_waits_for_the_build_of_its_repository() {
+    let mut fixture = fixture_with_previous_release();
+    let repo = shared_clone(&fixture);
+    let log = fixture.home.path().join("turns.log");
+    let (worker_tree, mut worker_state) = second_sheep(&fixture, &repo, "worker");
+    let head = commit_on_origin(&fixture, "second.txt");
+    let daemon = TwoSheep::holding(&marks("web", &log), &marks("worker", &log));
+
+    let config = fixtures::dog_config();
+    let (web, worker) = tokio::join!(
+        timeout(
+            WINDOW,
+            deploy(&daemon, &fixture.tree, &mut fixture.state, &config)
+        ),
+        timeout(
+            WINDOW,
+            stage::stage(&daemon, &worker_tree, &mut worker_state, &config)
+        ),
+    );
+
+    let web = web
+        .expect("the deploy finished inside the test's own window")
+        .expect("deployed");
+    let worker = worker
+        .expect("and the stage did too")
+        .expect("built and recorded as staged");
+    assert_eq!(web, Outcome::Deployed { sha: head.clone() }, "{web:?}");
+    assert_eq!(worker, Staged::Built { sha: head }, "{worker:?}");
+
+    let shown: Vec<String> = fs::read_to_string(&log)
+        .expect("both builds were logged")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let at = |name: &str| shown.iter().position(|line| line.trim() == name);
+    let (web_build, web_hook, staged_build) = (
+        at("web").expect("the deploy built"),
+        at("web-hook").expect("and ran its release hook"),
+        at("worker").expect("the stage built"),
+    );
+    assert_eq!(
+        shown.len(),
+        4,
+        "one build, its hook, its landing, one stage: {shown:?}"
+    );
+    assert!(
+        web_build < web_hook,
+        "the deploy's release hook is inside its own turn: {shown:?}"
+    );
+    assert!(
+        staged_build < web_build || staged_build > web_hook,
+        "the stage build never overlapped the deploy's turn: {shown:?}"
     );
 }

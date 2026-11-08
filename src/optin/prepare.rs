@@ -111,6 +111,11 @@ pub async fn prepare<D: Daemon>(
 /// the run leaves no record and no swap and a second `setup` is a retry. A
 /// sheep with nothing to probe is taken over with [`Verify::Alive`].
 ///
+/// The build takes the build turn for its repository, so a setup of one sheep
+/// waits while another sheep of the same remote is building: the cache it builds
+/// into is the one they share. It is let go before the table write and the record
+/// write. See [`crate::lock`].
+///
 /// # Errors
 /// As [`prepare`], and [`Error::Config`] if `verify` is [`Verify::Probed`] and
 /// the release's app has neither a `readiness_probe` nor `wait_ready`.
@@ -392,6 +397,14 @@ pub async fn prepare_with<D: Daemon>(
     };
     // Before the build, so a refusal costs no build.
     refuse_ungated_at_setup(sheep, &app, verify)?;
+    // The build turn for this repository, inside setup's own tree hold and let
+    // go before anything is written. Setup builds, and the cache its build
+    // writes into is the one every sheep of this remote shares, including the
+    // ones a poll tick is deploying. See [`crate::lock`].
+    let building = {
+        let (tree, remote) = (tree.clone(), state.remote.clone());
+        shared::off_thread(move || crate::lock::hold_build(&tree.repo(&remote))).await?
+    };
     let snapshot = crate::linkcheck::Snapshot::before(sheep, &release, &linked);
     let built = build::run(
         sheep,
@@ -406,6 +419,9 @@ pub async fn prepare_with<D: Daemon>(
     for warning in snapshot.after() {
         eprintln!("{warning}");
     }
+    // Let go before the table write and the record write below, so nothing
+    // holding the build turn ever waits for a record lock.
+    drop(building);
     built?;
 
     // Before the swap, so a failure here leaves nothing but a table the next

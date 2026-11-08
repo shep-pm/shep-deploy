@@ -52,7 +52,9 @@
 //! remote is one repository: `bpm`, `ctm` and `opm` off one `ReactMap`
 //! checkout are three trees. [`attempt`] takes [`crate::lock::hold_build`]
 //! before the build and lets go at the swap, so the builds of one repository
-//! queue and the reloads never do. See [`crate::lock`].
+//! queue and the reloads never do. A stage build and a setup build take the
+//! same turn, because the build cache they write into is one directory keyed
+//! by that remote. See [`crate::lock`].
 //!
 //! # A stale `current.tmp`
 //!
@@ -390,13 +392,14 @@ async fn attempt<D: Daemon>(
     refuse_ungated_verification(sheep, &staged.app, state.verify)?;
     // The build turn for this repository, taken inside the tree lock and let
     // go at the swap below. The tree lock is per sheep and says nothing
-    // between two sheep of one remote. See [`crate::lock`].
+    // between two sheep of one remote, and the build cache they write into is
+    // one directory keyed by that remote. See [`crate::lock`].
     //
     // Off the runtime's thread: the wait is for another sheep's build, which
     // `build_timeout` bounds at an hour by default.
     let building = {
-        let tree = tree.clone();
-        shared::off_thread(move || lock::hold_build(&tree)).await?
+        let (tree, remote) = (tree.clone(), state.remote.clone());
+        shared::off_thread(move || lock::hold_build(&tree.repo(&remote))).await?
     };
     let snapshot = linkcheck::Snapshot::before(sheep, &release, &staged.linked);
     let built = build::run(
