@@ -309,18 +309,27 @@ class rather than the instances.
   rather than by the tree's resolved clone, and why `stage` and `optin::prepare`
   take it: two builds of one remote at once are two compilers over one cache,
   each then copying out what the other left. `retention::release_clone` removes
-  the whole repository directory, cache included, and `ownership::hand_over`
-  hands only the cache directory itself to `user`, never what is in it.
-- **`link_cache` repoints a `target` link, and only its own.** A release checked
-  out before the cache moved keeps its link at `Tree::superseded_cache`
-  (`<tree>/cache`), and `checkout_release` reuses that finished checkout, so
-  without the repoint the build writes through the old cache while both artifact
-  roots name the new one and every `target/release/app` is refused. The link's
-  own parent resolving to the superseded directory is what identifies it; a
-  `target` the repository committed, or a link naming anywhere else, is left
-  exactly where it is, and `build::contain::lands_within` is what covers where
-  such a link walks. Nothing removes the old directory: a live release may still
-  be serving from it.
+  the clone, and the cache with it only when no other tree owns a clone with a
+  record naming that remote (`another_tree_deploys`, which reads each record's
+  `remote` through `State::remote_at` and treats an unreadable one as a tree
+  that is deploying): a put-back sheep's link is gone and its record stays, so
+  it keeps nothing, while a legacy tree that owns its clone keeps the cache its
+  live `current/target` names. `ownership::hand_over` hands only the cache
+  directory itself to `user`, never what is in it.
+- **`link_cache` touches a `target` link, and only its own.** A link is its own
+  when it names `target` directly inside `Tree::superseded_cache` (`<tree>/cache`,
+  where the cache lived per sheep) or inside `Repo::cache_target`. The parent
+  decides it, not the whole target: a link whose cache is gone canonicalizes to
+  nothing, and two spellings of one directory only agree one level up. The
+  superseded one is repointed, because `checkout_release` reuses a finished
+  checkout and a build writing through the old link lands outside both artifact
+  roots, so every `target/release/app` is refused. The one at `cache_target` is
+  left where it is and its directory is made again if it is gone: a build writing
+  through a dangling `target` fails at cargo's own `create_dir_all`, and every
+  retry of that release fails with it. A `target` the repository committed, or a
+  link naming anywhere else, is left exactly where it is, and
+  `build::contain::lands_within` is what covers where such a link walks. Nothing
+  removes the superseded directory: a live release may still be serving from it.
 - **Never derive the markers directory from `Tree::completion("")`.** The
   result has a trailing separator and its `parent()` is the tree root; a sweep
   written that way removed `current`. `Tree::completions()` is the directory.

@@ -250,8 +250,11 @@ the directory; nothing removes it, and the next build warms the one under
 relinked at the new cache when it is built again, so a retry of it still builds.
 
 Removing the dog lets go of the link of each sheep it puts back, and of each
-whose cutover never landed; the clone goes with the last link. A sheep left
-running from its tree keeps its link, and so the clone. A deploy whose recorded
+whose cutover never landed; the clone goes with the last link, and the build
+cache goes with the clone. One exception: a tree that owns a clone of its own
+and has a record naming that remote keeps the cache, because its releases link
+`target` into it and removing it would leave the app serving from a dangling
+link. A sheep left running from its tree keeps its link, and so the clone. A deploy whose recorded
 `remote` is not the one its tree's link was made for is refused, so a hand edit
 cannot fetch one repository into a clone other sheep deploy from; run `init`
 again to relink. A tree set up before this keeps the clone it has until you
