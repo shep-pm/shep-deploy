@@ -24,6 +24,11 @@ use crate::{lock, retention, settings, shared};
 /// survives the dog being restarted, which is when a supervisor would
 /// otherwise turn a held sha back into a rebuild loop.
 ///
+/// A skip is the one ending that records nothing. It landed nothing and failed
+/// nothing, and the record already names what is serving; writing the skipped
+/// head into `failed` would hold a commit the loop passed over, and the next
+/// push would be the first thing it looked at again.
+///
 /// Retention runs on every ending for the same shape of reason: the target
 /// that keeps failing is the one building a fresh worktree for every commit
 /// somebody pushes, and pruning only after a verify left exactly that one
@@ -45,14 +50,23 @@ pub(crate) async fn record<D: Daemon>(
     config: &DogConfig,
 ) {
     let sheep = tree.sheep();
-    let landed = matches!(outcome, Ok(Outcome::Deployed { .. }));
     // `Raced` is held like any other ending. It was nearly exempted on
     // 2026-09-04 as "transient", and it is not: the tree lock means no rival
     // deploy can move `current` under this one any more, so what is left
     // moving it is an operator's hand or the release's own build command,
     // and a build that repoints `current` on every run would otherwise be
     // rebuilt every tick forever, the exact loop `failed` exists to stop.
-    let failed = (!landed).then(|| head.to_owned());
+    //
+    // A skip is neither an ending nor a failure, so it changes nothing here:
+    // the record names what is serving, and a `failed` naming the skipped head
+    // would hold a commit the loop chose to leave alone until somebody pushed
+    // again. The release a script skip built is on disk all the same, which is
+    // why the prune below still runs for it.
+    let failed = match outcome {
+        Ok(Outcome::Deployed { .. }) => None,
+        Ok(Outcome::Skipped { .. }) => state.failed.clone(),
+        _ => Some(head.to_owned()),
+    };
 
     if state.failed != failed {
         // Re-read before writing, because this process may not be the only
@@ -307,7 +321,7 @@ mod tests {
     use crate::deploy::{Outcome, deploy, unattended};
     use crate::error::Error;
     use crate::state::{State, Watch};
-    use crate::{fixtures, swap};
+    use crate::{fixtures, skip, swap};
 
     use super::*;
 
@@ -468,6 +482,39 @@ mod tests {
                 .as_deref(),
             Some(fixtures::OTHER_SHA)
         );
+    }
+
+    /// fails if a skip is recorded as a failure. The loop holds whatever
+    /// `failed` names until the branch moves, so the next tick would refuse
+    /// the very commit the loop chose to pass over, and the record would name
+    /// a sha nothing ever served.
+    #[tokio::test(start_paused = true)]
+    async fn a_skip_records_nothing() {
+        let mut fixture = fixture_with_previous_release();
+        let live = fixture.state.deployed.clone().expect("a previous release");
+        let head = commit_on_origin(&fixture, "second.txt");
+        let before = fs::read(fixture.tree.state_file()).expect("deploy.toml");
+
+        record(
+            &Shepherd::ready(),
+            &fixture.tree,
+            &mut fixture.state,
+            &head,
+            &Ok(Outcome::Skipped {
+                sha: head.clone(),
+                reason: skip::Reason::UnchangedScript,
+            }),
+            &fixtures::dog_config(),
+        )
+        .await;
+
+        assert_eq!(
+            fs::read(fixture.tree.state_file()).expect("deploy.toml"),
+            before,
+            "the record is not touched at all"
+        );
+        assert_eq!(fixture.state.failed, None, "and nothing was held");
+        assert_eq!(fixture.state.deployed.as_deref(), Some(live.as_str()));
     }
 
     /// fails if a deploy that LANDS ignores a `watch` the operator set in

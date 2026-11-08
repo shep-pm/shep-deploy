@@ -114,12 +114,15 @@ pub enum Outcome {
         /// Why the new release was rejected.
         why: String,
     },
-    /// The branch moved, but nothing under the target's the sheep's `reload`
-    /// paths changed, so nothing was built or reloaded and the record is as it
-    /// was. Only [`unattended`] answers this.
+    /// The branch moved, but nothing the sheep runs from came with it, so
+    /// nothing was swapped and the record is as it was. Only [`unattended`]
+    /// answers this.
     Skipped {
         /// The head that was left alone.
         sha: String,
+        /// Whether its reload paths were untouched, or its build produced the
+        /// script already serving.
+        reason: skip::Reason,
     },
 }
 
@@ -211,9 +214,9 @@ pub enum Outcome {
 /// never turns a deploy that already succeeded into one this function
 /// reports as failed.
 ///
-/// Every ending that is not [`Outcome::Deployed`] is written into
-/// `state.failed`, which is what [`unattended`] holds on and what an
-/// operator asking by name ignores. See [`record::record`].
+/// Every ending that is neither [`Outcome::Deployed`] nor [`Outcome::Skipped`]
+/// is written into `state.failed`, which is what [`unattended`] holds on and
+/// what an operator asking by name ignores. See [`record::record`].
 pub async fn deploy<D: Daemon>(
     daemon: &D,
     tree: &Tree,
@@ -235,6 +238,12 @@ pub async fn deploy<D: Daemon>(
 /// checked out, built or reloaded, and the record is not written, so the next
 /// comparison is still against the last sha actually deployed. See
 /// [`crate::skip`]. A failure to decide deploys as if there were no table.
+///
+/// A sheep with `reload_script` set is skipped later too, on the bytes its
+/// build produced rather than on the paths a push touched. That one is checked
+/// out and built, and then swaps nothing and records nothing, for the same
+/// reason: the record names what is serving, and `crate::retention` spares the
+/// release it names whatever its age.
 ///
 /// # Errors
 /// [`Error::Held`] if the branch head is the sha `state.failed` names, in
@@ -350,11 +359,14 @@ async fn go<D: Daemon>(
     // After the hold, so a sha that already failed is still said once rather
     // than judged again, and only for the poll loop: a hand deploy means now.
     if held == Held::Hold && skip::nothing_changed(tree, state, &settings.reload, &head).await {
-        return Ok(Outcome::Skipped { sha: head });
+        return Ok(Outcome::Skipped {
+            sha: head,
+            reason: skip::Reason::ReloadPaths,
+        });
     }
 
     let outcome = attempt(
-        daemon, tree, state, &head, started_at, &app, &settings, config,
+        daemon, tree, state, &head, started_at, &app, &settings, config, held,
     )
     .await;
     record(daemon, tree, state, &head, &outcome, config).await;
@@ -368,6 +380,11 @@ async fn go<D: Daemon>(
 /// Split out of [`go`] so that recording what the attempt came to has one
 /// place to happen rather than five. See [`deploy`] for what each ending
 /// means.
+///
+/// A sheep with `reload_script` set, asked for by the poll loop rather than by
+/// an operator, ends here before the release hook: its build is compared with
+/// what is serving, and an unchanged script runs no hook, swaps nothing and
+/// records nothing.
 #[expect(clippy::too_many_arguments, reason = "one deploy, one call site")]
 async fn attempt<D: Daemon>(
     daemon: &D,
@@ -378,6 +395,7 @@ async fn attempt<D: Daemon>(
     app: &AppConfig,
     settings: &Settings,
     config: &DogConfig,
+    held: Held,
 ) -> Result<Outcome, Error> {
     let sheep = tree.sheep();
     // The build turn for this repository, taken before the release is checked
@@ -407,6 +425,13 @@ async fn attempt<D: Daemon>(
     };
     refuse_ungated_verification(sheep, &staged.app, state.verify)?;
     let snapshot = linkcheck::Snapshot::before(sheep, &staged.release, &staged.linked);
+    // What is serving, read now, while this repository's build turn is held and
+    // before anything of this deploy's has been written. Only the poll loop is
+    // answered by a skip, and only for a sheep that asked for it.
+    let serving = match (held, settings.reload_script, &started_at) {
+        (Held::Hold, true, Some(live)) => skip::serving_script(sheep, &staged.app, live).await,
+        _ => None,
+    };
     // A release another sheep of this repository already built, or this one
     // built on an earlier attempt, is not built again: its marker says the
     // checkout finished and the build exited zero, and the release directory
@@ -434,6 +459,17 @@ async fn attempt<D: Daemon>(
     if !staged.reused {
         mark_built(&staged.marker)?;
     }
+    // Ahead of the release hook, so a skip runs none of it. The build is paid
+    // for and its release is on disk with its marker; what is refused is the
+    // swap, the reload and the record.
+    if let Some(serving) = serving
+        && skip::built_script_matches(sheep, &staged.app, &staged.release, &serving).await
+    {
+        return Ok(Outcome::Skipped {
+            sha: head.to_owned(),
+            reason: skip::Reason::UnchangedScript,
+        });
+    }
     run_release_hook(tree, head, &staged, config).await?;
     // Let go at the swap, not at the end of the deploy: the lock is the
     // build's, and a reload of another sheep of the same repository must never
@@ -448,6 +484,7 @@ mod tests {
     mod build_lock;
     mod clones;
     mod hooks;
+    mod reload_script;
     mod retarget;
     mod reuse;
     mod settings;

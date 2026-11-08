@@ -479,8 +479,8 @@ fn report(sheep: &str, state: &State, outcome: &Outcome) -> u8 {
     match outcome {
         Outcome::UpToDate => println!("{sheep} is up to date at {}", deployed(state)),
         Outcome::Deployed { sha } => println!("{sheep} deployed {sha}"),
-        Outcome::Skipped { sha } => {
-            println!("{sheep} skipped {sha}, nothing under its reload paths changed");
+        Outcome::Skipped { sha, reason } => {
+            println!("{sheep} skipped {sha}, {}", reason.phrase());
         }
         Outcome::RolledBack { to, why } => println!("{sheep} rolled back to {to}: {why}"),
     }

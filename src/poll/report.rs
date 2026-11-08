@@ -88,8 +88,9 @@ pub(super) fn report(sheep: &str, outcome: &Result<Outcome, Error>) -> Option<Sa
     match outcome {
         Ok(Outcome::UpToDate) => None,
         Ok(Outcome::Deployed { sha }) => Some(Said::Note(format!("{sheep} deployed {sha}"))),
-        Ok(Outcome::Skipped { sha }) => Some(Said::Note(format!(
-            "{sheep} skipped {sha}, nothing under its reload paths changed"
+        Ok(Outcome::Skipped { sha, reason }) => Some(Said::Note(format!(
+            "{sheep} skipped {sha}, {}",
+            reason.phrase()
         ))),
         Ok(Outcome::RolledBack { to, why }) => Some(Said::Complaint(format!(
             "{sheep} rolled back to {to}: {why}"
@@ -169,6 +170,8 @@ pub(super) fn worth_saying(
 
 #[cfg(test)]
 mod tests {
+    use crate::skip::Reason;
+
     use super::*;
 
     /// fails if a panic inside a deploy stops being caught. The loop's one
@@ -319,5 +322,34 @@ mod tests {
             panic!("a failure is a complaint: {err:?}");
         };
         assert!(text.starts_with("web: "), "{text}");
+    }
+
+    /// fails if a skip stops saying which of its two reasons it was. An
+    /// operator who set `reload_script` and sees the reload-paths sentence has
+    /// been told the wrong thing about their own setting.
+    #[test]
+    fn a_skip_says_which_of_the_two_reasons_it_was() {
+        let skipped = |reason| {
+            report(
+                "web",
+                &Ok(Outcome::Skipped {
+                    sha: "a1b2c3".to_owned(),
+                    reason,
+                }),
+            )
+        };
+
+        assert_eq!(
+            skipped(Reason::ReloadPaths),
+            Some(Said::Note(
+                "web skipped a1b2c3, nothing under its reload paths changed".to_owned()
+            ))
+        );
+        assert_eq!(
+            skipped(Reason::UnchangedScript),
+            Some(Said::Note(
+                "web skipped a1b2c3, its built script is unchanged".to_owned()
+            ))
+        );
     }
 }

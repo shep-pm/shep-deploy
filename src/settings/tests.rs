@@ -27,7 +27,7 @@ fn a_table_parses_into_settings() {
     let app = fixtures::app_with_settings(
         "web",
         "command = 'make build'\nartifacts = ['target/release/koji']\n\
-         reload = ['cmd/voting']\n\
+         reload = ['cmd/voting']\nreload_script = true\n\
          [release]\ncommand = 'migrate'\nenv = { PASSWORD = 'hunter2' }\n\
          [after]\ncommand = 'purge-cache'\n",
     );
@@ -37,6 +37,7 @@ fn a_table_parses_into_settings() {
     assert_eq!(settings.command.as_deref(), Some("make build"));
     assert_eq!(settings.artifacts, [PathBuf::from("target/release/koji")]);
     assert_eq!(settings.reload, ["cmd/voting"]);
+    assert!(settings.reload_script);
     assert_eq!(settings.release.command.as_deref(), Some("migrate"));
     assert_eq!(
         settings.release.env.get("PASSWORD").map(String::as_str),
@@ -138,7 +139,7 @@ fn debug_redacts_hook_env_values() {
         "Settings { interval: UpDuration(30s), retention: 5, git_timeout: UpDuration(300s), \
          build_timeout: UpDuration(3600s), passthrough: [], branch: None, watch: Auto, \
          verify: Probed, command: Some(\"make\"), build_env: <0 vars>, artifacts: [], reload: [], \
-         release: HookSpec { command: Some(\"migrate\"), env: <1 vars> }, \
+         reload_script: false, release: HookSpec { command: Some(\"migrate\"), env: <1 vars> }, \
          after: HookSpec { command: None, env: <0 vars> } }"
     );
 }
@@ -283,7 +284,7 @@ fn the_schema_publishes_every_key_and_marks_the_ones_that_are_not_per_sheep() {
 
     assert_eq!(
         properties.len(),
-        14,
+        15,
         "a key was added or removed without this test being read"
     );
     for name in properties.keys() {

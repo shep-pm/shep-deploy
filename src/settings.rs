@@ -198,6 +198,12 @@ pub struct Settings {
     /// Git pathspecs, relative to the repository root. A directory name matches
     /// its contents. Empty means every new sha deploys.
     pub reload: Vec<String>,
+    /// Whether an unattended deploy may also skip a new commit whose build
+    /// produced a `script` byte-identical to the one now serving. Off by
+    /// default, and never for a deploy asked for by name. It fits a compiled
+    /// app: an interpreted app's `script` misses the files it imports, and a Go
+    /// build stamps the commit into the binary unless it passes `-buildvcs=false`.
+    pub reload_script: bool,
     /// Runs after the build and before the swap.
     pub release: HookSpec,
     /// Runs once the new release is swapped in, verified and recorded.
@@ -225,6 +231,7 @@ impl fmt::Debug for Settings {
             )
             .field("artifacts", &self.artifacts)
             .field("reload", &self.reload)
+            .field("reload_script", &self.reload_script)
             .field("release", &self.release)
             .field("after", &self.after)
             .finish()
@@ -246,6 +253,7 @@ impl Default for Settings {
             build_env: BTreeMap::new(),
             artifacts: Vec::new(),
             reload: Vec::new(),
+            reload_script: false,
             release: HookSpec::default(),
             after: HookSpec::default(),
         }

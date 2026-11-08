@@ -1,17 +1,45 @@
-//! Whether a push touches anything a sheep runs from.
+//! Whether a push has anything a sheep runs from in it.
 //!
 //! One repository can be several sheep, and the poll loop compares only
-//! shas, so a push to any of them reloaded all of them. A sheep whose
-//! `reload` setting names the paths it runs from is left alone by a push
-//! that changes none of them. See [`changed`].
+//! shas, so a push to any of them reloaded all of them. Two answers say it
+//! did not: nothing under the sheep's `reload` pathspecs changed, and the
+//! build produced the `script` the sheep is already serving. The first
+//! needs a path list and works for any app; the second needs none and is
+//! exact only for a compiled one. See [`changed`] and [`serving_script`].
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use shep_client::shep_core::config::AppConfig;
 
 use crate::error::Error;
 use crate::git;
 use crate::paths::Tree;
 use crate::shared;
 use crate::state::State;
+
+/// Why a deploy was skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reason {
+    /// Nothing under the sheep's `reload` pathspecs changed. See [`nothing_changed`].
+    ReloadPaths,
+    /// The build produced the `script` the sheep is already serving. See
+    /// [`serving_script`] and [`built_script_matches`].
+    UnchangedScript,
+}
+
+impl Reason {
+    /// The tail of the line that says a skip, after `<sheep> skipped <sha>,`.
+    ///
+    /// One place spells it so the poll loop and a deploy asked for by name
+    /// cannot drift apart on what a skip was for.
+    pub(crate) const fn phrase(&self) -> &'static str {
+        match self {
+            Self::ReloadPaths => "nothing under its reload paths changed",
+            Self::UnchangedScript => "its built script is unchanged",
+        }
+    }
+}
 
 /// Whether `to` changes anything under the `reload` pathspecs, compared with
 /// `from`.
@@ -59,6 +87,70 @@ pub(crate) async fn nothing_changed(
                  deploying it: {err}",
                 tree.sheep()
             );
+            false
+        }
+    }
+}
+
+/// `app`'s script inside `release`, or `None` when it names no file inside one.
+///
+/// The cutover registers the sheep at the tree's `current` symlink, so a
+/// relative `script` is the same path inside every release of that tree. An
+/// absolute one, or a `~` one, names a file no build of this repository wrote,
+/// and comparing it would compare one file with itself.
+fn script_in(release: &Path, app: &AppConfig) -> Option<PathBuf> {
+    let script = Path::new(&app.script);
+    (!script.is_absolute() && !app.script.starts_with('~')).then(|| release.join(script))
+}
+
+/// `release`'s script bytes, or why it has none to compare.
+fn read_script(release: &Path, app: &AppConfig) -> Result<Vec<u8>, Error> {
+    let Some(path) = script_in(release, app) else {
+        return Err(Error::Config(format!(
+            "`{}` is not a path inside a release, so there is no built script to \
+             compare; `script` is compared as the file each release holds at that path",
+            shared::printable(&app.script)
+        )));
+    };
+    fs::read(&path).map_err(Error::at(&path))
+}
+
+/// The script bytes `live` is serving.
+///
+/// Read before the build rather than at the compare, which is the whole of why
+/// it is its own step: a release's `target` is a symlink at the repository's
+/// shared build cache, so a script under it is one file every release of that
+/// remote resolves to, and the build has already replaced it by the time the
+/// compare runs. Reading it then would compare a build with itself and skip
+/// every commit.
+///
+/// `None` is "nothing to compare against", said out loud. The caller deploys.
+pub(crate) async fn serving_script(sheep: &str, app: &AppConfig, live: &Path) -> Option<Vec<u8>> {
+    let (app, live) = (app.clone(), live.to_owned());
+    match shared::off_thread(move || read_script(&live, &app)).await {
+        Ok(bytes) => Some(bytes),
+        Err(why) => {
+            eprintln!("shep-deploy: {sheep}: cannot compare its built script, deploying it: {why}");
+            None
+        }
+    }
+}
+
+/// Whether `release`'s build produced `serving` byte for byte.
+///
+/// A failure to read `release`'s script answers `false` and says why, so a
+/// script the dog cannot read deploys as it always did.
+pub(crate) async fn built_script_matches(
+    sheep: &str,
+    app: &AppConfig,
+    release: &Path,
+    serving: &[u8],
+) -> bool {
+    let (app, release, serving) = (app.clone(), release.to_owned(), serving.to_vec());
+    match shared::off_thread(move || read_script(&release, &app)).await {
+        Ok(bytes) => bytes == serving,
+        Err(why) => {
+            eprintln!("shep-deploy: {sheep}: cannot compare its built script, deploying it: {why}");
             false
         }
     }
