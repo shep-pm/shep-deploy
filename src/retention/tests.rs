@@ -477,6 +477,224 @@ fn a_tree_with_an_unreadable_record_keeps_the_cache() {
     assert!(repo.cache_target().is_dir(), "the cache does not");
 }
 
+/// Two sheep of one remote, as a deploy leaves them: each linked to the
+/// shared clone for that remote, each with a record naming it, each with
+/// three built releases and `current` at the newest, and every release
+/// linking `target` into the one build cache the repository holds.
+///
+/// The shas come back oldest first, so `shas.last()` is what both `current`
+/// links name.
+fn two_sheep_sharing_a_build() -> (tempfile::TempDir, Tree, Tree, Repo, Vec<String>) {
+    let origin = fixtures::empty_checkout();
+    let mut shas = Vec::new();
+    for i in 0..3 {
+        fixtures::commit(
+            origin.path(),
+            &[(&format!("file-{i}.txt"), "x")],
+            &format!("commit {i}"),
+        );
+        shas.push(fixtures::head_of(origin.path()));
+    }
+    let remote = origin.path().to_str().expect("utf-8").to_owned();
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let repo = Repo::for_remote(home.path(), &remote);
+    git::init_bare(&repo.git()).expect("bare");
+    fs::create_dir_all(repo.cache_target()).expect("cache");
+    fs::write(repo.cache_target().join("artifact"), "warm").expect("warm cache");
+
+    let trees = ["web", "api"].map(|sheep| {
+        let tree = Tree::for_sheep(home.path(), sheep);
+        fs::create_dir_all(tree.root()).expect("tree");
+        tree.link_clone(&repo).expect("link");
+        git::fetch(&tree.git(), &remote, "main", fixtures::TEST_BUDGET).expect("fetch");
+        for sha in &shas {
+            git::worktree_add(&tree.git(), &tree.release(sha), sha).expect("worktree");
+            fs::write(tree.release(sha).join("built.txt"), "built").expect("dirty the release");
+            symlink(repo.cache_target(), tree.release(sha).join("target"))
+                .expect("link the release at the cache");
+        }
+        swap::point_at(
+            &tree.current(),
+            &tree.release(shas.last().expect("a release")),
+        )
+        .expect("current");
+        State {
+            remote: remote.clone(),
+            deployed: shas.last().cloned(),
+            ..fixtures::state()
+        }
+        .write(&tree.state_file())
+        .expect("record");
+        tree
+    });
+
+    // Leaked deliberately: every remote in this fixture is a path under
+    // this TempDir, and the trees outlive the function.
+    let _ = origin.keep();
+    let [web, api] = trees;
+    (home, web, api, repo, shas)
+}
+
+/// fails if pruning one of two sheep of one remote reaches into the other:
+/// its releases, or the build cache both compile into.
+///
+/// A release is a sheep's own, but the build is the repository's, and
+/// `prune` is called for one tree at a time. The cache is one directory
+/// beside the shared clone, so a cycle that reclaimed it would leave the
+/// other sheep serving through a dangling `target` and building from
+/// scratch.
+#[test]
+fn pruning_one_sheep_leaves_the_build_the_other_shares() {
+    let (home, web, api, repo, shas) = two_sheep_sharing_a_build();
+    let live = shas.last().expect("three releases").clone();
+
+    prune(&web, 2, &[live.as_str()]).expect("prunes");
+
+    assert!(
+        !web.release(&shas[0]).exists(),
+        "web's own oldest release is reclaimed"
+    );
+    for sha in &shas {
+        assert!(
+            api.release(sha).exists(),
+            "and nothing of api's: {sha} is still checked out"
+        );
+    }
+    assert!(
+        repo.cache_target().join("artifact").is_file(),
+        "the build they share stays"
+    );
+    assert!(
+        fs::canonicalize(api.release(&live).join("target")).is_ok(),
+        "and api's live release still resolves through it"
+    );
+    drop(home);
+}
+
+/// fails if letting go of one of two sheep of one remote stops the other
+/// deploying, or takes the build it deploys with.
+///
+/// This is the ordinary case of two sheep off one repository: both linked to
+/// one clone, both with records. Removing the first must leave the second
+/// with its clone, its releases and its cache, and the build must go only
+/// with the last of them.
+#[test]
+fn removing_one_sheep_leaves_the_other_deploying() {
+    let (home, web, api, repo, shas) = two_sheep_sharing_a_build();
+    let live = shas.last().expect("three releases").clone();
+    let remote = State::read(&api.state_file())
+        .expect("api's record")
+        .remote
+        .clone();
+
+    assert!(
+        !release_clone(home.path(), &web).expect("releases"),
+        "api still links to the clone, so nothing goes"
+    );
+    assert!(web.git().symlink_metadata().is_err(), "web's link is gone");
+
+    assert_eq!(
+        git::remote_head(&api.git(), "main").expect("api's branch still resolves"),
+        live,
+        "api's clone is the same clone it deployed from"
+    );
+    git::fetch(&api.git(), &remote, "main", fixtures::TEST_BUDGET)
+        .expect("api can fetch into it again");
+    for sha in &shas {
+        assert!(api.release(sha).is_dir(), "api's release {sha} is intact");
+    }
+    assert!(
+        repo.cache_target().join("artifact").is_file(),
+        "and so is the build it compiles into"
+    );
+
+    assert!(release_clone(home.path(), &api).expect("releases"));
+    assert!(
+        !repo.root().exists(),
+        "the build goes with the last sheep that names it"
+    );
+}
+
+/// fails if the build goes while a sheep's `current` names it.
+///
+/// The other sheep here owns its clone and has no record at all, which is
+/// what [`crate::optin::prepare_with`] leaves when a run dies between its swap
+/// and its record write: `current` names a built release, that release
+/// links `target` into the repository's cache, and no record exists to say
+/// any of it is deployed. Reading records alone saw nothing and removed the
+/// cache, so the live release's `current/target` went dangling and the app
+/// lost `./target/release/<bin>` at its next restart.
+#[test]
+fn a_build_named_by_a_sheeps_current_is_never_removed() {
+    let remote = "https://example.com/x.git";
+    let (home, linked, own, repo) = a_linked_tree_and_one_other(remote);
+    git::init_bare(&own.git()).expect("its own clone");
+    assert!(!own.state_file().exists(), "no record was ever written");
+
+    fs::create_dir_all(own.release(fixtures::SHA)).expect("release");
+    fs::write(own.release(fixtures::SHA).join("built.txt"), "built").expect("the release is built");
+    symlink(
+        repo.cache_target(),
+        own.release(fixtures::SHA).join("target"),
+    )
+    .expect("the release's link at the cache");
+    swap::point_at(&own.current(), &own.release(fixtures::SHA)).expect("current");
+    fs::create_dir_all(repo.cache_target()).expect("cache");
+    fs::write(repo.cache_target().join("artifact"), "warm").expect("warm cache");
+
+    assert!(release_clone(home.path(), &linked).expect("releases"));
+
+    assert!(!repo.git().exists(), "no tree links to the clone any more");
+    assert!(
+        repo.cache_target().join("artifact").is_file(),
+        "but the build its current links through stays, with what is in it"
+    );
+    assert!(
+        fs::canonicalize(own.release(fixtures::SHA).join("target")).is_ok(),
+        "and the live release's link still resolves"
+    );
+}
+
+/// fails if a sheep that can no longer build keeps the shared build alive.
+///
+/// The boundary of the rule above, and the half that is deliberate: a sheep
+/// that was put back has no clone of its own and no link to one, so it has
+/// nothing to build with, and its tree is not serving. Its record and its
+/// releases stay, and the build goes with the last sheep that can still use
+/// it. See [`another_tree_uses`].
+#[test]
+fn a_sheep_with_no_clone_and_no_link_keeps_nothing() {
+    let remote = "https://example.com/x.git";
+    let (home, linked, put_back, repo) = a_linked_tree_and_one_other(remote);
+    assert!(
+        put_back.git().symlink_metadata().is_err(),
+        "its link is gone"
+    );
+    State {
+        remote: remote.to_owned(),
+        ..fixtures::state()
+    }
+    .write(&put_back.state_file())
+    .expect("its record stays");
+
+    fs::create_dir_all(put_back.release(fixtures::SHA)).expect("release");
+    symlink(
+        repo.cache_target(),
+        put_back.release(fixtures::SHA).join("target"),
+    )
+    .expect("a leftover link at the cache");
+    swap::point_at(&put_back.current(), &put_back.release(fixtures::SHA)).expect("current");
+    fs::create_dir_all(repo.cache_target()).expect("cache");
+
+    assert!(release_clone(home.path(), &linked).expect("releases"));
+
+    assert!(
+        !repo.root().exists(),
+        "the whole repository directory goes with the last sheep that can build"
+    );
+}
+
 /// fails if retention removes a shared clone while pruning a release.
 /// It reclaims worktrees and nothing else, and a clone belongs to every
 /// tree linking to it.

@@ -251,11 +251,16 @@ relinked at the new cache when it is built again, so a retry of it still builds.
 
 Removing the dog lets go of the link of each sheep it puts back, and of each
 whose cutover never landed; the clone goes with the last link, and the build
-cache goes with the clone. One exception: a tree that owns a clone of its own
-and has a record naming that remote keeps the cache, because its releases link
-`target` into it and removing it would leave the app serving from a dangling
-link. A sheep left running from its tree keeps its link, and so the clone. A deploy whose recorded
-`remote` is not the one its tree's link was made for is refused, so a hand edit
+cache goes with the clone. One exception, and it is a question about the
+repository rather than about the sheep being removed: a tree that owns a clone
+of its own keeps that build while any sheep of the repository names it, either
+from its record - the remote the cache is keyed by - or from its `current`,
+which resolves through a release linked at it with `target`. Either one means a
+live release would be left reading and building through a dangling link. A sheep
+that owns no clone and links to none has nothing to build with, so it keeps
+nothing. A sheep left running from its tree keeps its link, and so the clone. A
+deploy whose recorded `remote` is not the one its tree's link was made for is
+refused, so a hand edit
 cannot fetch one repository into a clone other sheep deploy from; run `init`
 again to relink. A tree set up before this keeps the clone it has until you
 run `init` again: that links it to the shared one and removes the clone it
@@ -421,6 +426,13 @@ directories in the ordinary case and up to two more after that. It cannot be
 below 2: the release a failed deploy rolls back to is the second newest, so
 anything lower would silently disable rollback, and it is refused rather than
 clamped.
+
+The count is per target, because a release is a target's own: `current` can only
+ever name something under its own `releases/`, and one sheep's deploy rate has
+no bearing on which release another sheep rolls back to. What two sheep of one
+repository do share - the clone and the build cache beside it - is reclaimed per
+repository instead, and never while any sheep of that repository names it from
+its `current` or its record. See [Layout](#layout).
 
 `interval`, `git_timeout` and `build_timeout` are refused under a second. A
 bare number is milliseconds, so `interval = "30"` is thirty milliseconds and a

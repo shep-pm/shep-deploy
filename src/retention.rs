@@ -18,13 +18,20 @@
 //!   least two (`crate::config` refuses less), so it is never a candidate in
 //!   the cycle that follows its own failure. After a verified deploy every
 //!   instance has turned over, so nothing runs from anything older.
+//! - The build a repository shares - the clone under `repos/<key>` and the
+//!   cache beside it - is spared while any sheep of that repository names it,
+//!   from its `current` or from its record. See [`release_clone`].
 //!
 //! "Retention could delete what something is running from" is the right
 //! worry to have about this module, so here is the rest of the answer: [`prune`]
 //! reads `releases/` and nothing else. A sheep's pre-adoption instance runs
-//! from the operator's own checkout, which is not in there. [`release_clone`]
-//! reads the other trees' records for the same reason - what is running from a
-//! shared build cache is not visible from the cache itself.
+//! from the operator's own checkout, which is not in there. A release is a
+//! sheep's own, and its `releases/` is the only place its `current` can name,
+//! so no tree's pruning can reach another's. What is shared is the build, and a
+//! build belongs to a repository rather than to a tree, so [`release_clone`]
+//! asks about every tree beside the one it is releasing: what each one's record
+//! names, and what each one's `current` links through. Neither is visible from
+//! the cache itself.
 //!
 //! # Why a failure here never fails a deploy
 //!
@@ -160,15 +167,13 @@ pub fn prune(tree: &Tree, keep: usize, recorded: &[&str]) -> Result<Vec<String>,
 ///
 /// A tree with a clone of its own, or none, is left as it is.
 ///
-/// The build cache beside the clone goes only with the last tree that deploys
-/// its remote, and that is not only the trees linking to the clone. A tree that
-/// owns its clone builds against that cache and links every release's `target`
-/// into it, so removing it would leave one serving from a dangling link, and
-/// would take the cache out from under a build running at that moment. No link
-/// says such a tree is there; its record is the only thing that does, so the
-/// cache stays while another tree owns a clone and its record names the remote.
-/// See [`another_tree_deploys`]. No build turn is needed for the same reason: a
-/// tree with a record is the only one that can be building here, and a setup
+/// The build beside the clone - the cache every sheep of this remote compiles
+/// into - goes only with the last sheep that names it, and naming it is a
+/// per-repository question. The trees linking to the clone are the easy half:
+/// while any of them is there the whole repository directory stays. A tree that
+/// owns a clone of its own is the other half, and [`another_tree_uses`] reads
+/// both of its witnesses, its record and its `current`. No build turn is needed
+/// here: a tree with a record is the only one that can be building, and a setup
 /// without one links its `git` to the clone under this lock before it builds.
 ///
 /// # Errors
@@ -193,7 +198,7 @@ pub fn release_clone(shep_home: &Path, tree: &Tree) -> Result<bool, Error> {
     if tree_linking_to(shep_home, &repo.git())?.is_some() {
         return Ok(false);
     }
-    let doomed = if another_tree_deploys(shep_home, tree, &repo)? {
+    let doomed = if another_tree_uses(shep_home, tree, &repo)? {
         repo.git()
     } else {
         repo.root().to_owned()
@@ -202,15 +207,20 @@ pub fn release_clone(shep_home: &Path, tree: &Tree) -> Result<bool, Error> {
     Ok(true)
 }
 
-/// Whether a tree other than `tree` owns a clone of its own and has a record
-/// naming the remote `repo` keys.
+/// Whether a tree other than `tree` still uses the build `repo` holds: its
+/// clone and the cache beside it.
 ///
-/// The shape matters. A tree linked to `repo`'s clone is counted by
-/// [`tree_linking_to`], which runs first. A tree with neither a link nor a clone
-/// has nothing to build with, and that is exactly a restored sheep: its `git` is
-/// unlinked here and its record stays. A tree that owns a clone is the one this
-/// cannot see any other way, and its record is the only thing that says which
-/// remote it deploys.
+/// A tree linked to `repo`'s clone is counted by [`tree_linking_to`], which runs
+/// first. A tree with neither a link nor a clone has nothing to build with - a
+/// restored sheep, which keeps nothing. A tree that owns a clone is asked both
+/// questions that can be asked of it:
+///
+/// - its record names the remote `repo` keys, so its next build compiles into
+///   this cache;
+/// - its `current` resolves through a release linked at this cache. A record
+///   cannot say this one: [`crate::optin::prepare_with`] swaps `current` before it
+///   writes the record, so a run killed between the two leaves a built release
+///   linked here with no record at all.
 ///
 /// A record that cannot be read counts as one that does: a cache left behind
 /// costs disk, and one removed from under a live release costs the release.
@@ -220,8 +230,8 @@ pub fn release_clone(shep_home: &Path, tree: &Tree) -> Result<bool, Error> {
 ///
 /// # Errors
 /// [`Error::Io`], naming `deploy/`, if it cannot be listed.
-fn another_tree_deploys(shep_home: &Path, tree: &Tree, repo: &Repo) -> Result<bool, Error> {
-    let deploy = shep_home.join("deploy");
+fn another_tree_uses(shep_home: &Path, tree: &Tree, repo: &Repo) -> Result<bool, Error> {
+    let (deploy, cache) = (shep_home.join("deploy"), repo.cache_target());
     for entry in fs::read_dir(&deploy).map_err(Error::at(&deploy))? {
         let entry = entry.map_err(Error::at(&deploy))?;
         let (name, root) = (entry.file_name(), entry.path());
@@ -232,16 +242,35 @@ fn another_tree_deploys(shep_home: &Path, tree: &Tree, repo: &Repo) -> Result<bo
             continue;
         }
         let record = root.join("deploy.toml");
-        if !record.is_file() {
-            continue;
+        if record.is_file() {
+            match State::remote_at(&record) {
+                Some(remote) if tree.repo(&remote) == *repo => return Ok(true),
+                Some(_) => {}
+                None => return Ok(true),
+            }
         }
-        match State::remote_at(&record) {
-            Some(remote) if tree.repo(&remote) == *repo => return Ok(true),
-            Some(_) => {}
-            None => return Ok(true),
+        if serves_from(&root.join("current"), &cache) {
+            return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Whether the tree whose `current` is `current` has a live release whose
+/// `target` link lands in the build cache `cache`.
+///
+/// The link is read rather than followed, and compared by where it resolves to,
+/// so one cache spelled two ways is one cache (see [`shared::same_path`]). A
+/// `target` the release ships itself - a directory, or a link naming somewhere
+/// this crate never linked - is not this dog's build and does not count.
+fn serves_from(current: &Path, cache: &Path) -> bool {
+    let Ok(Some(release)) = swap::resolve(current) else {
+        return false;
+    };
+    let Ok(named) = fs::read_link(release.join("target")) else {
+        return false;
+    };
+    shared::same_path(&release.join(named), cache)
 }
 
 /// The first tree directory under `shep_home/deploy` whose `git` links to
