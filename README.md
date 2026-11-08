@@ -164,16 +164,20 @@ command = "go build -buildvcs=false -o app ./cmd/app"
 reload_script = true
 ```
 
-- It compares with a record, not with the live release. A release's `target` is
-  a symlink at the repository's shared build cache, so a `script` under it is one
-  file every release of that remote resolves to, and whichever sheep built last
-  owns its bytes: the second sheep of a repository would read the first one's
-  binary through its own live release and skip the reload it needs. `deploy.toml`
-  carries `served_script`, the digest of the script this sheep's own last landing
-  put in place. Every landing writes one, whether or not the key is set, and an
-  ending that landed nothing drops it.
+- Both sides of the compare are digests, each taken inside the repository's
+  build turn, and neither is the live release. A release's `target` is a symlink
+  at that cache, so a `script` under it is one file every release of the remote
+  resolves to, and whichever sheep built last owns its bytes. The second sheep of
+  a repository would read the first one's binary through its own live release and
+  skip the reload it needs, and the first would do the same a moment after it let
+  go of the build turn, to a hand deploy of the other. `deploy.toml` carries
+  `served_script`, the digest of the script this sheep's own build produced the
+  last time it landed a release. Every landing writes one, whether or not the key
+  is set, and an ending that landed nothing drops it.
 - A sheep with nothing recorded yet deploys. A record written before the key, or
   one the cutover wrote and no deploy has landed since, has no digest to match.
+- `deploy <sheep> --promote` records none. It builds nothing and holds no build
+  turn, so it has no bytes it can call its own, and the next deploy records one.
 - It fits a compiled app, and it is exact for one: the file the sheep is
   launched from is the file the build produced. An interpreted app's `script`
   is one file and the ones it imports are not compared, so a change to any of

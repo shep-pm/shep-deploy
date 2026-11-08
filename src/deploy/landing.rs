@@ -15,7 +15,7 @@ use crate::deploy::{Outcome, Staged, record_landing};
 use crate::error::Error;
 use crate::paths::Tree;
 use crate::state::State;
-use crate::{hook, skip, swap};
+use crate::{hook, swap};
 
 /// Runs the release hook over `head`'s release, which is built.
 ///
@@ -54,10 +54,18 @@ pub(crate) async fn run_release_hook(
 /// refused if it names something else now. `staged` is what
 /// [`super::stage_release`] read from the release.
 ///
+/// `stamp` is this release's built script as its caller digested it, and goes
+/// into [`State::served_script`] beside the sha. It is the caller's rather than
+/// read here because the only moment the file belongs to this deploy is inside
+/// the repository's build turn, which this function runs after: see
+/// [`super::attempt`]. `None` from a caller that built nothing, which records a
+/// release with no digest rather than one belonging to whoever built last.
+///
 /// # Errors
 /// [`Error::Raced`] if `current` moved since `started_at` was read. Then as
 /// the tail of [`super::deploy`]: see its `# Errors` for the rollback
 /// endings, which are the same here.
+#[expect(clippy::too_many_arguments, reason = "one landing, two call sites")]
 pub(crate) async fn swap_and_land<D: Daemon>(
     daemon: &D,
     tree: &Tree,
@@ -65,6 +73,7 @@ pub(crate) async fn swap_and_land<D: Daemon>(
     head: &str,
     started_at: Option<PathBuf>,
     staged: &Staged,
+    stamp: Option<String>,
     config: &DogConfig,
 ) -> Result<Outcome, Error> {
     let sheep = tree.sheep();
@@ -106,20 +115,17 @@ pub(crate) async fn swap_and_land<D: Daemon>(
         // sha into `failed` next to the same sha in `deployed`: a record
         // that said the release was serving and held at once.
         Landed::Verified => {
-            // What this sheep is now running, recorded beside the sha it is
-            // running it from. `reload_script` compares every later build with
-            // this and with nothing else, because the file at the script path
-            // is this repository's shared build cache and another sheep's build
-            // replaces it. Read here, once the reload has landed, so it is the
-            // bytes the new process was exec'd from rather than the ones this
-            // build wrote. Recorded whether or not the sheep asked for the
-            // compare, so turning the key on needs no deploy first.
+            // What this deploy's own build produced, recorded beside the sha it
+            // is running it from. `reload_script` compares every later build
+            // with this and with nothing else, because the file at the script
+            // path is this repository's shared build cache and another sheep's
+            // build replaces it. It was digested in the build turn, above the
+            // swap, and is carried through rather than re-read here: by now a
+            // rival sheep of this remote may have rebuilt the cache, and a
+            // digest read at this moment describes its binary, not this one.
             //
-            // A script the dog cannot read leaves the field out, unsaid: a sheep
-            // that never asked for the compare is not owed a line about a digest
-            // it does not use, and one that did is told at the compare, which
-            // runs before this point.
-            let stamp = skip::stamp(app, &release).await.ok();
+            // `None` stays `None`, unsaid rather than wrong.
+            //
             // After the record write, so the record names the new sha even
             // when the hook fails, and only when it does: a hook that reads
             // `deploy.toml` would otherwise see the previous sha. Like the

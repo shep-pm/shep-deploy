@@ -388,6 +388,10 @@ async fn go<D: Daemon>(
 /// an operator, ends here before the release hook: its build is compared with
 /// the script its last landing recorded in [`State::served_script`], and an
 /// unchanged one runs no hook, swaps nothing and records nothing.
+///
+/// The digest of this build's script is taken here and nowhere else, inside the
+/// repository's build turn, and handed to [`swap_and_land`] to record beside the
+/// sha it lands.
 #[expect(clippy::too_many_arguments, reason = "one deploy, one call site")]
 async fn attempt<D: Daemon>(
     daemon: &D,
@@ -455,19 +459,29 @@ async fn attempt<D: Daemon>(
     if !staged.reused {
         mark_built(&staged.marker)?;
     }
-    // Ahead of the release hook, so a skip runs none of it. The build is paid
-    // for and its release is on disk with its marker; what is refused is the
-    // swap, the reload and the record.
+    // The digest of the script this build produced, taken once, here, and
+    // handed to both jobs that need it: the compare just below and the record
+    // the landing writes.
     //
-    // The digest is taken here, inside the build turn this deploy has not let go
-    // of yet, so the file it hashes is the one this build wrote and no rival
-    // sheep of this remote is inside the cache. It is compared with this tree's
-    // own record and never with the live release: see [`crate::skip`] for what
-    // the shared cache does to that comparison. A record written before the
-    // field, or a tree the cutover has served but no deploy has landed yet,
-    // holds nothing to compare with, and deploys.
+    // Inside the build turn, and never re-read once it is let go. A compiled
+    // app's script is a file in the repository's shared build cache, and every
+    // other sheep of this remote can rebuild that file the moment the turn is
+    // not held. Read it after the turn and an operator's `shep-deploy deploy
+    // <other sheep>` landing between this deploy's swap and its record has this
+    // one recording the other's binary as the one it is running - and every
+    // later build matching that binary is then skipped, with the sheep left on
+    // the release it was already serving. Round 4 of #184's review found that
+    // window, and the digest being the one this build wrote is the whole of
+    // what makes the compare mean anything: see [`crate::skip`].
+    //
+    // Ahead of the release hook, so a skip runs none of it and so that the
+    // compared digest and the recorded one are the same stage of the pipeline.
+    let stamp = skip::stamp(&staged.app, &staged.release).await;
+    // Compared with this tree's own record and never with the live release. A
+    // record written before the field, or a tree the cutover has served but no
+    // deploy has landed yet, holds nothing to compare with, and deploys.
     if held == Held::Hold && settings.reload_script {
-        match skip::stamp(&staged.app, &staged.release).await {
+        match &stamp {
             Ok(stamp) if state.served_script.as_deref() == Some(stamp.as_str()) => {
                 return Ok(Outcome::Skipped {
                     sha: head.to_owned(),
@@ -482,13 +496,19 @@ async fn attempt<D: Daemon>(
             }
         }
     }
+    // Recorded whether or not the sheep asked for the compare, so turning the
+    // key on needs no deploy first. A script this dog cannot read records none.
+    let stamp = stamp.ok();
     run_release_hook(tree, head, &staged, config).await?;
     // Let go at the swap, not at the end of the deploy: the lock is the
     // build's, and a reload of another sheep of the same repository must never
     // queue behind one.
     drop(building);
 
-    swap_and_land(daemon, tree, state, head, started_at, &staged, config).await
+    swap_and_land(
+        daemon, tree, state, head, started_at, &staged, stamp, config,
+    )
+    .await
 }
 
 #[cfg(test)]

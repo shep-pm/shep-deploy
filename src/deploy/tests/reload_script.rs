@@ -3,10 +3,11 @@
 //!
 //! The compare is against `State::served_script`, the digest the sheep's own
 //! last landing recorded, and these fixtures write one the way a landing does.
-//! Two of them put the script under the repository's shared build cache, which
-//! is where a comparison against the live release goes wrong: that file is one
-//! file every release of the remote resolves to, and another sheep's build has
-//! already replaced it.
+//! Several of them put the script under the repository's shared build cache,
+//! which is where a comparison against the live release goes wrong and where a
+//! digest taken after the build turn is let go goes wrong the same way: that
+//! file is one file every release of the remote resolves to, and another sheep
+//! has built it since this one looked.
 
 use std::fs;
 
@@ -14,6 +15,7 @@ use crate::deploy::test_support::{
     FIXTURE_TABLE, Fixture, Shepherd, another_sheep, fixture_before_any_release, shared_clone,
 };
 use crate::deploy::{Outcome, deploy, unattended};
+use crate::stage::{promote, stage};
 use crate::state::State;
 use crate::{fixtures, git, paths, skip, swap};
 
@@ -325,6 +327,66 @@ async fn a_script_under_the_shared_cache_is_compared_with_what_was_recorded() {
     assert_eq!(daemon.reload_count(), 0);
 }
 
+/// fails if the digest a landing records is read out of the shared cache after
+/// the build turn has been let go.
+///
+/// The same hazard as [`a_sheep_deploys_a_commit_another_sheep_of_its_remote_already_built`],
+/// from the other side: this deploy has swapped and is inside its reload, and a
+/// rival sheep of the same repository takes the build turn and lands its own
+/// binary in the shared cache while it waits. A digest read at that moment is
+/// the rival's, so the record says this sheep runs a binary it never built -
+/// and the next build matching those bytes is then reported as "its built
+/// script is unchanged" while the sheep goes on serving the release it was
+/// already on. Round 4 of #184's review found the window.
+#[tokio::test]
+async fn a_rival_build_that_lands_during_the_reload_is_not_recorded_as_this_sheeps_own() {
+    let daemon = a_sheep_that_builds("./target/release/app", CACHE_BUILD);
+    let mut web = under_the_shared_cache(&daemon, "one");
+    let script = web.tree.cache_target(&web.state.remote).join("release/app");
+    let daemon = daemon.rival_builds(&script, "rival");
+
+    let pushed = push(&web, &[("build/input.txt", "two")]);
+    let landed = unattended(&daemon, &web.tree, &mut web.state, &fixtures::dog_config())
+        .await
+        .expect("deploys");
+
+    assert_eq!(landed, Outcome::Deployed { sha: pushed }, "{landed:?}");
+    assert_eq!(
+        fs::read_to_string(&script).expect("reads"),
+        "rival",
+        "the rival's build landed while the sheep was reloading, and won the cache"
+    );
+    assert_eq!(
+        web.state.served_script,
+        Some(paths::digest(b"two")),
+        "the record names the binary this deploy built, not the one that landed during its reload"
+    );
+    assert_eq!(
+        State::read(&web.tree.state_file())
+            .expect("reads")
+            .served_script,
+        web.state.served_script,
+        "and that is what is on disk for the next tick to compare against"
+    );
+
+    // The deploy a digest read after the turn would have swallowed: this
+    // commit's build produces exactly the bytes the rival left in the cache, so
+    // a record naming those bytes matches them and the sheep is never reloaded
+    // onto the commit it is being asked to deploy.
+    let pushed = push(&web, &[("build/input.txt", "rival")]);
+    let next = unattended(&daemon, &web.tree, &mut web.state, &fixtures::dog_config())
+        .await
+        .expect("deploys");
+
+    assert_eq!(next, Outcome::Deployed { sha: pushed }, "{next:?}");
+    assert_eq!(
+        daemon.reload_count(),
+        2,
+        "and the sheep was reloaded onto it"
+    );
+    assert_eq!(web.state.served_script, Some(paths::digest(b"rival")));
+}
+
 /// fails if a sheep skips a reload because another sheep of its repository has
 /// already built the new binary into the shared cache.
 ///
@@ -389,4 +451,46 @@ async fn a_sheep_deploys_a_commit_another_sheep_of_its_remote_already_built() {
         "and both records now describe the binary each is running"
     );
     assert_eq!(daemon.reload_count(), 2, "and both were reloaded");
+}
+
+/// fails if a promote records a digest it never built.
+///
+/// A promote runs no build and holds no build turn, so the file at the staged
+/// release's script path belongs to whichever sheep of this repository built
+/// last, exactly as it does after a deploy lets its turn go. Recording that as
+/// this sheep's own is the same mistake, so a promote records none, and a record
+/// with none never matches: the most a promote costs is one reload that could
+/// have been skipped, and the next deploy records a digest of its own.
+#[tokio::test]
+async fn a_promote_records_no_script_digest() {
+    let daemon = a_sheep_that_builds("./target/release/app", CACHE_BUILD);
+    let mut web = under_the_shared_cache(&daemon, "one");
+    assert_eq!(web.state.served_script, Some(paths::digest(b"one")));
+
+    let pushed = push(&web, &[("build/input.txt", "two")]);
+    stage(&daemon, &web.tree, &mut web.state, &fixtures::dog_config())
+        .await
+        .expect("stages");
+    assert_eq!(
+        web.state.served_script,
+        Some(paths::digest(b"one")),
+        "a stage builds a release nothing is serving from, so it records nothing about it"
+    );
+
+    let outcome = promote(&daemon, &web.tree, &mut web.state, &fixtures::dog_config())
+        .await
+        .expect("promotes");
+
+    assert_eq!(outcome, Outcome::Deployed { sha: pushed });
+    assert_eq!(
+        web.state.served_script, None,
+        "the landing had no build turn of its own to take a digest inside"
+    );
+    assert_eq!(
+        State::read(&web.tree.state_file())
+            .expect("reads")
+            .served_script,
+        None,
+        "and the record says so too"
+    );
 }

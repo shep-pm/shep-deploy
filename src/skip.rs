@@ -18,6 +18,11 @@
 //! the live release would skip the reload for a sheep still running the old
 //! binary. What this tree's own last landing recorded in
 //! [`State::served_script`] is the half that identifies this sheep.
+//!
+//! Both sides of the compare are therefore digests rather than files, each one
+//! taken inside this tree's own build turn: the recorded one by the deploy that
+//! landed it, the asking one by the deploy that is asking. Nothing reads the
+//! path once the turn has been let go.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -129,22 +134,21 @@ fn stamped(release: &Path, app: &AppConfig) -> Result<String, Error> {
 
 /// What `release`'s `script` looks like, as [`State::served_script`] stores it.
 ///
-/// Two callers, and both are moments at which the file is this deploy's to
-/// describe. `crate::deploy`'s own attempt takes it after its build, inside the
-/// repository's build turn, so no other sheep's compiler is inside the cache
-/// yet; [`crate::deploy::swap_and_land`] takes it once its reload has landed,
-/// which is the file the sheep's process is now running from. At any other
-/// moment the digest belongs to whichever sheep built last.
+/// One caller, and it is the one moment the file is that deploy's to describe:
+/// `crate::deploy`'s own attempt takes it after its build, inside the
+/// repository's build turn, so no other sheep's compiler is inside the cache,
+/// and hands the answer to its compare and to the record its landing writes. At
+/// any other moment the digest belongs to whichever sheep built last, which is
+/// why nothing downstream re-reads it.
 ///
 /// Off the runtime's thread: it reads the whole file, which for a compiled app
 /// is a binary of some megabytes.
 ///
 /// # Errors
 /// [`Error::Config`] when `script` names no file inside a release, and
-/// [`Error::Io`] naming that path when it cannot be read. Each caller says what
-/// it is doing about it: the deploy that cannot compare prints why and deploys,
-/// and the landing that cannot record leaves the field out, which the next
-/// compare reports as "nothing to compare with".
+/// [`Error::Io`] naming that path when it cannot be read. Its caller prints why
+/// and deploys when the sheep asked for the compare, and records nothing when
+/// it did not, which the next compare reads as "nothing to compare with".
 pub(crate) async fn stamp(app: &AppConfig, release: &Path) -> Result<String, Error> {
     let (app, release) = (app.clone(), release.to_owned());
     shared::off_thread(move || stamped(&release, &app)).await
