@@ -120,6 +120,17 @@ fn relink_owned_clone(tree: &Tree, shep_home: &Path, repo: &Repo) -> Result<(), 
 /// [`Error::Io`] if `releases/` cannot be listed, or a release or its markers
 /// cannot be removed.
 fn drop_unregistered_releases(tree: &Tree) -> Result<(), Error> {
+    // An interrupted deletion must never leave a marker vouching for a partial release.
+    match std::fs::remove_dir_all(tree.completions()) {
+        Ok(()) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(Error::Io {
+                path: tree.completions(),
+                source,
+            });
+        }
+    }
     let releases = tree.releases();
     let entries = match std::fs::read_dir(&releases) {
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -139,16 +150,6 @@ fn drop_unregistered_releases(tree: &Tree) -> Result<(), Error> {
             .is_some_and(|name| is_sha(name) && entry.file_type().is_ok_and(|kind| kind.is_dir()));
         if is_release {
             std::fs::remove_dir_all(entry.path()).map_err(Error::at(&entry.path()))?;
-        }
-    }
-    match std::fs::remove_dir_all(tree.completions()) {
-        Ok(()) => {}
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(Error::Io {
-                path: tree.completions(),
-                source,
-            });
         }
     }
     Ok(())
