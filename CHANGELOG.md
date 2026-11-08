@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-11-08
+
+### Added
+
+- Run builds for one repository one at a time
+
+
 ## [0.7.3] - 2026-11-08
 
 ### Added
