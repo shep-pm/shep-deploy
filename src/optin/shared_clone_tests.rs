@@ -169,6 +169,25 @@ fn relinking_an_owned_clone_is_refused_while_another_tree_links_to_it() {
     );
 }
 
+#[test]
+fn relinking_an_owned_clone_is_refused_while_another_tree_links_to_it_relatively() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let remote = "https://example.com/owned";
+    let web = Tree::for_sheep(home.path(), "web");
+    let api = Tree::for_sheep(home.path(), "api");
+    git::init_bare(&web.git()).expect("web owns a clone");
+    std::fs::create_dir_all(api.root()).expect("api tree");
+    std::os::unix::fs::symlink("../web/git", api.git()).expect("relative clone link");
+
+    let err = share_clone(&web, home.path(), remote).expect_err("refuses");
+
+    assert!(matches!(err, Error::Config(_)), "{err}");
+    assert!(err.to_string().contains("api"), "{err}");
+    assert!(web.owns_clone(), "web keeps its clone");
+    assert!(api.git().join("HEAD").is_file(), "api still reaches it");
+    assert!(!Repo::for_remote(home.path(), remote).git().exists());
+}
+
 /// fails if `setup` on a tree an older version left with its own clone keeps
 /// that clone. Re-running `init` is the only way such a tree is migrated, and
 /// the tree it produces must be the one every later deploy fetches through.

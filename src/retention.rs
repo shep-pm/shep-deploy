@@ -208,7 +208,7 @@ pub fn tree_linking_to(shep_home: &Path, git_dir: &Path) -> Result<Option<PathBu
         let Ok(target) = fs::read_link(entry.path().join("git")) else {
             continue;
         };
-        if shared::same_path(&target, git_dir) {
+        if shared::same_path(&entry.path().join(target), git_dir) {
             return Ok(Some(entry.path()));
         }
     }
