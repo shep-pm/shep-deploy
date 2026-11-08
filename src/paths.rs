@@ -22,7 +22,8 @@
 //!
 //! $SHEP_HOME/deploy/repos/<key>/
 //! ├── git/                 the shared bare clone, one per remote; see [`Repo`]
-//! └── git.lock             held while one fetch into it runs
+//! ├── git.lock             held while one fetch into it runs
+//! └── git.build.lock       held while one release from this repository builds
 //! ```
 
 use std::path::{Component, Path, PathBuf};

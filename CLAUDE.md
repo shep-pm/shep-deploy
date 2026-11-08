@@ -345,7 +345,7 @@ class rather than the instances.
   `CARGO_TARGET_DIR` set.** Without it, source and destination collapse to the
   same path and the self-copy guard returns `Ok` before reaching anything the
   test is about. The test says so in its own doc; do not simplify it.
-- **Two locks per tree and a third per clone, and the order is fixed.**
+- **Four locks, and the order is fixed: tree, record, clone, build.**
   `lock::hold` is the deploy
   lock, non-blocking, held for a whole build. `lock::hold_record` is the
   record lock, blocking, held for one read and one write of `deploy.toml`:
@@ -357,8 +357,15 @@ class rather than the instances.
   `git` link and the clone's own path are one lock. `git::fetch` takes it for
   the fetch alone, and `share_clone` in `optin/prepare.rs` and
   `retention::release_clone` take it to make or sweep a shared clone. It is
-  taken inside the tree lock and never waits for a tree's or a record's. A
-  write to the sheep's table
+  taken inside the tree lock and never waits for a tree's or a record's.
+  `lock::hold_build` is the build lock, blocking, on `git.build.lock` beside
+  the SAME resolved clone, so two sheep of one remote queue for the build turn
+  and a reload never does. `deploy::attempt` takes it after its fetch and drops
+  it at the swap, not at the end of the deploy; nothing else takes it, and
+  nothing holding it waits for a tree's, a record's or a clone's. A tree that
+  still owns its clone has the turn beside its own clone and contends with
+  nothing, and `stage` does not take it at all, so a `--stage` build of one
+  repository can run beside a deploy's. A write to the sheep's table
   is one request and takes no lock. The
   cutover's promotion writes `watch = auto` to the table on the clean path
   only, over whatever `prepare` left there, so a `--watch manual` typed during
