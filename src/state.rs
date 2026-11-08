@@ -18,6 +18,7 @@
 //! the `cwd` and script the sheep ran with *before* adoption, captured once
 //! at opt-in and never touched again.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -222,22 +223,33 @@ impl State {
         Self::parse(path, false)
     }
 
-    /// The `remote` the record at `path` names, or `None` when the file cannot be
-    /// read or names none.
+    /// What the record at `path` says about releases: the `remote` it deploys
+    /// from, and the shas it names as `deployed` or `staged`. `None` when the
+    /// file cannot be read or names no remote.
     ///
-    /// One field, with nothing else about the record validated, for a caller
-    /// asking a question about somebody else's tree:
-    /// [`crate::retention::release_clone`] asks which remotes are still deployed
-    /// before it removes a build cache, and a record it cannot read has to make it
-    /// keep the cache rather than fail the removal.
+    /// Nothing else about the record is validated, for a caller asking a
+    /// question about somebody else's tree: [`crate::retention`] asks which
+    /// releases and which builds are still named before it removes a shared
+    /// one, and a record it cannot read has to make it keep them rather than
+    /// fail the removal.
+    ///
+    /// The shas are read as text, not checked: a record retention is asking
+    /// about is somebody else's, and one that fails [`Self::validate`] still
+    /// names a release something might be serving.
     ///
     /// Not [`Self::read`], which refuses a record carrying a key that moved or a
     /// value that cannot work.
     #[must_use]
-    pub fn remote_at(path: &Path) -> Option<String> {
+    pub fn releases_at(path: &Path) -> Option<(String, BTreeSet<String>)> {
         let text = fs::read_to_string(path).ok()?;
         let table: toml::Table = toml::from_str(&text).ok()?;
-        table.get("remote")?.as_str().map(str::to_owned)
+        let remote = table.get("remote")?.as_str()?.to_owned();
+        let shas = ["deployed", "staged"]
+            .into_iter()
+            .filter_map(|key| table.get(key).and_then(toml::Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        Some((remote, shas))
     }
 
     fn parse(path: &Path, refuse_moved: bool) -> Result<Self, Error> {

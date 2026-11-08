@@ -1,8 +1,9 @@
 //! Putting `current` back, and the running sheep with it, after a release
 //! that did not come up.
 
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tokio::time::Instant;
 
@@ -12,7 +13,7 @@ use crate::daemon::Daemon;
 use crate::deploy::record::write_record;
 use crate::deploy::reload::{reload_until, sha_of};
 use crate::error::Error;
-use crate::paths::Tree;
+use crate::paths::{self, BuildKey, Repo, Tree};
 use crate::state::State;
 use crate::swap;
 use crate::verify;
@@ -59,6 +60,7 @@ pub(super) fn undo_swap(
     state: &State,
     previous: Option<&Path>,
     attempted: &str,
+    build: &BuildKey,
     why: &Error,
 ) -> Result<(), Error> {
     let wrap = |source| Error::RollbackFailed {
@@ -66,7 +68,7 @@ pub(super) fn undo_swap(
         source: Box::new(source),
     };
 
-    let Some(target) = rollback_target(tree, state, previous, attempted) else {
+    let Some(target) = rollback_target(tree, state, previous, attempted, build) else {
         return Err(wrap(Error::Config(format!(
             "current names {attempted}, which nothing verified, and neither the link it \
              replaced nor deploy.toml names an earlier release that is still on disk. Point {} \
@@ -127,10 +129,11 @@ pub(super) async fn roll_back<D: Daemon>(
     app: &AppConfig,
     previous: Option<&Path>,
     attempted: &str,
+    build: &BuildKey,
     why: &str,
     patience: Duration,
 ) -> Result<String, Error> {
-    let Some(previous) = rollback_target(tree, state, previous, attempted) else {
+    let Some(previous) = rollback_target(tree, state, previous, attempted, build) else {
         return Err(Error::Unverified {
             sheep: tree.sheep().to_owned(),
             sha: attempted.to_owned(),
@@ -180,28 +183,80 @@ pub(super) async fn roll_back<D: Daemon>(
 /// resolves to nothing, which is worse than the release that would not come
 /// up. Guarding only the record's branch left the first source able to do
 /// exactly the harm the guard was added for.
+///
+/// A record names a sha and never the build that produced it, so its branch
+/// asks for the directory the current settings name and, failing that, any
+/// directory of that sha, in the repository or in this tree's superseded
+/// `releases/`. See [`another_build_of`].
 fn rollback_target(
     tree: &Tree,
     state: &State,
     previous: Option<&Path>,
     attempted: &str,
+    build: &BuildKey,
 ) -> Option<PathBuf> {
-    // A candidate has to be a release: a full sha, other than the one that
-    // just failed, with a directory on disk. `previous` is the raw text of a
-    // link an operator can repoint by hand, and a `current -> /srv/anything`
-    // used to make `restore` write `deployed = "anything"`, which
-    // `State::read` then refused on every later run of every command.
-    let usable = |release: PathBuf| {
-        let sha = sha_of(&release);
-        (crate::state::is_sha(&sha) && sha != attempted && release.exists()).then_some(release)
-    };
-
-    if let Some(release) = previous.map(Path::to_path_buf).and_then(usable) {
+    if let Some(release) = previous
+        .map(Path::to_path_buf)
+        .and_then(|release| usable(release, attempted))
+    {
         return Some(release);
     }
 
     let recorded = state.deployed.as_deref()?;
-    usable(tree.release(recorded))
+    let repo = tree.repo(&state.remote);
+    usable(repo.release(recorded, build), attempted)
+        .or_else(|| another_build_of(tree, &repo, recorded, attempted))
+}
+
+/// A candidate release: a full sha, other than the one that just failed, with a
+/// directory on disk.
+///
+/// `previous` is the raw text of a link an operator can repoint by hand, so
+/// without this a `current -> /srv/anything` would be written into the record as
+/// `deployed = "anything"`, which `State::read` then refuses on every later run
+/// of every command.
+fn usable(release: PathBuf, attempted: &str) -> Option<PathBuf> {
+    let sha = sha_of(&release);
+    (crate::state::is_sha(&sha) && sha != attempted && release.exists()).then_some(release)
+}
+
+/// The recorded sha's release under a build key the sheep's settings no longer
+/// spell.
+///
+/// A release directory names the sha and the key of the build that made it, and
+/// that key hashes the command, user, checkout and resolved `build_env` as that
+/// build saw them. Change one, or rotate a secret, and the directory the settings
+/// name now was never created while the release the sheep was serving from sits
+/// on disk under its old name. So every directory of that sha is asked, newest
+/// first, as [`crate::retention`] does for a record.
+fn another_build_of(tree: &Tree, repo: &Repo, recorded: &str, attempted: &str) -> Option<PathBuf> {
+    let mut variants: Vec<(SystemTime, PathBuf)> = [repo.releases(), tree.superseded_releases()]
+        .into_iter()
+        .filter_map(|directory| fs::read_dir(directory).ok())
+        .flatten()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let (path, name) = (
+                entry.path(),
+                entry.file_name().to_string_lossy().into_owned(),
+            );
+            if paths::release_sha(&name) != recorded
+                || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+            {
+                return None;
+            }
+            Some((entry.metadata().ok()?.modified().ok()?, path))
+        })
+        .filter_map(|(modified, path)| usable(path, attempted).map(|release| (modified, release)))
+        .collect();
+    // A variant another sheep built is a weaker target than this sheep's own:
+    // its build output came from another command and its linked ignored files
+    // from another checkout. It is still better than leaving `current` on the
+    // release that just failed.
+    variants.sort_by(|(newer, newer_path), (older, older_path)| {
+        older.cmp(newer).then_with(|| newer_path.cmp(older_path))
+    });
+    variants.into_iter().next().map(|(_, release)| release)
 }
 
 /// Points `current` back at `previous`, corrects the record to match, and

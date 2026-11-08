@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::os::unix::fs::symlink;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::shepherd::Shepherd;
@@ -187,6 +187,38 @@ pub fn build_tree(home: &Path, sheep: &str, origin: &Path) -> String {
     symlink(&release, root.join("current")).expect("symlink current");
 
     sha
+}
+
+/// `sheep`'s `current`, asserted to name the repository's release for `sha`:
+/// `<home>/deploy/repos/<key>/releases/<sha>-<build key>`.
+///
+/// The build key is never recomputed here. This tier is its own compilation
+/// target and cannot see `crate::paths`, and a second copy of the key would
+/// drift from the dog's in silence. The name is read off `current` instead,
+/// which proves the same three things: the link moved, it moved into the
+/// repository's `releases/`, and the directory it names is keyed by the sha the
+/// deploy reported.
+#[track_caller]
+pub fn current_at_release(home: &Path, sheep: &str, sha: &str) -> PathBuf {
+    let current = home.join("deploy").join(sheep).join("current");
+    let target = fs::read_link(&current)
+        .unwrap_or_else(|source| panic!("read {}: {source}", current.display()));
+    let name = target
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let releases = target.parent().unwrap_or(Path::new(""));
+    let in_releases = releases.file_name().is_some_and(|dir| dir == "releases");
+    assert!(
+        name.starts_with(&format!("{sha}-"))
+            && in_releases
+            && releases.starts_with(home.join("deploy").join("repos")),
+        "{sheep}'s current names {}, not the repository's release for {sha} \
+         under deploy/repos/<key>/releases",
+        target.display()
+    );
+    target
 }
 
 /// Writes `deploy.toml` for `sheep`, tracking `origin`, already deployed at

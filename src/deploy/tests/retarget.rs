@@ -81,14 +81,12 @@ async fn a_retargeted_tree_deploys_the_new_branchs_head() {
     );
     assert!(
         fixture
-            .tree
             .release(&release_head)
             .join("release-only.txt")
             .exists()
     );
     assert!(
         !fixture
-            .tree
             .release(&release_head)
             .join("main-only.txt")
             .exists()

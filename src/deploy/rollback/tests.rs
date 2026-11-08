@@ -49,7 +49,7 @@ async fn a_rollback_the_shepherd_never_accepts_is_reported_as_a_split_state() {
     // the message has exactly one disagreement to explain.
     assert_eq!(
         swap::resolve(&fixture.tree.current()).unwrap(),
-        Some(fixture.tree.release(&previous))
+        Some(fixture.release(&previous))
     );
     assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
     assert_eq!(
@@ -89,7 +89,7 @@ async fn a_failure_before_the_reload_puts_current_back() {
     assert_eq!(daemon.attempt_count(), 0, "no reload may be sent");
     assert_eq!(
         swap::resolve(&fixture.tree.current()).unwrap(),
-        Some(fixture.tree.release(&previous)),
+        Some(fixture.release(&previous)),
         "current must not be left on a release nothing verified"
     );
     assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
@@ -108,7 +108,7 @@ async fn a_failure_before_the_reload_puts_current_back_from_the_record() {
     let attempted = commit_on_origin(&fixture, "second.txt");
     // As a killed deploy leaves it: `current` already on the attempted
     // release, the record still on the previous one.
-    swap::point_at(&fixture.tree.current(), &fixture.tree.release(&attempted))
+    swap::point_at(&fixture.tree.current(), &fixture.release(&attempted))
         .expect("point current at the attempted release");
 
     let err = deploy(
@@ -123,7 +123,7 @@ async fn a_failure_before_the_reload_puts_current_back_from_the_record() {
     assert!(matches!(err, Error::Protocol(_)), "{err:?}");
     assert_eq!(
         swap::resolve(&fixture.tree.current()).unwrap(),
-        Some(fixture.tree.release(&previous)),
+        Some(fixture.release(&previous)),
         "current goes back to the release the record names"
     );
 }
@@ -158,7 +158,7 @@ async fn a_current_that_names_no_release_is_not_a_rollback_target() {
     );
     assert_eq!(
         swap::resolve(&fixture.tree.current()).unwrap(),
-        Some(fixture.tree.release(&previous))
+        Some(fixture.release(&previous))
     );
     State::read(&fixture.tree.state_file()).expect("the record is still readable");
 }
@@ -191,7 +191,7 @@ async fn a_rollback_that_is_never_confirmed_reports_the_split_state() {
     // The two things this crate controls still agree with each other.
     assert_eq!(
         swap::resolve(&fixture.tree.current()).unwrap(),
-        Some(fixture.tree.release(&previous))
+        Some(fixture.release(&previous))
     );
     assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
 }
@@ -225,7 +225,7 @@ async fn a_rollback_reloads_onto_the_previous_release() {
     );
     assert_eq!(
         swap::resolve(&fixture.tree.current()).unwrap(),
-        Some(fixture.tree.release(&previous))
+        Some(fixture.release(&previous))
     );
 }
 
@@ -276,7 +276,7 @@ async fn a_rollback_reads_deploy_toml_when_current_is_already_the_new_release() 
     );
     assert_eq!(
         swap::resolve(&fixture.tree.current()).unwrap(),
-        Some(fixture.tree.release(&live))
+        Some(fixture.release(&live))
     );
     assert_eq!(fixture.state.deployed.as_deref(), Some(live.as_str()));
     assert_eq!(
@@ -309,10 +309,10 @@ async fn a_current_naming_a_swept_release_is_not_a_rollback_target() {
 
     // Retention swept the release `current` still points at, so the
     // link is there and its target is not.
-    crate::git::worktree_remove(&fixture.tree.git(), &fixture.tree.release(&live))
+    crate::git::worktree_remove(&fixture.tree.git(), &fixture.release(&live))
         .expect("retention removes the worktree");
     assert!(swap::resolve(&fixture.tree.current()).unwrap().is_some());
-    assert!(!fixture.tree.release(&live).exists());
+    assert!(!fixture.release(&live).exists());
 
     let err = deploy(
         &Shepherd::never_ready(),
@@ -353,9 +353,9 @@ async fn a_recorded_release_that_is_gone_is_not_a_rollback_target() {
     )
     .expect("fetch");
     install_release(&fixture, &second);
-    crate::git::worktree_remove(&fixture.tree.git(), &fixture.tree.release(&live))
+    crate::git::worktree_remove(&fixture.tree.git(), &fixture.release(&live))
         .expect("retention removes the old worktree");
-    assert!(!fixture.tree.release(&live).exists());
+    assert!(!fixture.release(&live).exists());
 
     let err = deploy(
         &Shepherd::never_ready(),
@@ -369,7 +369,7 @@ async fn a_recorded_release_that_is_gone_is_not_a_rollback_target() {
     assert!(matches!(err, Error::Unverified { .. }), "{err:?}");
     assert_eq!(
         swap::resolve(&fixture.tree.current()).unwrap(),
-        Some(fixture.tree.release(&second)),
+        Some(fixture.release(&second)),
         "current stays where it was rather than dangling"
     );
 }
@@ -536,7 +536,7 @@ async fn a_rollback_onto_a_release_that_never_comes_up_is_reported_unverified() 
     assert_eq!(daemon.reload_count(), 2);
     assert_eq!(
         swap::resolve(&fixture.tree.current()).unwrap(),
-        Some(fixture.tree.release(&previous))
+        Some(fixture.release(&previous))
     );
     assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
     assert_eq!(
@@ -677,4 +677,88 @@ async fn a_swap_back_that_fails_reports_both_failures() {
     let shown = err.to_string();
     assert!(shown.contains("did not come up"), "{shown}");
     assert!(shown.contains("current.tmp"), "{shown}");
+}
+
+/// fails if the record's branch of a rollback looks the release up under the
+/// build key the settings name now. A record names a sha and never a build, and
+/// the directory holding that sha's release carries the key of the build that
+/// made it: rotate a secret in `build_env` and the path the settings name was
+/// never created, while the release the sheep was serving from sits on disk
+/// under its old name.
+#[tokio::test(start_paused = true)]
+async fn a_recorded_release_under_another_build_key_is_still_a_rollback_target() {
+    let mut fixture = fixture_with_previous_release();
+    let previous = fixture.state.deployed.clone().expect("a previous release");
+    let attempted = commit_on_origin(&fixture, "second.txt");
+    // The sheep's build changed since `previous` was built.
+    let daemon = Shepherd::never_ready().with_settings("build_env = { TOKEN = 'rotated' }\n");
+
+    // As a deploy killed between its swap and its record write leaves it:
+    // `current` on the attempted release, the record still on `previous`.
+    swap::point_at(
+        &fixture.tree.current(),
+        &fixture.release_of(&daemon, &attempted),
+    )
+    .expect("point current at the attempted release");
+
+    let outcome = deploy(
+        &daemon,
+        &fixture.tree,
+        &mut fixture.state,
+        &fixtures::dog_config(),
+    )
+    .await
+    .expect("the recorded release is on disk, under the key that built it");
+
+    assert!(
+        matches!(&outcome, Outcome::RolledBack { to, .. } if *to == previous),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        swap::resolve(&fixture.tree.current()).unwrap(),
+        Some(fixture.release(&previous)),
+        "current goes back to the release that is there, not to the one the new settings name"
+    );
+    assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
+}
+
+/// fails if a rollback cannot find the release a target built before releases
+/// moved into the repository directory. Those sit as bare shas under
+/// `<tree>/releases/`, and nothing removes them while a `current` may be serving
+/// from one, so a record naming one still has a release on disk.
+#[tokio::test(start_paused = true)]
+async fn a_recorded_release_from_before_the_shared_layout_is_still_a_rollback_target() {
+    let mut fixture = fixture_before_any_release();
+    let previous = crate::git::remote_head(&fixture.tree.git(), "main").expect("head");
+    let before = fixture.tree.superseded_releases().join(&previous);
+    crate::git::worktree_add(&fixture.tree.git(), &before, &previous).expect("the old release");
+    swap::point_at(&fixture.tree.current(), &before).expect("current");
+    fixture.state.deployed = Some(previous.clone());
+    fixture
+        .state
+        .write(&fixture.tree.state_file())
+        .expect("deploy.toml");
+
+    let attempted = commit_on_origin(&fixture, "second.txt");
+    swap::point_at(&fixture.tree.current(), &fixture.release(&attempted))
+        .expect("point current at the attempted release");
+
+    let outcome = deploy(
+        &Shepherd::never_ready(),
+        &fixture.tree,
+        &mut fixture.state,
+        &fixtures::dog_config(),
+    )
+    .await
+    .expect("the release the record means is on disk");
+
+    assert!(
+        matches!(&outcome, Outcome::RolledBack { to, .. } if *to == previous),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        swap::resolve(&fixture.tree.current()).unwrap(),
+        Some(before)
+    );
+    assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
 }

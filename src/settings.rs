@@ -45,7 +45,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::Deserialize;
@@ -61,7 +61,7 @@ use crate::config::{
 use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::hook::{HookSpec, Hooks};
-use crate::paths::Tree;
+use crate::paths::{BuildKey, Tree};
 use crate::shared::printable;
 use crate::state::{State, Verify, Watch};
 
@@ -262,6 +262,17 @@ impl Settings {
         }
     }
 
+    /// The key of the release these settings build into, for an app built as
+    /// `user` in a release linked out of `checkout`.
+    ///
+    /// The four things a release is keyed by, in one place, so the deploy that
+    /// builds a release and the retention that reclaims it cannot disagree about
+    /// which release a sheep is on.
+    #[must_use]
+    pub(crate) fn build_key(&self, user: Option<&str>, checkout: &Path) -> BuildKey {
+        BuildKey::of(self.command.as_deref(), user, checkout, &self.build_env)
+    }
+
     /// The hooks these settings describe.
     pub(crate) fn hooks(&self) -> Hooks {
         Hooks {
@@ -342,7 +353,11 @@ pub(crate) async fn adopted<D: Daemon>(
 /// [`Error::Config`] naming `sheep` and each key when `own` sets a dog-wide
 /// key, and [`Error::Config`] naming `sheep` when the layered table does not
 /// fit [`Settings`]: an unknown key, or a value of the wrong type.
-fn from_tables(sheep: &str, shared: &DogTable, own: Option<&DogTable>) -> Result<Settings, Error> {
+pub(crate) fn from_tables(
+    sheep: &str,
+    shared: &DogTable,
+    own: Option<&DogTable>,
+) -> Result<Settings, Error> {
     if let Some(own) = own {
         let wide = dog_wide();
         let set: Vec<&str> = own

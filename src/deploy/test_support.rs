@@ -3,7 +3,7 @@
 
 use std::cell::Cell;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use shep_client::RequestError;
@@ -15,9 +15,9 @@ use tempfile::TempDir;
 use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::fixtures;
-use crate::paths::Tree;
+use crate::paths::{Repo, Tree};
 use crate::state::State;
-use crate::swap;
+use crate::{git, swap};
 
 /// [`fixtures::dog_config`] with a retention the caller cares about.
 ///
@@ -51,6 +51,56 @@ pub(crate) struct Fixture {
     pub(crate) origin: TempDir,
     pub(crate) tree: Tree,
     pub(crate) state: State,
+}
+
+impl Fixture {
+    /// The directory this tree's repository builds `sha` into for the settings
+    /// the fixture itself was built with - the ones [`Shepherd::ready`] holds.
+    pub(crate) fn release(&self, sha: &str) -> PathBuf {
+        self.tree
+            .release(&self.state.remote, sha, &self.build_key())
+    }
+
+    /// That release's completion marker.
+    pub(crate) fn completion(&self, sha: &str) -> PathBuf {
+        self.tree
+            .completion(&self.state.remote, sha, &self.build_key())
+    }
+
+    /// The key [`Self::release`] and [`Self::completion`] are named by.
+    pub(crate) fn build_key(&self) -> crate::paths::BuildKey {
+        fixtures::default_build_key(&self.state.checkout)
+    }
+
+    /// As [`Self::release`], for the build a deploy against `daemon` runs: a
+    /// sheep that sets a `command`, a `build_env` or a `user` builds into a
+    /// directory of its own, named by all four.
+    pub(crate) fn release_of(&self, daemon: &Shepherd, sha: &str) -> PathBuf {
+        self.tree
+            .release(&self.state.remote, sha, &self.build_key_of(daemon))
+    }
+
+    /// As [`Self::completion`], for `daemon`'s build.
+    pub(crate) fn completion_of(&self, daemon: &Shepherd, sha: &str) -> PathBuf {
+        self.tree
+            .completion(&self.state.remote, sha, &self.build_key_of(daemon))
+    }
+
+    /// The key a deploy against `daemon` names this fixture's releases by.
+    pub(crate) fn build_key_of(&self, daemon: &Shepherd) -> crate::paths::BuildKey {
+        daemon.build_key(&self.state.checkout)
+    }
+
+    /// The `releases/` directory this tree's repository builds into, shared by
+    /// every sheep that deploys its remote.
+    pub(crate) fn releases(&self) -> PathBuf {
+        self.tree.repo(&self.state.remote).releases()
+    }
+
+    /// The directory those releases' completion markers live in.
+    pub(crate) fn completions(&self) -> PathBuf {
+        self.tree.repo(&self.state.remote).completions()
+    }
 }
 
 /// A sha whose release directory is not on disk.
@@ -116,12 +166,67 @@ pub(crate) fn fixture_with_previous_release() -> Fixture {
 
 /// Builds `sha`'s worktree and points `current` at it, the way a
 /// successful deploy would have.
+///
+/// Built with the fixture's own settings, which is what a [`Shepherd`] built by
+/// [`Shepherd::ready`] deploys with too. A test whose sheep sets a `command` or
+/// a `build_env` builds its new sha into another directory, and names it with
+/// [`Fixture::release_of`].
 pub(super) fn install_release(fixture: &Fixture, sha: &str) {
     let tree = &fixture.tree;
-    if !tree.release(sha).exists() {
-        crate::git::worktree_add(&tree.git(), &tree.release(sha), sha).expect("worktree");
+    if !fixture.release(sha).exists() {
+        crate::git::worktree_add(&tree.git(), &fixture.release(sha), sha).expect("worktree");
     }
-    swap::point_at(&tree.current(), &tree.release(sha)).expect("swap");
+    swap::point_at(&tree.current(), &fixture.release(sha)).expect("swap");
+}
+
+/// The fixture's clone, moved under `repos` where a shared one lives, with the
+/// fixture tree's `git` linked to it.
+///
+/// What a test that deploys more than one sheep of one remote has to build
+/// first: one clone for the remote, and a link to it from every tree.
+pub(crate) fn shared_clone(fixture: &Fixture) -> Repo {
+    let repo = Repo::for_remote(fixture.home.path(), &fixture.state.remote);
+    fs::create_dir_all(repo.root()).expect("repo dir");
+    fs::rename(fixture.tree.git(), repo.git()).expect("move the clone");
+    fixture.tree.link_clone(&repo).expect("link the tree's git");
+    repo
+}
+
+/// Another sheep of the fixture's remote: its own tree, the same clone, and its
+/// first release live under `current`, as `init` leaves a target it has just
+/// cut over.
+///
+/// `daemon` is that sheep's shepherd, because the key the directory is named by
+/// comes from the `[app.dogs.deploy]` table it holds. Its checkout is the
+/// fixture's own origin, which is what the record written here names, so the
+/// release made here and the one a deploy against `daemon` lands are the same
+/// directory. Two sheep whose four build inputs match share the checkout of the
+/// sha they both start from, exactly as they share every later one, so the
+/// worktree is only made when it is not already there.
+pub(crate) fn another_sheep(
+    fixture: &Fixture,
+    repo: &Repo,
+    name: &str,
+    daemon: &Shepherd,
+) -> (Tree, State) {
+    let build = daemon.build_key(fixture.origin.path());
+    let tree = Tree::for_sheep(fixture.home.path(), name);
+    fs::create_dir_all(tree.root()).expect("the tree's directory");
+    tree.link_clone(repo).expect("link");
+    let first = git::remote_head(&repo.git(), "main").expect("head");
+    let release = tree.release(&fixture.state.remote, &first, &build);
+    if !release.is_dir() {
+        git::worktree_add(&repo.git(), &release, &first).expect("worktree");
+    }
+    swap::point_at(&tree.current(), &release).expect("current");
+    let state = State {
+        remote: fixture.state.remote.clone(),
+        checkout: fixture.origin.path().to_owned(),
+        deployed: Some(first),
+        ..fixtures::state()
+    };
+    state.write(&tree.state_file()).expect("deploy.toml");
+    (tree, state)
 }
 
 /// Adds a commit to the fixture's origin and returns its sha.
@@ -290,6 +395,16 @@ impl Shepherd {
         }
     }
 
+    /// The same shepherd, with `user` on the sheep's app: who the build drops
+    /// to, and one of the three things a release directory is keyed by.
+    #[must_use]
+    pub(crate) fn with_user(self, user: &str) -> Self {
+        Self {
+            held: self.held.with_user(user),
+            ..self
+        }
+    }
+
     /// The same shepherd, resolving the table's `{{secret:KEY}}` references to
     /// `secrets` on its `sheep_dog_table` answer while `sheep_config` still
     /// carries them written out. See [`fixtures::Sheep::resolving`].
@@ -316,6 +431,12 @@ impl Shepherd {
     /// The sheep's `[app.dogs.deploy]` table as the shepherd holds it now.
     pub(crate) fn settings(&self) -> crate::settings::Settings {
         self.held.settings()
+    }
+
+    /// The [`crate::paths::BuildKey`] a deploy against this shepherd builds its
+    /// sheep's releases into from `checkout`, read the way a deploy reads it.
+    pub(crate) fn build_key(&self, checkout: &Path) -> crate::paths::BuildKey {
+        fixtures::build_key_of(&self.held, checkout)
     }
 
     /// A reload that replaces the process with one that never becomes

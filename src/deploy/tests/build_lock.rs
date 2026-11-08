@@ -11,15 +11,13 @@ use tokio::time::timeout;
 
 use crate::daemon::Daemon;
 use crate::deploy::test_support::{
-    FIXTURE_TABLE, Fixture, Shepherd, commit_on_origin, fixture_with_previous_release,
+    FIXTURE_TABLE, Shepherd, another_sheep, commit_on_origin, fixture_with_previous_release,
+    shared_clone,
 };
 use crate::deploy::{Outcome, deploy};
 use crate::error::Error;
 use crate::fixtures;
-use crate::paths::{Repo, Tree};
 use crate::stage::{self, Staged};
-use crate::state::State;
-use crate::{git, swap};
 
 /// Each deploy, its build, its hooks and its verification window, inside this.
 /// Longer than all of them and far short of a hang, which is what makes the
@@ -30,36 +28,6 @@ const WINDOW: Duration = Duration::from_secs(90);
 /// it on. A build that ran alongside another would land its line inside the
 /// other's pair rather than after it.
 const TURN: &str = "sleep 1";
-
-/// The fixture's clone, moved under `repos` where a shared one lives, with the
-/// fixture tree's `git` linked to it.
-fn shared_clone(fixture: &Fixture) -> Repo {
-    let repo = Repo::for_remote(fixture.home.path(), &fixture.state.remote);
-    fs::create_dir_all(repo.root()).expect("repo dir");
-    fs::rename(fixture.tree.git(), repo.git()).expect("move the clone");
-    fixture.tree.link_clone(&repo).expect("link the tree's git");
-    repo
-}
-
-/// A second sheep of one remote: its own tree, the same clone, and its first
-/// release live under `current`, as `init` leaves a target it has just cut
-/// over.
-fn second_sheep(fixture: &Fixture, repo: &Repo, name: &str) -> (Tree, State) {
-    let tree = Tree::for_sheep(fixture.home.path(), name);
-    fs::create_dir_all(tree.root()).expect("the second tree's directory");
-    tree.link_clone(repo).expect("link");
-    let first = git::remote_head(&repo.git(), "main").expect("head");
-    git::worktree_add(&repo.git(), &tree.release(&first), &first).expect("worktree");
-    swap::point_at(&tree.current(), &tree.release(&first)).expect("current");
-    let state = State {
-        remote: fixture.state.remote.clone(),
-        checkout: fixture.origin.path().to_owned(),
-        deployed: Some(first),
-        ..fixtures::state()
-    };
-    state.write(&tree.state_file()).expect("deploy.toml");
-    (tree, state)
-}
 
 /// What `name` writes as it builds, as its release hook runs, and after it
 /// lands, into one log every sheep of the repository shares.
@@ -140,9 +108,9 @@ async fn two_sheep_of_one_remote_build_one_after_the_other() {
     let mut fixture = fixture_with_previous_release();
     let repo = shared_clone(&fixture);
     let log = fixture.home.path().join("turns.log");
-    let (worker_tree, mut worker_state) = second_sheep(&fixture, &repo, "worker");
     let head = commit_on_origin(&fixture, "second.txt");
     let daemon = TwoSheep::holding(&marks("web", &log), &marks("worker", &log));
+    let (worker_tree, mut worker_state) = another_sheep(&fixture, &repo, "worker", &daemon.worker);
 
     let config = fixtures::dog_config();
     let (web, worker) = tokio::join!(
@@ -211,9 +179,9 @@ async fn a_stage_build_waits_for_the_build_of_its_repository() {
     let mut fixture = fixture_with_previous_release();
     let repo = shared_clone(&fixture);
     let log = fixture.home.path().join("turns.log");
-    let (worker_tree, mut worker_state) = second_sheep(&fixture, &repo, "worker");
     let head = commit_on_origin(&fixture, "second.txt");
     let daemon = TwoSheep::holding(&marks("web", &log), &marks("worker", &log));
+    let (worker_tree, mut worker_state) = another_sheep(&fixture, &repo, "worker", &daemon.worker);
 
     let config = fixtures::dog_config();
     let (web, worker) = tokio::join!(

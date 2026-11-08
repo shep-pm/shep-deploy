@@ -225,11 +225,11 @@ fn a_supervised_dog_runs_a_sheeps_hook_with_its_secret_resolved() {
         || last_line(&out_log).as_deref() == Some("v2"),
     );
 
-    let secret_file = shepherd
-        .home()
-        .join("deploy/web/releases")
-        .join(&second)
-        .join("secret.txt");
+    // Read through `current`, which is how the sheep reaches its own release:
+    // the release is the repository's now, at
+    // `deploy/repos/<key>/releases/<sha>-<build key>`, and the key is not
+    // spelled here on purpose.
+    let secret_file = current_at_release(shepherd.home(), "web", &second).join("secret.txt");
     let seen = fs::read_to_string(&secret_file)
         .expect("the release hook ran in the new release and wrote its environment");
     assert_eq!(

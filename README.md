@@ -181,7 +181,10 @@ env = { CLOUDFLARE_API_TOKEN = "...", CLOUDFLARE_ZONE_ID = "..." }
 
 1. Fetch into a bare clone, and compare the branch head to the last deployed
    sha.
-2. `git worktree add` the new sha, sharing the object store.
+2. Take the build turn for the repository, then `git worktree add` the new sha
+   into its shared release directory, sharing the object store. A sha and build
+   key that already have a completion marker are left as they are: nothing is
+   checked out and nothing is built.
 3. Symlink the shared files in: whatever git ignores and `.shepignore` does
    not. A `.shepignore` line is a bare name, matched at any depth, or a path
    with a `/` in it, anchored to the checkout. A leading `/` anchors too, a
@@ -217,17 +220,31 @@ online" is true throughout a deploy that failed.
 
 ## Layout
 
-Everything lives under `$SHEP_HOME/deploy/<sheep>/`:
+Each sheep has a directory of its own under `$SHEP_HOME/deploy/<sheep>/`:
 
 ```text
 git                  the bare clone, shared by every release: a link to the
                      shared clone below, or a directory of its own on a tree
                      set up before clones were shared
-releases/<sha>/      a worktree per release
-current -> releases/<sha>
+current ->           a symlink into the shared releases below
 deploy.toml          remote, deployed sha, held sha, staged sha, and the app as it was
                      before adoption (owner-only: it holds env)
 ```
+
+What it serves is not inside it. Releases are the repository's, at
+`deploy/repos/<key>/releases/<sha>-<build key>/`, one worktree per sha per
+build, with their completion markers beside them at
+`repos/<key>/complete/<sha>-<build key>`. The build key is a hash of the
+`command`, the build `user`, the operator `checkout` the record names and the
+resolved `build_env`, so three sheep of one repository that build one sha the
+same way land the same built release: the first one checks it out and builds it,
+and the other two swap to it. Change one of the four and you get a directory of
+your own, because a release built with somebody else's environment is not yours.
+The checkout is one of them because a release links the ignored files of the
+checkout it was built from: two checkouts of one remote are two builds, or the
+second sheep's `local.json` would find its name in the release taken by a link
+aimed at the first. A marker means checked out AND built, and a deploy that
+finds one for its sha and its key skips the build.
 
 Sheep deployed from the same remote share one clone, at
 `$SHEP_HOME/deploy/repos/<key>/git`. `init` makes it when no sheep with that
@@ -432,21 +449,33 @@ granted = ["flock.read", "flock.control", "flock.edit", "secrets.read:staging"]
 Without the scope the dog is refused its read of that sheep's table, names the
 scope it needs in its own log, and deploys every other sheep as before.
 
-`retention` is how many of the newest releases each target keeps. Two are
-spared whatever their age: the one `current` points at, and the one
-`deploy.toml` names. They are the same release except after a deploy died
-between its swap and its record write, so a target holds `retention`
+`retention` is how many of the newest releases a deploy leaves in the repository
+it builds into. Two more are spared whatever their age: the one `current` points
+at, and the one `deploy.toml` names. They are the same release except after a
+deploy died between its swap and its record write, so a target holds `retention`
 directories in the ordinary case and up to two more after that. It cannot be
 below 2: the release a failed deploy rolls back to is the second newest, so
 anything lower would silently disable rollback, and it is refused rather than
 clamped.
 
-The count is per target, because a release is a target's own: `current` can only
-ever name something under its own `releases/`, and one sheep's deploy rate has
-no bearing on which release another sheep rolls back to. What two sheep of one
-repository do share - the clone and the build cache beside it - is reclaimed per
-repository instead, and never while any sheep of that repository names it from
-its `current` or its record. See [Layout](#layout).
+The count is asked of the repository, because its releases are shared: every
+sheep that deploys one remote builds into one `releases/` directory, so one
+sheep's prune is a sweep over directories another sheep may be serving from. It
+takes the repository's build turn for the whole sweep, and reads every tree under
+`deploy/` before it removes anything, whether or not that tree links this clone.
+A release any of them names is not a candidate - from its `current`, from its
+record's `deployed` or `staged`, or from the `current.claim` file a deploy writes
+under that turn for the window between letting go of it and swapping. A record
+names a sha and no build key, so it spares every build variant of that sha: a
+stale variant costs disk, and a live one removed costs a running service its
+working directory. A rollback reads a recorded sha the same way, and takes the
+newest directory of it under `releases/` rather than only the one the current
+settings name. The number itself is
+whichever deploying sheep's settings say, so two sheep of one repository with
+different `retention` prune the same directory to different depths. The clone
+and the build cache beside it are reclaimed the same way, and never while any
+sheep of that repository names it from its `current` or its record. See
+[Layout](#layout).
 
 `interval`, `git_timeout` and `build_timeout` are refused under a second. A
 bare number is milliseconds, so `interval = "30"` is thirty milliseconds and a
@@ -739,7 +768,10 @@ and never through paths, and skips every symlink, every file with a second
 hard link, and the `.git` file at the release root. The build can still replace
 that file, since it owns the directory, so the dog writes it back after the
 build. `git`, the shared clones under `repos/`, `deploy.toml`, the lock files,
-`current` and `releases/` stay root's. The user also needs search permission on every directory down to
+`current` and `repos/<key>/releases/` stay root's. Two sheep never share a
+release across build users, because `user` is one of the four inputs of the
+build key, so a release is handed over at most once, to the one user its build
+ran as. The user also needs search permission on every directory down to
 the release: a `$SHEP_HOME` of mode 700 refuses the build at its first step.
 Put `$SHEP_HOME` where that user can search, or run the shepherd as that user.
 

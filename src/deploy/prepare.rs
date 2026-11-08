@@ -9,34 +9,70 @@ use shep_client::shep_core::config::AppConfig;
 use crate::build::BuildSpec;
 use crate::error::Error;
 use crate::hook::Hooks;
-use crate::paths::Tree;
+use crate::paths::{BuildKey, Tree};
 use crate::settings::Settings;
 use crate::state::Verify;
-use crate::{git, linkcheck, shared};
+use crate::{git, linkcheck, shared, swap};
 
 /// What [`stage_release`] hands its callers: the app to register, the build
 /// to run and the hooks to run after it (both from the sheep's
 /// [`Settings`]), the paths linked in from the operator's checkout, which
-/// [`linkcheck::Snapshot`] needs around the build, and the build cache the
-/// release's `target` was linked at.
+/// [`linkcheck::Snapshot`] needs around the build, the build cache the
+/// release's `target` was linked at, the release directory and its completion
+/// marker, and whether that release was already built when this staged it.
 ///
 /// The cache is here rather than re-derived at each use so the directory the
 /// build writes through, the one its artifacts are confined to, and the one
 /// the hooks are handed are the same path, decided once, where the link was
-/// made.
+/// made. The release and its marker are here for the same reason: every step
+/// from here to the swap has to name one directory, and a release shared with
+/// another sheep cannot be derived from this tree.
 pub(crate) struct Staged {
     pub(crate) app: AppConfig,
     pub(crate) spec: BuildSpec,
     pub(crate) hooks: Hooks,
     pub(crate) linked: shared::FromCheckout,
     pub(crate) cache: PathBuf,
+    /// The worktree this deploy builds in and, if it lands, swaps in.
+    pub(crate) release: PathBuf,
+    /// The file that says `release` is checked out and built.
+    pub(crate) marker: PathBuf,
+    /// The key `release` and `marker` are named by.
+    pub(crate) build: BuildKey,
+    /// `release` was found carrying that marker, so its build can be skipped.
+    pub(crate) reused: bool,
+    /// This tree's claim on `release`, held for as long as `Staged` is. See
+    /// [`crate::swap::claim`] for what it stops retention from doing. Bound by
+    /// name rather than by `..` wherever a caller destructures this and has to
+    /// hold the claim past the `Staged` itself, which is
+    /// [`crate::optin::prepare_with`].
+    pub(crate) claim: swap::Claim,
+}
+
+/// The key of the release `settings` builds `app`'s script into, and the three
+/// paths that key names.
+fn staged_paths(
+    tree: &Tree,
+    remote: &str,
+    sha: &str,
+    checkout: &Path,
+    app: &AppConfig,
+    settings: &Settings,
+) -> (BuildKey, PathBuf, PathBuf, PathBuf) {
+    let build = settings.build_key(app.user.as_deref(), checkout);
+    (
+        build.clone(),
+        tree.release(remote, sha, &build),
+        tree.completion(remote, sha, &build),
+        tree.cache_target(remote),
+    )
 }
 
 /// Everything between a sha and its build: the worktree, the cache link, and
 /// the operator's shared files.
 ///
-/// `remote` picks the cache, which is keyed per remote and not per sheep, and
-/// must be the one this tree's clone serves.
+/// `remote` picks the release directory and the cache, both keyed per remote
+/// and not per sheep, and must be the one this tree's clone serves.
 ///
 /// One function because two callers, [`super::attempt`] and
 /// [`crate::optin::prepare_with`], had the same seven lines, and because all of
@@ -61,13 +97,28 @@ pub(crate) fn stage_release(
     app: &AppConfig,
     settings: &Settings,
 ) -> Result<Staged, Error> {
-    let (release, cache) = (tree.release(sha), tree.cache_target(remote));
-    checkout_release(tree, sha)?;
+    let (build, release, marker, cache) = staged_paths(tree, remote, sha, checkout, app, settings);
+    // Claimed before the release is touched, so a prune that has to queue behind
+    // the build turn this staging happens under cannot decide this release is
+    // unreferenced while this function is deciding to reuse it.
+    let claim = swap::claim(&tree.current(), &release)?;
+    let reused = checkout_release(tree, remote, sha, &build)?;
     shared::link_cache(&release, &cache, &tree.superseded_cache())?;
     let linked = shared::to_link(checkout)?;
     shared::link_into(&release, checkout, &linked)?;
 
-    let staged = staged(app, settings, linked, cache);
+    let staged = Staged {
+        app: app.clone(),
+        spec: settings.build_spec(),
+        hooks: settings.hooks(),
+        linked,
+        cache,
+        release,
+        marker,
+        build,
+        reused,
+        claim,
+    };
     // Printed here rather than returned, as `build::root_warning` is: nothing
     // is refused, and `deploy` and `setup` both come through this function.
     for warning in linkcheck::warnings(tree.sheep(), &staged.linked, &staged.spec.artifacts) {
@@ -76,7 +127,7 @@ pub(crate) fn stage_release(
     Ok(staged)
 }
 
-/// What [`stage_release`] answers, for a release it staged earlier: the
+/// What [`stage_release`] answers for a release it built earlier: the
 /// operator's shared files are linked in again, with no checkout and no cache
 /// link. Its `cache` is the one that link was made at, which is what the
 /// hooks and the artifact copies run against.
@@ -91,73 +142,93 @@ pub(crate) fn read_staged(
     app: &AppConfig,
     settings: &Settings,
 ) -> Result<Staged, Error> {
-    let release = tree.release(sha);
+    let (build, release, marker, cache) = staged_paths(tree, remote, sha, checkout, app, settings);
+    let claim = swap::claim(&tree.current(), &release)?;
     let linked = shared::to_link(checkout)?;
     shared::link_into(&release, checkout, &linked)?;
-    Ok(staged(app, settings, linked, tree.cache_target(remote)))
-}
-
-fn staged(
-    app: &AppConfig,
-    settings: &Settings,
-    linked: shared::FromCheckout,
-    cache: PathBuf,
-) -> Staged {
-    Staged {
+    Ok(Staged {
         app: app.clone(),
         spec: settings.build_spec(),
         hooks: settings.hooks(),
         linked,
         cache,
-    }
+        release,
+        marker,
+        build,
+        reused: true,
+        claim,
+    })
 }
 
-/// Checks `sha` out at `release`, unless a FINISHED checkout is already there.
+/// Writes the marker saying a staged release is checked out and built.
 ///
-/// `release.exists()` was the test until round 9 of the founder's review, and
-/// it cannot tell a finished checkout from one that died partway. `git
-/// worktree add` writes a commit's files one at a time, so a kill leaves the
-/// directory present holding an arbitrary subset of them. Measured on an
-/// 800-file repository, three SIGKILLs 12ms in left 249, 358 and 0 files.
-///
-/// The next tick against that sha then skipped the checkout and built,
-/// swapped, reloaded and verified against the subset, reporting success.
-/// Nothing downstream catches it. A missing file is simply absent from a
-/// release the operator has been told is live.
-///
-/// `rev-parse HEAD` is not the check either, which is worth writing down
-/// because it is the obvious one to reach for. The first of those three kills
-/// left a readable HEAD at the right sha next to 249 of 800 files.
-///
-/// So the marker is written here, after `git worktree add` returns, and only
-/// a release carrying it is reused.
-///
-/// What it covers is a killed process, not a lost power supply. Nothing
-/// syncs the checkout before the marker is written, so a crash of the host
-/// can leave the marker durable and part of the checkout not; the next
-/// deploy of that sha would then reuse it. Closing that needs a sync of
-/// every file the worktree wrote, which is git's job rather than this
-/// crate's, and a host that loses power mid-deploy has larger problems than
-/// one release.
+/// After its build, never before: the marker is what lets the next deploy of
+/// this sha skip it, and a release whose build failed has nothing to skip.
 ///
 /// # Errors
-/// [`Error::Io`] if a stale directory cannot be removed or the marker cannot
-/// be written. Whatever [`git::worktree_prune`] and [`git::worktree_add`]
-/// return.
-fn checkout_release(tree: &Tree, sha: &str) -> Result<(), Error> {
-    let git_dir = tree.git();
-    let release = tree.release(sha);
-    let marker = tree.completion(sha);
+/// [`Error::Io`] if the marker's directory or the marker itself cannot be
+/// written.
+pub(crate) fn mark_built(marker: &Path) -> Result<(), Error> {
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent).map_err(Error::at(parent))?;
+    }
+    fs::write(marker, b"").map_err(Error::at(marker))
+}
 
-    // BOTH, not either. The marker alone would say a release is finished after
-    // retention had removed it, and the directory alone is what this function
-    // exists to stop trusting.
-    if marker.is_file() && release.exists() {
-        return Ok(());
+// `release.exists()` is not the check, and never was. `git worktree add`
+// writes a commit's files one at a time, so a kill partway leaves the directory
+// present holding an arbitrary subset of them. Measured on an 800-file
+// repository, three SIGKILLs 12ms in left 249, 358 and 0 files, and the first
+// of those left a readable HEAD at the right sha - so `rev-parse` is not the
+// missing check either.
+//
+// What the marker covers is a killed process, not a lost power supply. Nothing
+// syncs the checkout before it is written, which is git's job rather than this
+// crate's.
+
+/// Checks `sha` out into the repository's release for `build`, unless a FINISHED
+/// release is already there, and answers whether it was.
+///
+/// "Finished" means the completion marker is there and the directory is too.
+/// BOTH, not either: the marker alone would say a release is finished after
+/// retention had removed it, and the directory alone is what this function
+/// exists to stop trusting.
+///
+/// The marker is written by [`mark_built`], after a build has exited zero, so
+/// a release carrying it has been checked out AND built, which is what lets
+/// [`super::attempt`] skip the build for it. A release whose build failed
+/// carries nothing, and its next attempt starts from a fresh checkout.
+///
+/// # Errors
+/// [`Error::Io`] if a stale directory cannot be removed, the release directory
+/// cannot be made, or the marker cannot be written. Whatever
+/// [`git::worktree_prune`] and [`git::worktree_add`] return.
+fn checkout_release(tree: &Tree, remote: &str, sha: &str, build: &BuildKey) -> Result<bool, Error> {
+    let git_dir = tree.git();
+    let (release, marker) = (
+        tree.release(remote, sha, build),
+        tree.completion(remote, sha, build),
+    );
+
+    if marker.is_file() && release.is_dir() {
+        return Ok(true);
     }
 
     if release.exists() {
         fs::remove_dir_all(&release).map_err(Error::at(&release))?;
+    }
+    // The marker is the release's, not the directory's, and a release removed by
+    // an operator's own `rm -rf` or by another sheep's prune leaves it where it
+    // was. Left in place it vouches for the checkout about to be made: this
+    // function would answer `false`, the build would run, and if that build then
+    // failed or was interrupted the directory and the stale marker together
+    // would read as a finished release to the next attempt, which would skip the
+    // build and land whatever the half-finished one left. Removing it first means
+    // a marker is only ever written by the build that just succeeded.
+    match fs::remove_file(&marker) {
+        Ok(()) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => return Err(Error::at(&marker)(source)),
     }
     // Removing the directory is not enough on its own: git still has the
     // path registered and refuses the next add with "missing but already
@@ -165,12 +236,12 @@ fn checkout_release(tree: &Tree, sha: &str) -> Result<(), Error> {
     // already gone, which is what a release removed by hand leaves.
     git::worktree_prune(&git_dir)?;
 
+    // The releases directory belongs to the repository, and a tree that has
+    // never built from this remote has no such directory yet.
+    let directory = release.parent().unwrap_or(&release);
+    fs::create_dir_all(directory).map_err(Error::at(directory))?;
     git::worktree_add(&git_dir, &release, sha)?;
-
-    if let Some(parent) = marker.parent() {
-        fs::create_dir_all(parent).map_err(Error::at(parent))?;
-    }
-    fs::write(&marker, b"").map_err(Error::at(marker))
+    Ok(false)
 }
 
 /// The sha `branch` (a branch name, or a full ref) points at in the tree's
@@ -336,7 +407,7 @@ mod tests {
             fixtures::TEST_BUDGET,
         )
         .expect("fetch");
-        let release = fixture.tree.release(&second);
+        let release = fixture.release(&second);
         crate::git::worktree_add(&fixture.tree.git(), &release, &second).expect("worktree");
         assert!(
             release.join(".shep-complete").is_file(),
@@ -389,7 +460,7 @@ mod tests {
             fixtures::TEST_BUDGET,
         )
         .expect("fetch so the sha is checkoutable");
-        let release = fixture.tree.release(&second);
+        let release = fixture.release(&second);
         crate::git::worktree_add(&fixture.tree.git(), &release, &second).expect("worktree");
         fs::remove_file(release.join("second.txt")).expect("a checkout that did not finish");
 
@@ -447,7 +518,7 @@ mod tests {
         )
         .expect("staged");
 
-        let shipped = fs::read_to_string(fixture.tree.release(&second).join("Flockfile.toml"))
+        let shipped = fs::read_to_string(fixture.release(&second).join("Flockfile.toml"))
             .expect("the release carries its Flockfile");
         assert!(shipped.contains("elsewhere.sh"), "{shipped}");
         assert_eq!(staged.app, stored);
@@ -484,7 +555,7 @@ mod tests {
         )
         .expect("staged");
 
-        let link = fixture.tree.release(&second).join("target");
+        let link = fixture.release(&second).join("target");
         assert_eq!(fs::read_link(&link).expect("a target link"), staged.cache);
         assert!(staged.cache.is_dir(), "the cache exists before the link");
 
@@ -525,12 +596,12 @@ mod tests {
         // The release as the previous version left it: a finished checkout,
         // its marker, and `target` linked at the cache inside the tree.
         let (release, old) = (
-            fixture.tree.release(&second),
+            fixture.release(&second),
             fixture.tree.superseded_cache().join("target"),
         );
         crate::git::worktree_add(&fixture.tree.git(), &release, &second).expect("worktree");
-        fs::create_dir_all(fixture.tree.completions()).expect("markers");
-        fs::write(fixture.tree.completion(&second), "").expect("the checkout finished");
+        fs::create_dir_all(fixture.completions()).expect("markers");
+        fs::write(fixture.completion(&second), "").expect("the checkout finished");
         fs::create_dir_all(&old).expect("the cache the old link names");
         std::os::unix::fs::symlink(&old, release.join("target")).expect("the old link");
 
@@ -588,7 +659,7 @@ mod tests {
         assert_eq!(daemon.reload_count(), 0, "nothing may be reloaded");
         assert_eq!(
             swap::resolve(&fixture.tree.current()).unwrap(),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
     }
 

@@ -408,6 +408,49 @@ pub fn gated_app(sheep: &str, settings: &str) -> AppConfig {
     .expect("a gated app")
 }
 
+/// The [`crate::paths::BuildKey`] a deploy builds `sheep`'s releases into, from
+/// `checkout`.
+///
+/// A release directory is named `<sha>-<key>`, so a test that asserts on where
+/// a build landed has to know the key. It is a fact about the sheep's settings,
+/// its `user` and the checkout its record names, never about the tree, and this
+/// is the one place that reads them the way a deploy does: the resolved table,
+/// the app's own `user`, and `State::checkout`.
+#[must_use]
+pub fn build_key_of(sheep: &Sheep, checkout: &Path) -> crate::paths::BuildKey {
+    sheep
+        .resolved_settings()
+        .build_key(sheep.app().user.as_deref(), checkout)
+}
+
+/// The key a sheep that sets nothing at all builds `sha`'s release into from
+/// `checkout`: no command, no build environment, no `user`. The key every
+/// fixture here builds its releases with.
+#[must_use]
+pub fn default_build_key(checkout: &Path) -> crate::paths::BuildKey {
+    build_key_of(&Sheep::holding(app_named("web")), checkout)
+}
+
+/// The user running this test process, as `id -un` answers it.
+///
+/// A test that sets `user` on an app has to name somebody the dog can drop to
+/// without privilege, and one's own uid and gid are the only ids `setuid` and
+/// `setgid` accept from an unprivileged process. Asking the host rather than
+/// reading `$USER` is `crate::build::privilege`'s own idiom, and not every CI
+/// runner sets the variable.
+#[must_use]
+pub fn current_user() -> String {
+    let output = std::process::Command::new("id")
+        .arg("-un")
+        .output()
+        .expect("id -un runs");
+    assert!(output.status.success(), "id -un must succeed");
+    String::from_utf8(output.stdout)
+        .expect("id -un prints utf-8")
+        .trim()
+        .to_owned()
+}
+
 /// One sheep's config as a shepherd holds it, and a [`Daemon`] that answers
 /// `sheep_config` from it and applies `set_sheep_dog_settings` to it.
 ///
@@ -449,6 +492,14 @@ impl Sheep {
         }
     }
 
+    /// The same sheep, with `user` on its app: who the build drops to, and one
+    /// of the three inputs of its [`crate::paths::BuildKey`].
+    #[must_use]
+    pub fn with_user(self, user: &str) -> Self {
+        self.app.borrow_mut().user = Some(user.to_owned());
+        self
+    }
+
     /// The same sheep, with every `{{secret:KEY}}` in its table resolved to
     /// what `secrets` names for `KEY`, on the `sheep_dog_table` answer only.
     ///
@@ -478,6 +529,22 @@ impl Sheep {
     #[track_caller]
     pub fn settings(&self) -> Settings {
         settings::from_app("web", &no_section(), &self.app.borrow()).expect("the table parses")
+    }
+
+    /// The same table as [`table`](Self::table) answers it, with every
+    /// `{{secret:KEY}}` resolved, read back as [`Settings`].
+    ///
+    /// This is what a deploy builds with, so it is what a test that names a
+    /// release directory has to hash: [`crate::paths::BuildKey`] is keyed by
+    /// the resolved `build_env`, and a key hashed from the reference instead
+    /// points at a release no build ever wrote.
+    ///
+    /// # Panics
+    /// If the sheep has no `deploy` table, or the table no longer parses.
+    #[track_caller]
+    pub fn resolved_settings(&self) -> Settings {
+        let own = self.table("deploy").expect("the table request");
+        settings::from_tables("web", &no_section(), own.as_ref()).expect("the table parses")
     }
 
     /// Sets `key` in the table to `value`, as an operator's pane would,
