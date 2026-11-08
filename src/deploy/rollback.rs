@@ -186,7 +186,8 @@ pub(super) async fn roll_back<D: Daemon>(
 ///
 /// A record names a sha and never the build that produced it, so its branch
 /// asks for the directory the current settings name and, failing that, any
-/// directory of that sha. See [`another_build_of`].
+/// directory of that sha, in the repository or in this tree's superseded
+/// `releases/`. See [`another_build_of`].
 fn rollback_target(
     tree: &Tree,
     state: &State,
@@ -223,15 +224,11 @@ fn usable(release: PathBuf, attempted: &str) -> Option<PathBuf> {
 /// spell.
 ///
 /// A release directory names the sha and the key of the build that made it, and
-/// that key is a hash of the command, user, checkout and resolved `build_env` as
-/// they were AT THE BUILD. Change one, or rotate a secret, and the directory the
-/// settings name now was never created while the release the sheep was serving
-/// from sits on disk under its old name.
-///
-/// So every directory of that sha is asked, newest first, which is the widening
-/// [`crate::retention`] applies to a record for the same reason. A variant
-/// another sheep built is a weaker target than this sheep's own, and still the
-/// better answer: the commit is the one that was serving.
+/// that key hashes the command, user, checkout and resolved `build_env` as that
+/// build saw them. Change one, or rotate a secret, and the directory the settings
+/// name now was never created while the release the sheep was serving from sits
+/// on disk under its old name. So every directory of that sha is asked, newest
+/// first, as [`crate::retention`] does for a record.
 fn another_build_of(tree: &Tree, repo: &Repo, recorded: &str, attempted: &str) -> Option<PathBuf> {
     let mut variants: Vec<(SystemTime, PathBuf)> = [repo.releases(), tree.superseded_releases()]
         .into_iter()
@@ -252,6 +249,10 @@ fn another_build_of(tree: &Tree, repo: &Repo, recorded: &str, attempted: &str) -
         })
         .filter_map(|(modified, path)| usable(path, attempted).map(|release| (modified, release)))
         .collect();
+    // A variant another sheep built is a weaker target than this sheep's own:
+    // its build output came from another command and its linked ignored files
+    // from another checkout. It is still better than leaving `current` on the
+    // release that just failed.
     variants.sort_by(|(newer, newer_path), (older, older_path)| {
         older.cmp(newer).then_with(|| newer_path.cmp(older_path))
     });
