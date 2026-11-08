@@ -129,7 +129,8 @@ pub(super) fn copy_artifact(
         // `target` and rejoins the rest onto `CARGO_TARGET_DIR`, so
         // `artifacts = ["target"]` under a redirect resolves its source to
         // the redirect itself, and its destination through the link
-        // `link_cache` leaves at `release/target`. Both are the cache.
+        // `link_cache` leaves at `release/target`. Both are the repository's
+        // cache.
         //
         // Said here rather than left to `Walk`, which has no last component
         // to open in that case and can only report it as a component that
@@ -241,7 +242,8 @@ pub(super) fn copy_artifact(
     }
 
     // Identity, not spelling. `link_cache` symlinks `release/target` at the
-    // dog's own cache, so a redirect through `CARGO_TARGET_DIR` gives a source
+    // repository's build cache, so a redirect through `CARGO_TARGET_DIR` gives a
+    // source
     // and a destination that differ as strings and name one file. The lexical
     // `from == to` above cannot see that, and opening the destination for
     // writing truncates the source before anything is read.
@@ -522,8 +524,8 @@ mod tests {
 
     /// fails if an artifact can truncate the file it is copying.
     ///
-    /// `link_cache` symlinks `release/target` at the dog's own cache, so a
-    /// `CARGO_TARGET_DIR` pointing there gives a source and a destination that
+    /// `link_cache` symlinks `release/target` at the repository's build cache, so
+    /// a `CARGO_TARGET_DIR` pointing there gives a source and a destination that
     /// differ as strings and name one file. Opening the destination for
     /// writing then empties the source before anything is read.
     ///

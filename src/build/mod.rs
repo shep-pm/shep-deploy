@@ -48,8 +48,9 @@
 //!   directory the build never touches. This is the part that replaces a
 //!   hardcoded sleep between a build and a restart.
 //! - **`build.artifacts` exists for a build that writes outside the
-//!   release.** Warm Rust builds do NOT need it: each sheep gets a
-//!   dog-owned cache symlinked in as `target` (see
+//!   release.** Warm Rust builds do NOT need it: each repository has a
+//!   dog-owned cache, shared by every sheep that deploys it, symlinked into
+//!   the release as `target` (see
 //!   [`crate::paths::Tree::cache_target`]), so compilation stays warm
 //!   across releases AND a hardcoded `./target/release/koji` still
 //!   resolves, with nothing copied back. Setting `CARGO_TARGET_DIR`

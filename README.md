@@ -237,9 +237,24 @@ the case of its scheme and host folded away, so `https://host/x` and
 `git@host:x` against `https://host/x` stays two. A sheep cannot be called
 `repos`. Fetches into one clone take turns on `git.lock` beside it.
 
+The same key holds the build cache: `deploy/repos/<key>/cache/target`,
+symlinked into every release of every sheep that deploys that remote as
+`target`. Sheep off one repository compile it once between them instead of
+once each, and a build that hardcodes `./target/release/koji` still resolves.
+Because it is one directory, builds of one repository take turns too, on
+`git.build.lock` beside that clone: two sheep of one remote build one after the
+other, a `--stage` build or a first `init` build queues behind them the same
+way, and a reload never queues at all. A tree that had its own `cache/` keeps
+the directory; nothing removes it, and the next build warms the one under
+`repos/` from scratch. A release checked out before the move has its `target`
+relinked at the new cache when it is built again, so a retry of it still builds.
+
 Removing the dog lets go of the link of each sheep it puts back, and of each
-whose cutover never landed; the clone goes with the last link. A sheep left
-running from its tree keeps its link, and so the clone. A deploy whose recorded
+whose cutover never landed; the clone goes with the last link, and the build
+cache goes with the clone. One exception: a tree that owns a clone of its own
+and has a record naming that remote keeps the cache, because its releases link
+`target` into it and removing it would leave the app serving from a dangling
+link. A sheep left running from its tree keeps its link, and so the clone. A deploy whose recorded
 `remote` is not the one its tree's link was made for is refused, so a hand edit
 cannot fetch one repository into a clone other sheep deploy from; run `init`
 again to relink. A tree set up before this keeps the clone it has until you
@@ -688,8 +703,10 @@ Set `user` on the app and the build drops to that user's uid and primary group,
 with the shepherd's supplementary groups cleared, before it runs anything. A
 compromised build then gets that app's privileges and nothing more.
 
-Under a root shepherd the build user owns its release and its build cache
-directory (`target`, the directory only, not what is in it) and nothing else.
+Under a root shepherd the build user owns its release and the build cache
+directory of the repository it deploys (`target`, the directory only, not what
+is in it) and nothing else. That cache is shared by every sheep deploying that
+remote, so what is inside it belongs to whichever build wrote it last.
 The dog hands those over just before the build, or before the release hook (or the
 after hook) when the app has no build command, through open directory handles
 and never through paths, and skips every symlink, every file with a second
@@ -719,7 +736,8 @@ private repository still clones; only the build loses the socket. Name it in
 `passthrough` if a build genuinely needs it.
 
 `artifacts` may only name paths that really land inside the release or
-the dog's own build cache, resolved rather than spelled. A `..`, an absolute
+the build cache of the repository being deployed, resolved rather than
+spelled. A `..`, an absolute
 path, a committed symlink, or a `CARGO_TARGET_DIR` pointing elsewhere are all
 refused. That is narrower than it was: a build whose output genuinely lands
 outside both is no longer copyable, because the copy runs in the dog's own

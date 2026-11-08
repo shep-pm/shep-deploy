@@ -54,6 +54,10 @@ pub enum Staged {
 /// Builds the head of `state.branch` into its release and records it as
 /// `state.staged`, without swapping it in.
 ///
+/// The build takes the build turn for its repository, so a stage of one sheep
+/// waits while another sheep of the same remote is building. It has to: the two
+/// compile into one cache beside the shared clone. See [`crate::lock`].
+///
 /// The build is the command in the sheep's `[app.dogs.deploy]` table, read
 /// once the tree is held. Reclaims old releases afterwards, sparing `deployed` and `staged`, and
 /// reports a failure to do so rather than returning it: the stage itself is
@@ -220,9 +224,15 @@ async fn land_staged<D: Daemon>(
 ) -> Result<Outcome, Error> {
     let started_at = swap::resolve(&tree.current())?;
     let staged = {
-        let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
+        let (tree, checkout, head, remote) = (
+            tree.clone(),
+            state.checkout.clone(),
+            head.to_owned(),
+            state.remote.clone(),
+        );
         let (app, settings) = (app.clone(), settings.clone());
-        shared::off_thread(move || read_staged(&tree, &checkout, &head, &app, &settings)).await?
+        shared::off_thread(move || read_staged(&tree, &checkout, &head, &remote, &app, &settings))
+            .await?
     };
     refuse_ungated_verification(tree.sheep(), &staged.app, state.verify)?;
     run_release_hook(tree, head, &staged, config).await?;
@@ -241,12 +251,33 @@ async fn build_and_record<D: Daemon>(
 ) -> Result<(), Error> {
     let sheep = tree.sheep();
     let release = tree.release(head);
-    let deploy::Staged { spec, linked, .. } = {
-        let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
+    let deploy::Staged {
+        spec,
+        linked,
+        cache,
+        ..
+    } = {
+        let (tree, checkout, head, remote) = (
+            tree.clone(),
+            state.checkout.clone(),
+            head.to_owned(),
+            state.remote.clone(),
+        );
         let (app, settings) = (app.clone(), settings.clone());
-        shared::off_thread(move || stage_release(&tree, &checkout, &head, &app, &settings)).await?
+        shared::off_thread(move || stage_release(&tree, &checkout, &head, &remote, &app, &settings))
+            .await?
     };
     refuse_ungated_verification(sheep, app, state.verify)?;
+    // The build turn for this repository, taken inside the stage's own tree hold
+    // and let go before the record write. The cache this build writes into is one
+    // directory keyed by the remote, and the tree lock says nothing between two
+    // sheep of it: a stage taking no turn would compile into a cache a deploy's
+    // build is still filling, and then copy out whatever that build left there.
+    // See [`crate::lock`].
+    let building = {
+        let (tree, remote) = (tree.clone(), state.remote.clone());
+        shared::off_thread(move || lock::hold_build(&tree.repo(&remote))).await?
+    };
     let snapshot = linkcheck::Snapshot::before(sheep, &release, &linked);
     let built = build::run(
         sheep,
@@ -254,13 +285,16 @@ async fn build_and_record<D: Daemon>(
         &spec,
         app.user.as_deref(),
         &config.passthrough,
-        &tree.cache_target(),
+        &cache,
         config.build_timeout,
     )
     .await;
     for warning in snapshot.after() {
         eprintln!("{warning}");
     }
+    // Let go before the record write, so nothing holding the build turn ever
+    // waits for a record lock.
+    drop(building);
     built?;
 
     record_staged(daemon, tree, state, head, &config.shared).await

@@ -40,7 +40,7 @@ pub(crate) async fn run_release_hook(
             as_user: staged.app.user.as_deref(),
             passthrough: &config.passthrough,
             budget: config.build_timeout,
-            cache: &tree.cache_target(),
+            cache: &staged.cache,
             built: staged.spec.command.is_some(),
         },
     )
@@ -123,7 +123,7 @@ pub(crate) async fn swap_and_land<D: Daemon>(
                             as_user: app.user.as_deref(),
                             passthrough: &config.passthrough,
                             budget: config.build_timeout,
-                            cache: &tree.cache_target(),
+                            cache: &staged.cache,
                             built: spec.command.is_some(),
                         },
                     )

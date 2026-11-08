@@ -54,9 +54,10 @@ pub(super) fn raced(artifact: &Path) -> Error {
 /// The resolution done here is a snapshot and is not trusted as one. It picks
 /// which names to walk; the walk is what decides where they may go.
 pub(super) struct Walk<'a> {
-    /// The two directories an artifact may land under, resolved. Both ends of
-    /// a copy are confined to these, and a symlinked component is followed
-    /// only when it names one of them.
+    /// The two approved roots an artifact may land under, resolved: the
+    /// release, and the build cache of the repository it was checked out from.
+    /// Both ends of a copy are confined to these, and a symlinked component is
+    /// followed only when it names one of them.
     roots: &'a [PathBuf; 2],
     /// The one of `roots` this end lands under, and where its walk starts.
     root: PathBuf,
@@ -173,8 +174,8 @@ impl<'a> Walk<'a> {
     ///
     /// A symlinked component is not wrong by itself, which is the constraint
     /// every earlier attempt at this walk broke: `shared::link_cache` makes
-    /// `release/target` a link at the dog's own cache on purpose, so refusing
-    /// every one of them refuses the ordinary cargo arrangement.
+    /// `release/target` a link at the repository's build cache on purpose, so
+    /// refusing every one of them refuses the ordinary cargo arrangement.
     ///
     /// So one is followed, and only ever to a root, and the walk then
     /// continues from THAT root's own descriptor rather than from anything
@@ -251,8 +252,8 @@ mod tests {
     ///
     /// This is constraint 1 in `docs/specs/deferred.md`, and the one every
     /// earlier attempt at this walk broke: `shared::link_cache` makes
-    /// `release/target` a symlink at the dog's own build cache on purpose, so
-    /// a walk that refuses every symlinked component refuses the ordinary
+    /// `release/target` a symlink at the repository's build cache on purpose,
+    /// so a walk that refuses every symlinked component refuses the ordinary
     /// cargo arrangement.
     ///
     /// Deterministic, where the racing test above is not: `Walk::new` reads

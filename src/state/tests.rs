@@ -516,3 +516,32 @@ fn write_survives_a_second_write_and_leaves_no_tmp_file_behind() {
 
     assert_eq!(State::read(&path).expect("reads").deployed, second.deployed);
 }
+
+/// fails if `remote_at` cannot read the one field out of a record a real deploy
+/// wrote, or answers something other than `None` for a file that is not one.
+///
+/// `retention::release_clone` asks which remotes are still deployed before it
+/// removes a shared build cache, and reads `None` as "cannot tell, keep it". A
+/// `None` for a valid record would take the cache out from under a live release.
+#[test]
+fn remote_at_reads_the_remote_and_answers_none_for_a_file_that_is_not_a_record() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("deploy.toml");
+    let remote = "https://example.com/x.git";
+
+    State {
+        remote: remote.to_owned(),
+        ..sample(None)
+    }
+    .write(&path)
+    .expect("write a real record");
+    assert_eq!(State::remote_at(&path).as_deref(), Some(remote));
+
+    fs::write(&path, "this is not toml = = =").expect("corrupt it");
+    assert_eq!(State::remote_at(&path), None, "a broken record");
+
+    fs::write(&path, "[origin]\ncwd = \"/srv/web\"\n").expect("a record with no remote");
+    assert_eq!(State::remote_at(&path), None, "a record naming no remote");
+
+    assert_eq!(State::remote_at(&dir.path().join("absent.toml")), None);
+}
