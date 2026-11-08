@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-08
+
+### Added
+
+- Relink a tree that owns its clone onto the shared clone
+
+### Changed
+
+- Name the sweep that finds a tree still linking to a clone
+
+### Fixed
+
+- Resolve relative clone links from their tree
+- Invalidate release markers before removing contents
+- Finish release cleanup before replacing an owned clone
+- Finish release cleanup before switching remotes
+
+
 ## [0.7.2] - 2026-11-05
 
 ### Fixed
