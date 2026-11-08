@@ -241,8 +241,13 @@ The same key holds the build cache: `deploy/repos/<key>/cache/target`,
 symlinked into every release of every sheep that deploys that remote as
 `target`. Sheep off one repository compile it once between them instead of
 once each, and a build that hardcodes `./target/release/koji` still resolves.
-A tree that had its own `cache/` keeps the directory; nothing removes it, and
-the next build warms the one under `repos/` from scratch.
+Because it is one directory, builds of one repository take turns too, on
+`git.build.lock` beside that clone: two sheep of one remote build one after the
+other, a `--stage` build or a first `init` build queues behind them the same
+way, and a reload never queues at all. A tree that had its own `cache/` keeps
+the directory; nothing removes it, and the next build warms the one under
+`repos/` from scratch. A release checked out before the move has its `target`
+relinked at the new cache when it is built again, so a retry of it still builds.
 
 Removing the dog lets go of the link of each sheep it puts back, and of each
 whose cutover never landed; the clone goes with the last link. A sheep left

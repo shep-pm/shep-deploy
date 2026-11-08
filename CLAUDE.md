@@ -305,9 +305,22 @@ class rather than the instances.
   is `deploy/repos/<key>/cache/target`, the same `<key>` the clone is keyed by
   (`Tree::repo`), and `shared::link_cache` symlinks `release/target` there, so
   sheep off one repository share one incremental cache. A tree that owns its
-  clone shares it too. `retention::release_clone` removes the whole repository
-  directory, cache included, and `ownership::hand_over` hands only the cache
-  directory itself to `user`, never what is in it.
+  clone shares it too, which is why `lock::hold_build` is keyed by that `<key>`
+  rather than by the tree's resolved clone, and why `stage` and `optin::prepare`
+  take it: two builds of one remote at once are two compilers over one cache,
+  each then copying out what the other left. `retention::release_clone` removes
+  the whole repository directory, cache included, and `ownership::hand_over`
+  hands only the cache directory itself to `user`, never what is in it.
+- **`link_cache` repoints a `target` link, and only its own.** A release checked
+  out before the cache moved keeps its link at `Tree::superseded_cache`
+  (`<tree>/cache`), and `checkout_release` reuses that finished checkout, so
+  without the repoint the build writes through the old cache while both artifact
+  roots name the new one and every `target/release/app` is refused. The link's
+  own parent resolving to the superseded directory is what identifies it; a
+  `target` the repository committed, or a link naming anywhere else, is left
+  exactly where it is, and `build::contain::lands_within` is what covers where
+  such a link walks. Nothing removes the old directory: a live release may still
+  be serving from it.
 - **Never derive the markers directory from `Tree::completion("")`.** The
   result has a trailing separator and its `parent()` is the tree root; a sweep
   written that way removed `current`. `Tree::completions()` is the directory.
@@ -366,13 +379,12 @@ class rather than the instances.
   `retention::release_clone` take it to make or sweep a shared clone. It is
   taken inside the tree lock and never waits for a tree's or a record's.
   `lock::hold_build` is the build lock, blocking, on `git.build.lock` beside
-  the SAME resolved clone, so two sheep of one remote queue for the build turn
-  and a reload never does. `deploy::attempt` takes it after its fetch and drops
-  it at the swap, not at the end of the deploy; nothing else takes it, and
-  nothing holding it waits for a tree's, a record's or a clone's. A tree that
-  still owns its clone has the turn beside its own clone and contends with
-  nothing, and `stage` and `optin::prepare` build without it, so a `--stage`
-  build or a first cutover of one repository can run beside a deploy's. A write
+  the clone directory the remote's key names (`Tree::repo`), whether or not
+  this tree's own clone is that one, so two sheep of one remote queue for the
+  build turn, a tree that still owns its clone queues with them, and a reload
+  never does. `deploy::attempt`, `stage::build_and_record` and `optin::prepare`
+  each take it after their fetch and drop it before their swap or their record
+  write; nothing holding it waits for a tree's, a record's or a clone's. A write
   to the sheep's table
   is one request and takes no lock. The
   cutover's promotion writes `watch = auto` to the table on the clean path

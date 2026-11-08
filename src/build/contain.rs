@@ -169,8 +169,8 @@ mod tests {
     /// Verified 2026-08-28 that the equivalent link pointing INSIDE the
     /// release does copy through, and that this is correct rather than a
     /// second hole: `shared::link_cache` makes `release/target` a link at the
-    /// dog's own cache, so refusing every symlinked component would refuse
-    /// the ordinary cargo arrangement.
+    /// repository's build cache, so refusing every symlinked component would
+    /// refuse the ordinary cargo arrangement.
     #[tokio::test]
     async fn a_symlinked_component_below_target_cannot_carry_a_write_out() {
         let rel = fixtures::fixture_release(&[]);
