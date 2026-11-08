@@ -295,10 +295,12 @@ class rather than the instances.
   apart. `paths::Repo` derives `<key>` from the normalized remote. `repos` is
   therefore not a sheep name, and `init` (and its old name `setup`) refuses it. Only that takeover links, only
   `restore::all` lets go, for a sheep put back or never moved
-  (`retention::release_clone`, which sweeps every directory under `deploy/` for
-  a link, record or not), and `retention::prune` never removes a clone. A deploy
-  refuses a record whose `remote` is not the one its link was keyed by
-  (`Tree::clone_serves`). Trees with their own clone are not migrated yet.
+  (`retention::release_clone`, through `retention::tree_linking_to`, which
+  sweeps every directory under `deploy/` for a link, record or not), and
+  `retention::prune` never removes a clone. A deploy refuses a record whose
+  `remote` is not the one its link was keyed by (`Tree::clone_serves`). Only
+  `optin::clone::share_clone` migrates a tree that owns its clone, and only one
+  with no record: `prepare` refuses a target, so the poll loop moves nothing.
 - **Never derive the markers directory from `Tree::completion("")`.** The
   result has a trailing separator and its `parent()` is the tree root; a sweep
   written that way removed `current`. `Tree::completions()` is the directory.

@@ -11,7 +11,8 @@ use crate::deploy::refuse_ungated_at_setup;
 use crate::error::Error;
 use crate::git;
 use crate::lock;
-use crate::paths::{self, Repo, Tree};
+use crate::optin::clone;
+use crate::paths::{self, Tree};
 use crate::roll;
 use crate::settings::Change;
 use crate::shared;
@@ -80,9 +81,10 @@ impl Prepared {
 ///
 /// # Errors
 /// [`Error::Config`] if `sheep` is already a deploy target, if the
-/// shepherd has no sheep by that name registered, or if it records no
-/// working directory for it. Otherwise, whatever [`roll::registered`],
-/// [`git::remote_url`], [`git::current_branch`], [`git::init_bare`],
+/// shepherd has no sheep by that name registered, if it records no
+/// working directory for it, or if its clone cannot be moved onto the shared
+/// one. Otherwise, whatever [`roll::registered`],
+/// [`git::remote_url`], [`git::current_branch`], [`super::clone::share_clone`],
 /// [`git::fetch`], [`git::remote_head`], [`git::worktree_add`],
 /// [`crate::deploy::stage_release`] (the worktree, the cache link, the shared
 /// files),
@@ -346,7 +348,7 @@ pub async fn prepare_with<D: Daemon>(
     // Off the runtime's thread: it waits on the clone's lock.
     {
         let (tree, shep_home, remote) = (tree.clone(), shep_home.to_owned(), state.remote.clone());
-        shared::off_thread(move || share_clone(&tree, &shep_home, &remote)).await?;
+        shared::off_thread(move || clone::share_clone(&tree, &shep_home, &remote)).await?;
     }
     // Off the runtime's thread, like every git call: see `shared::off_thread`.
     let (git_dir, remote, tracked, budget) = (
@@ -437,33 +439,6 @@ pub async fn prepare_with<D: Daemon>(
         app,
         previous_config,
     })
-}
-
-/// Gives `tree` the bare clone for `remote`: links it to the shared one,
-/// making that first if no sheep with this remote has. A tree that already
-/// has a clone of its own, from a setup that died before shared clones
-/// existed, keeps it.
-///
-/// Under the clone's lock, so a removal that is sweeping the shared clone
-/// for links cannot take it between its creation and this link.
-///
-/// # Errors
-/// [`Error::Io`] or [`Error::Git`] as [`git::init_bare`] and
-/// [`Tree::link_clone`] return them, and [`Error::Io`] if the lock cannot be
-/// taken.
-pub(super) fn share_clone(tree: &Tree, shep_home: &Path, remote: &str) -> Result<(), Error> {
-    if tree.owns_clone() {
-        return git::init_bare(&tree.git());
-    }
-    let repo = Repo::for_remote(shep_home, remote);
-    // A retry after the remote changed: the link to the old clone goes, and
-    // the old clone with it when nothing else links to it.
-    if tree.linked_clone().is_some_and(|old| old != repo) {
-        crate::retention::release_clone(shep_home, tree)?;
-    }
-    let _cloning = lock::hold_clone(&repo.git())?;
-    git::init_bare(&repo.git())?;
-    tree.link_clone(&repo)
 }
 
 #[cfg(test)]

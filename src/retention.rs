@@ -33,13 +33,13 @@
 //! of it would report a failure that did not happen.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::error::Error;
 use crate::paths::{self, Tree};
 use crate::state::is_sha;
-use crate::{git, swap};
+use crate::{git, shared, swap};
 
 /// Removes every release beyond the newest `keep`, and answers with the
 /// shas it removed.
@@ -151,12 +151,10 @@ pub fn prune(tree: &Tree, keep: usize, recorded: &[&str]) -> Result<Vec<String>,
 ///
 /// For the tree's own removal, never for retention: [`prune`] reclaims
 /// worktrees and nothing else. A tree is counted as a link whether or not it
-/// has a record yet, so a setup still fetching into the clone keeps it. The
-/// other trees are found by reading every directory under `deploy/` for a
-/// `git` link to this clone, not by asking [`paths::targets`], which lists
-/// only trees with a record. Under the clone's lock, so a setup linking to it
-/// at the same moment either lands before the sweep and keeps it, or finds it
-/// gone and makes it again.
+/// has a record yet, so a setup still fetching into the clone keeps it. See
+/// [`tree_linking_to`] for how the other trees are found. Under the clone's
+/// lock, so a setup linking to it at the same moment either lands before the
+/// sweep and keeps it, or finds it gone and makes it again.
 ///
 /// A tree with a clone of its own, or none, is left as it is.
 ///
@@ -179,17 +177,42 @@ pub fn release_clone(shep_home: &Path, tree: &Tree) -> Result<bool, Error> {
         _ => {}
     }
 
-    let deploy = shep_home.join("deploy");
-    for entry in fs::read_dir(&deploy).map_err(Error::at(&deploy))? {
-        let entry = entry.map_err(Error::at(&deploy))?;
-        if entry.file_name() != paths::REPOS
-            && fs::read_link(entry.path().join("git")).is_ok_and(|to| to == repo.git())
-        {
-            return Ok(false);
-        }
+    if tree_linking_to(shep_home, &repo.git())?.is_some() {
+        return Ok(false);
     }
     fs::remove_dir_all(repo.root()).map_err(Error::at(repo.root()))?;
     Ok(true)
+}
+
+/// The first tree directory under `shep_home/deploy` whose `git` links to
+/// `git_dir`, or `None` when no tree does.
+///
+/// The trees are the directories under `deploy/`, not [`paths::targets`], which
+/// lists only the ones with a record: a tree whose setup has not written one
+/// yet is fetching into the clone right now. `repos` is skipped, being where
+/// the clones themselves live. A link counts by the place it resolves to, so
+/// one clone spelled two ways is one clone.
+///
+/// A caller about to remove `git_dir` holds [`crate::lock::hold_clone`] for it
+/// while it asks, and unlinks its own tree first.
+///
+/// # Errors
+/// [`Error::Io`], naming `deploy/`, if it cannot be listed.
+pub fn tree_linking_to(shep_home: &Path, git_dir: &Path) -> Result<Option<PathBuf>, Error> {
+    let deploy = shep_home.join("deploy");
+    for entry in fs::read_dir(&deploy).map_err(Error::at(&deploy))? {
+        let entry = entry.map_err(Error::at(&deploy))?;
+        if entry.file_name() == paths::REPOS {
+            continue;
+        }
+        let Ok(target) = fs::read_link(entry.path().join("git")) else {
+            continue;
+        };
+        if shared::same_path(&entry.path().join(target), git_dir) {
+            return Ok(Some(entry.path()));
+        }
+    }
+    Ok(None)
 }
 
 /// Removes every completion marker whose release is no longer on disk.

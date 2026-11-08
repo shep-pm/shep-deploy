@@ -10,8 +10,8 @@ use crate::fixtures;
 use crate::paths::Repo;
 
 /// fails if a tree set up before clones were shared stops deploying. Its
-/// `git` is a directory, no link, and migrating it is a later change: until
-/// then a deploy must not need anything the link brings.
+/// `git` is a directory, no link, and a deploy must not need anything the link
+/// brings: only `setup` migrates such a tree, and only one with no record.
 #[tokio::test]
 async fn a_tree_with_its_own_clone_still_deploys() {
     let mut fixture = fixture_with_previous_release();

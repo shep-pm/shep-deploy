@@ -242,8 +242,11 @@ whose cutover never landed; the clone goes with the last link. A sheep left
 running from its tree keeps its link, and so the clone. A deploy whose recorded
 `remote` is not the one its tree's link was made for is refused, so a hand edit
 cannot fetch one repository into a clone other sheep deploy from; run `init`
-again to relink. Trees set up before this keep the clone
-they have, and nothing moves them yet.
+again to relink. A tree set up before this keeps the clone it has until you
+run `init` again: that links it to the shared one and removes the clone it
+owned, once no other tree links to it. `init` is refused on a target already
+cut over, so what it moves is a tree whose first setup never finished. A
+deploy never changes which clone a tree uses.
 
 `branch`, `watch` and `verify` are not in `deploy.toml`. They are keys of the
 sheep's `[app.dogs.deploy]` table, or of the dog's `[deploy]` section for every
