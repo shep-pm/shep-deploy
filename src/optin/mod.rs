@@ -42,6 +42,7 @@
 //! first-run-only code path is the one nothing exercises.
 
 mod attempt;
+mod clone;
 mod cutover;
 mod prepare;
 #[cfg(test)]
