@@ -419,8 +419,8 @@ impl Shepherd {
         self.held.settings()
     }
 
-    /// The [`crate::paths::BuildKey`] a deploy against this shepherd builds
-    /// `web`'s releases into, read the way a deploy reads it.
+    /// The [`crate::paths::BuildKey`] a deploy against this shepherd builds its
+    /// sheep's releases into, read the way a deploy reads it.
     pub(crate) fn build_key(&self) -> crate::paths::BuildKey {
         fixtures::build_key_of(&self.held)
     }
