@@ -29,8 +29,7 @@ use crate::{git, lock, retention, shared};
 pub(super) fn share_clone(tree: &Tree, shep_home: &Path, remote: &str) -> Result<(), Error> {
     let repo = Repo::for_remote(shep_home, remote);
     if tree.owns_clone() {
-        relink_owned_clone(tree, shep_home, &repo)?;
-        return drop_unregistered_releases(tree);
+        return relink_owned_clone(tree, shep_home, &repo);
     }
     // A retry after the remote changed: the link to the old clone goes, and
     // the old clone with it when nothing else links to it. A tree with no
@@ -67,7 +66,7 @@ pub(super) fn share_clone(tree: &Tree, shep_home: &Path, remote: &str) -> Result
 /// [`Error::Config`] if `tree`'s clone and `repo`'s are one directory, or if
 /// another tree links to `tree`'s clone. [`Error::Io`] or [`Error::Git`] as
 /// [`crate::lock::hold_clone`], [`crate::retention::tree_linking_to`],
-/// [`git::init_bare`] and [`Tree::link_clone`] return them.
+/// [`git::init_bare`], [`drop_unregistered_releases`] and [`Tree::link_clone`] return them.
 fn relink_owned_clone(tree: &Tree, shep_home: &Path, repo: &Repo) -> Result<(), Error> {
     let (owned, shared_clone) = (tree.git(), repo.git());
     // `flock` on a second descriptor of one file waits for this process's own
@@ -99,22 +98,18 @@ fn relink_owned_clone(tree: &Tree, shep_home: &Path, repo: &Repo) -> Result<(), 
     // removed. Nothing else holds two clone locks at once, so no cycle forms.
     let _linking = lock::hold_clone(&shared_clone)?;
     git::init_bare(&shared_clone)?;
+    drop_unregistered_releases(tree)?;
     std::fs::remove_dir_all(&owned).map_err(Error::at(&owned))?;
     tree.link_clone(repo)
 }
 
-/// Remove the releases under `tree` that its old clone registered and its new
-/// one does not, with the completion markers that vouched for them.
+/// Remove sha-named releases and their completion markers before changing clones
 ///
-/// `git worktree remove` refuses a directory the clone does not know, so a
-/// release left over from a dead setup would survive every later prune, and
-/// prune would report a failure for it every cycle, forever. Only sha-named
-/// directories go, the same set [`crate::retention::prune`] recognises as a
-/// release; anything else under `releases/` is the operator's and stays.
+/// The new clone cannot prune releases it never registered. Keeping the old
+/// clone until cleanup finishes ensures a retry repeats interrupted cleanup.
+/// Other entries under `releases/` are the operator's and stay.
 ///
-/// Nothing runs from what this removes. A tree whose clone changed is one
-/// `prepare_with` is setting up, and it refuses outright a sheep whose working
-/// directory is anywhere inside this tree.
+/// Nothing here serves traffic: setup refuses working directories inside this tree.
 ///
 /// # Errors
 /// [`Error::Io`] if `releases/` cannot be listed, or a release or its markers

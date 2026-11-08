@@ -250,30 +250,37 @@ async fn a_failed_relink_cleanup_invalidates_the_release_before_retrying_setup()
 
     let home = tempfile::tempdir().expect("tempdir");
     let checkout = checkout_with_commit();
+    let old_sha = fixtures::head_of(checkout.path());
+    std::fs::write(checkout.path().join("second.txt"), "the next release").expect("second file");
+    fixtures::run_git(checkout.path(), &["add", "second.txt"]);
+    fixtures::run_git(checkout.path(), &["commit", "-q", "-m", "second release"]);
     let remote = checkout.path().to_str().expect("utf-8");
     let tree = Tree::for_sheep(home.path(), "web");
     git::init_bare(&tree.git()).expect("owned clone");
     git::fetch(&tree.git(), remote, "main", fixtures::TEST_BUDGET).expect("fetch");
     let sha = git::remote_head(&tree.git(), "main").expect("head");
     let release = tree.release(&sha);
+    let old_release = tree.release(&old_sha);
+    git::worktree_add(&tree.git(), &old_release, &old_sha).expect("old worktree");
     git::worktree_add(&tree.git(), &release, &sha).expect("worktree");
     std::fs::create_dir_all(tree.completions()).expect("complete/");
+    std::fs::write(tree.completion(&old_sha), b"").expect("old marker");
     std::fs::write(tree.completion(&sha), b"").expect("marker");
-    let permissions = std::fs::metadata(&release)
+    let permissions = std::fs::metadata(&old_release)
         .expect("release metadata")
         .permissions();
-    std::fs::set_permissions(&release, std::fs::Permissions::from_mode(0o555))
+    std::fs::set_permissions(&old_release, std::fs::Permissions::from_mode(0o555))
         .expect("refuse removal of release contents");
 
     let result = share_clone(&tree, home.path(), remote);
 
-    std::fs::set_permissions(&release, permissions).expect("restore permissions");
+    std::fs::set_permissions(&old_release, permissions).expect("restore permissions");
     assert!(matches!(result, Err(Error::Io { .. })), "{result:?}");
     assert!(
         !tree.completion(&sha).exists(),
         "a failed deletion cannot leave a marker vouching for the release"
     );
-    std::fs::remove_file(release.join("run.sh")).expect("model a partially deleted release");
+    std::fs::remove_file(old_release.join("run.sh")).expect("model a partially deleted release");
     let entries = [("web", checkout.path())];
     let daemon = RollOf::new(&entries);
     let prepared = tokio::time::timeout(
@@ -290,4 +297,9 @@ async fn a_failed_relink_cleanup_invalidates_the_release_before_retrying_setup()
         "#!/bin/sh\necho hi\n"
     );
     assert!(tree.completion(&sha).is_file(), "a finished checkout");
+    assert!(
+        !old_release.exists(),
+        "the retry removes the obsolete release"
+    );
+    assert!(!tree.completion(&old_sha).exists());
 }
