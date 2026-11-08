@@ -39,7 +39,9 @@
 //! that is put back, or that was never moved, lets go of the clone it shared
 //! with other sheep with the same remote (see [`crate::paths::Repo`]), and the
 //! clone goes with the last one: [`crate::retention::release_clone`]. A sheep
-//! the dog bootstrapped, which runs from its tree, keeps its link.
+//! the dog bootstrapped, which runs from its tree, keeps its link. The build
+//! cache keyed by that remote goes with the clone, except for a tree that owns
+//! a clone of its own and still has a record naming it.
 //!
 //! [`Request::Delete`]: shep_client::shep_core::protocol::Request::Delete
 

@@ -20,9 +20,11 @@
 //!   instance has turned over, so nothing runs from anything older.
 //!
 //! "Retention could delete what something is running from" is the right
-//! worry to have about this module, so here is the rest of the answer: this
+//! worry to have about this module, so here is the rest of the answer: [`prune`]
 //! reads `releases/` and nothing else. A sheep's pre-adoption instance runs
-//! from the operator's own checkout, which is not in there.
+//! from the operator's own checkout, which is not in there. [`release_clone`]
+//! reads the other trees' records for the same reason - what is running from a
+//! shared build cache is not visible from the cache itself.
 //!
 //! # Why a failure here never fails a deploy
 //!
@@ -37,8 +39,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::error::Error;
-use crate::paths::{self, Tree};
-use crate::state::is_sha;
+use crate::paths::{self, Repo, Tree};
+use crate::state::{State, is_sha};
 use crate::{git, shared, swap};
 
 /// Removes every release beyond the newest `keep`, and answers with the
@@ -158,9 +160,16 @@ pub fn prune(tree: &Tree, keep: usize, recorded: &[&str]) -> Result<Vec<String>,
 ///
 /// A tree with a clone of its own, or none, is left as it is.
 ///
-/// The build cache keyed by the same remote goes with the directory. A tree
-/// that owns a clone of its own builds against that cache too, so this can
-/// cost one a cold build. It cannot cost one a wrong build.
+/// The build cache beside the clone goes only with the last tree that deploys
+/// its remote, and that is not only the trees linking to the clone. A tree that
+/// owns its clone builds against that cache and links every release's `target`
+/// into it, so removing it would leave one serving from a dangling link, and
+/// would take the cache out from under a build running at that moment. No link
+/// says such a tree is there; its record is the only thing that does, so the
+/// cache stays while another tree owns a clone and its record names the remote.
+/// See [`another_tree_deploys`]. No build turn is needed for the same reason: a
+/// tree with a record is the only one that can be building here, and a setup
+/// without one links its `git` to the clone under this lock before it builds.
 ///
 /// # Errors
 /// [`Error::Io`] if the lock cannot be taken, the tree's link cannot be
@@ -184,8 +193,55 @@ pub fn release_clone(shep_home: &Path, tree: &Tree) -> Result<bool, Error> {
     if tree_linking_to(shep_home, &repo.git())?.is_some() {
         return Ok(false);
     }
-    fs::remove_dir_all(repo.root()).map_err(Error::at(repo.root()))?;
+    let doomed = if another_tree_deploys(shep_home, tree, &repo)? {
+        repo.git()
+    } else {
+        repo.root().to_owned()
+    };
+    fs::remove_dir_all(&doomed).map_err(Error::at(&doomed))?;
     Ok(true)
+}
+
+/// Whether a tree other than `tree` owns a clone of its own and has a record
+/// naming the remote `repo` keys.
+///
+/// The shape matters. A tree linked to `repo`'s clone is counted by
+/// [`tree_linking_to`], which runs first. A tree with neither a link nor a clone
+/// has nothing to build with, and that is exactly a restored sheep: its `git` is
+/// unlinked here and its record stays. A tree that owns a clone is the one this
+/// cannot see any other way, and its record is the only thing that says which
+/// remote it deploys.
+///
+/// A record that cannot be read counts as one that does: a cache left behind
+/// costs disk, and one removed from under a live release costs the release.
+///
+/// `tree` is skipped, being the tree whose clone is going. Every directory under
+/// `deploy` but `repos` is asked, whether or not its name can be a sheep's.
+///
+/// # Errors
+/// [`Error::Io`], naming `deploy/`, if it cannot be listed.
+fn another_tree_deploys(shep_home: &Path, tree: &Tree, repo: &Repo) -> Result<bool, Error> {
+    let deploy = shep_home.join("deploy");
+    for entry in fs::read_dir(&deploy).map_err(Error::at(&deploy))? {
+        let entry = entry.map_err(Error::at(&deploy))?;
+        let (name, root) = (entry.file_name(), entry.path());
+        if name == paths::REPOS || root == tree.root() {
+            continue;
+        }
+        if !fs::symlink_metadata(root.join("git")).is_ok_and(|meta| meta.file_type().is_dir()) {
+            continue;
+        }
+        let record = root.join("deploy.toml");
+        if !record.is_file() {
+            continue;
+        }
+        match State::remote_at(&record) {
+            Some(remote) if tree.repo(&remote) == *repo => return Ok(true),
+            Some(_) => {}
+            None => return Ok(true),
+        }
+    }
+    Ok(false)
 }
 
 /// The first tree directory under `shep_home/deploy` whose `git` links to
@@ -282,7 +338,7 @@ mod tests {
     use crate::fixtures;
 
     use super::*;
-    use crate::paths::Repo;
+    use std::os::unix::fs::symlink;
     use std::process::Command;
     use std::time::Duration;
 
@@ -623,8 +679,15 @@ mod tests {
         assert!(web.git().symlink_metadata().is_err(), "web's link is gone");
         assert!(api.git().join("HEAD").is_file(), "api still reaches it");
 
+        fs::create_dir_all(repo.cache_target()).expect("cache");
+        fs::write(repo.cache_target().join("artifact"), "warm").expect("warm cache");
+
         assert!(release_clone(home.path(), &api).expect("second"));
         assert!(!repo.root().exists(), "nobody links to it now");
+        assert!(
+            !repo.cache_target().exists(),
+            "and the build cache goes with the last tree of its remote"
+        );
     }
 
     /// fails if a tree that was linked to a clone but has no record yet, a
@@ -651,6 +714,104 @@ mod tests {
         assert!(!release_clone(home.path(), &tree).expect("nothing to release"));
 
         assert!(tree.git().join("HEAD").is_file());
+    }
+
+    /// One tree linked to the shared clone for `remote`, and a second tree under
+    /// the same home, whose clone and record each test below writes itself.
+    fn a_linked_tree_and_one_other(remote: &str) -> (tempfile::TempDir, Tree, Tree, Repo) {
+        let home = tempfile::tempdir().expect("tempdir");
+        let repo = Repo::for_remote(home.path(), remote);
+        git::init_bare(&repo.git()).expect("bare");
+
+        let linked = Tree::for_sheep(home.path(), "linked");
+        fs::create_dir_all(linked.root()).expect("tree");
+        linked.link_clone(&repo).expect("link");
+
+        let other = Tree::for_sheep(home.path(), "other");
+        fs::create_dir_all(other.root()).expect("tree");
+        (home, linked, other, repo)
+    }
+
+    /// fails if letting go of a shared clone takes the build cache a tree that
+    /// owns its own clone is building against.
+    ///
+    /// `crate::optin::clone::share_clone` never migrates a tree that has a
+    /// record, so a legacy tree keeps its clone and still links every release's
+    /// `target` into the repository cache. Removing a different sheep of the same
+    /// remote used to remove that whole directory: the live release's
+    /// `current/target` became a dangling link, so the app lost
+    /// `./target/release/<bin>` at its next restart, and a build of that tree
+    /// running at that moment lost its cache.
+    #[test]
+    fn a_released_clone_leaves_the_cache_of_a_tree_that_owns_its_clone() {
+        let remote = "https://example.com/x.git";
+        let (home, linked, own, repo) = a_linked_tree_and_one_other(remote);
+        git::init_bare(&own.git()).expect("its own clone");
+        State {
+            remote: remote.to_owned(),
+            ..fixtures::state()
+        }
+        .write(&own.state_file())
+        .expect("record");
+
+        fs::create_dir_all(repo.cache_target()).expect("cache");
+        fs::write(repo.cache_target().join("artifact"), "warm").expect("warm cache");
+        fs::create_dir_all(own.release(fixtures::SHA)).expect("release");
+        symlink(
+            repo.cache_target(),
+            own.release(fixtures::SHA).join("target"),
+        )
+        .expect("the release's link at the cache");
+
+        assert!(release_clone(home.path(), &linked).expect("releases"));
+
+        assert!(!repo.git().exists(), "no tree links to the clone any more");
+        assert!(
+            repo.cache_target().join("artifact").is_file(),
+            "the cache the other tree builds against stays, with what is in it"
+        );
+        assert!(
+            fs::canonicalize(own.release(fixtures::SHA).join("target")).is_ok(),
+            "and the live release's link still resolves"
+        );
+    }
+
+    /// fails if a record naming some other remote keeps this remote's cache. The
+    /// question is which remote a tree deploys, not whether it deploys anything.
+    #[test]
+    fn a_tree_of_another_remote_does_not_keep_the_cache() {
+        let (home, linked, other, repo) = a_linked_tree_and_one_other("https://example.com/x.git");
+        git::init_bare(&other.git()).expect("its own clone");
+        State {
+            remote: "https://example.com/y.git".to_owned(),
+            ..fixtures::state()
+        }
+        .write(&other.state_file())
+        .expect("record");
+        fs::create_dir_all(repo.cache_target()).expect("cache");
+
+        assert!(release_clone(home.path(), &linked).expect("releases"));
+
+        assert!(
+            !repo.root().exists(),
+            "the whole repository directory goes with the last tree of its remote"
+        );
+    }
+
+    /// fails if a record that cannot be read counts as no record at all. The
+    /// question is whether anything is still building against the cache, and a
+    /// tree with a broken `deploy.toml` is still a tree.
+    #[test]
+    fn a_tree_with_an_unreadable_record_keeps_the_cache() {
+        let (home, linked, broken, repo) = a_linked_tree_and_one_other("https://example.com/x.git");
+        git::init_bare(&broken.git()).expect("its own clone");
+        fs::write(broken.state_file(), "this is not toml").expect("record");
+        fs::create_dir_all(repo.cache_target()).expect("cache");
+
+        assert!(release_clone(home.path(), &linked).expect("releases"));
+
+        assert!(!repo.git().exists(), "the clone still goes");
+        assert!(repo.cache_target().is_dir(), "the cache does not");
     }
 
     /// fails if retention removes a shared clone while pruning a release.

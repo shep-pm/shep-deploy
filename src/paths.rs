@@ -27,7 +27,10 @@
 //! └── cache/target/        the dog's build cache, one per remote, symlinked
 //!                          into every release of every sheep that deploys
 //!                          that remote as `target`, so builds stay warm and a
-//!                          hardcoded `./target/release/x` still resolves
+//!                          hardcoded `./target/release/x` still resolves. It
+//!                          outlives the clone whenever a tree that owns its own
+//!                          clone still deploys that remote - see
+//!                          `crate::retention::release_clone`
 //! ```
 
 use std::path::{Component, Path, PathBuf};

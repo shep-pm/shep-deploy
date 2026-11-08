@@ -222,6 +222,24 @@ impl State {
         Self::parse(path, false)
     }
 
+    /// The `remote` the record at `path` names, or `None` when the file cannot be
+    /// read or names none.
+    ///
+    /// One field, with nothing else about the record validated, for a caller
+    /// asking a question about somebody else's tree:
+    /// [`crate::retention::release_clone`] asks which remotes are still deployed
+    /// before it removes a build cache, and a record it cannot read has to make it
+    /// keep the cache rather than fail the removal.
+    ///
+    /// Not [`Self::read`], which refuses a record carrying a key that moved or a
+    /// value that cannot work.
+    #[must_use]
+    pub fn remote_at(path: &Path) -> Option<String> {
+        let text = fs::read_to_string(path).ok()?;
+        let table: toml::Table = toml::from_str(&text).ok()?;
+        table.get("remote")?.as_str().map(str::to_owned)
+    }
+
     fn parse(path: &Path, refuse_moved: bool) -> Result<Self, Error> {
         let text = fs::read_to_string(path).map_err(Error::at(path))?;
         let refuse = |source: &dyn core::fmt::Display| {
