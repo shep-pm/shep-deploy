@@ -87,11 +87,7 @@ fn a_reload_slower_than_the_old_window_still_deploys() {
         "nothing here should roll back: {stdout}{stderr}"
     );
 
-    let current = fs::read_link(shepherd.home().join("deploy/web/current")).expect("current");
-    assert_eq!(
-        current,
-        shepherd.home().join("deploy/web/releases").join(&second)
-    );
+    current_at_release(shepherd.home(), "web", &second);
 
     let state = fs::read_to_string(shepherd.home().join("deploy/web/deploy.toml")).expect("state");
     assert!(state.contains(&second), "{state}");
@@ -176,11 +172,7 @@ fn a_reload_that_uses_its_whole_drain_window_still_deploys() {
          is no longer testing the term it exists for"
     );
 
-    let current = fs::read_link(shepherd.home().join("deploy/web/current")).expect("current");
-    assert_eq!(
-        current,
-        shepherd.home().join("deploy/web/releases").join(&second)
-    );
+    current_at_release(shepherd.home(), "web", &second);
 
     let state = fs::read_to_string(shepherd.home().join("deploy/web/deploy.toml")).expect("state");
     assert!(state.contains(&second), "{state}");

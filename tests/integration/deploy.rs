@@ -52,11 +52,7 @@ fn a_real_deploy_swaps_reloads_and_verifies() {
     );
 
     // `current` really moved to the new release...
-    let current = fs::read_link(shepherd.home().join("deploy/web/current")).expect("current");
-    assert_eq!(
-        current,
-        shepherd.home().join("deploy/web/releases").join(&second)
-    );
+    current_at_release(shepherd.home(), "web", &second);
 
     // ...deploy.toml records it...
     let state = fs::read_to_string(shepherd.home().join("deploy/web/deploy.toml")).expect("state");
@@ -114,7 +110,8 @@ fn a_failing_build_leaves_the_previous_release_serving() {
     let current = fs::read_link(shepherd.home().join("deploy/web/current")).expect("current");
     assert_eq!(
         current,
-        shepherd.home().join("deploy/web/releases").join(&first)
+        shepherd.home().join("deploy/web/releases").join(&first),
+        "a build that failed must leave current on the release it was on"
     );
 
     // ...deploy.toml still names the first release...
