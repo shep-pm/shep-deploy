@@ -671,7 +671,8 @@ async fn a_registration_through_a_symlinked_parent_is_recognised_when_current_da
 
     let tree = Tree::for_sheep(&home, "ctm");
     fs::create_dir_all(tree.root()).expect("create tree");
-    std::os::unix::fs::symlink(tree.release("gone"), tree.current()).expect("dangling current");
+    std::os::unix::fs::symlink(tree.superseded_releases().join("gone"), tree.current())
+        .expect("dangling current");
 
     write_target_never_cut_over(&home, "ctm", "/srv/ctm", "./run.sh");
     let cwd_through_link = link.join("deploy").join("ctm").join("current");

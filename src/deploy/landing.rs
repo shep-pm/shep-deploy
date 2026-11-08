@@ -36,7 +36,7 @@ pub(crate) async fn run_release_hook(
         &hook::Context {
             sheep: tree.sheep(),
             sha: head,
-            release: &tree.release(head),
+            release: &staged.release,
             as_user: staged.app.user.as_deref(),
             passthrough: &config.passthrough,
             budget: config.build_timeout,
@@ -68,7 +68,7 @@ pub(crate) async fn swap_and_land<D: Daemon>(
     config: &DogConfig,
 ) -> Result<Outcome, Error> {
     let sheep = tree.sheep();
-    let release = tree.release(head);
+    let release = staged.release.clone();
     let Staged {
         app, spec, hooks, ..
     } = staged;
@@ -154,7 +154,14 @@ pub(crate) async fn swap_and_land<D: Daemon>(
         // Nothing was ever started on the new release, so there is nothing
         // to reload onto the old one - only a symlink to put back.
         Landed::NotStarted(source) => {
-            undo_swap(tree, state, previous.as_deref(), head, &source)?;
+            undo_swap(
+                tree,
+                state,
+                previous.as_deref(),
+                head,
+                &staged.build,
+                &source,
+            )?;
             Err(source)
         }
         Landed::NotVerified { why, patience } => {
@@ -165,6 +172,7 @@ pub(crate) async fn swap_and_land<D: Daemon>(
                 app,
                 previous.as_deref(),
                 head,
+                &staged.build,
                 &why,
                 patience,
             )
@@ -186,6 +194,7 @@ pub(crate) async fn swap_and_land<D: Daemon>(
                 app,
                 previous.as_deref(),
                 head,
+                &staged.build,
                 &source.to_string(),
                 patience,
             )

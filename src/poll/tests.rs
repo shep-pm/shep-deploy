@@ -89,8 +89,9 @@ fn write_target_ready(home: &Path, sheep: &str) -> TempDir {
     crate::git::fetch(&tree.git(), &remote, "main", fixtures::TEST_BUDGET).expect("fetch");
 
     let first = crate::git::remote_head(&tree.git(), "main").expect("head");
-    crate::git::worktree_add(&tree.git(), &tree.release(&first), &first).expect("worktree");
-    swap::point_at(&tree.current(), &tree.release(&first)).expect("swap");
+    let release = tree.release(&remote, &first, &fixtures::default_build_key());
+    crate::git::worktree_add(&tree.git(), &release, &first).expect("worktree");
+    swap::point_at(&tree.current(), &release).expect("swap");
 
     let state = State {
         remote,

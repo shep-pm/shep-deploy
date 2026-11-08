@@ -27,8 +27,9 @@ use crate::{lock, retention, settings, shared};
 /// Retention runs on every ending for the same shape of reason: the target
 /// that keeps failing is the one building a fresh worktree for every commit
 /// somebody pushes, and pruning only after a verify left exactly that one
-/// growing without limit. [`retention::prune`] spares whatever `current`
-/// names, so this is the same call the verified path always made.
+/// growing without limit. [`retention::prune`] spares whatever any sheep of
+/// the repository has `current` or a record on, so this is the same call the
+/// verified path always made.
 ///
 /// Neither failure is fatal and neither is silent. The record write is
 /// reported and passed over because the deploy's own outcome is already
@@ -114,14 +115,15 @@ pub(crate) async fn record<D: Daemon>(
     // `git worktree remove` per doomed release, off the runtime's thread
     // like every other git call.
     let pruned = {
-        let (tree, keep, spared): (Tree, usize, Vec<String>) = (
+        let (tree, remote, keep, spared): (Tree, String, usize, Vec<String>) = (
             tree.clone(),
+            state.remote.clone(),
             config.retention,
             spared.iter().map(|sha| (*sha).to_owned()).collect(),
         );
         shared::off_thread(move || {
             let spared: Vec<&str> = spared.iter().map(String::as_str).collect();
-            retention::prune(&tree, keep, &spared)
+            retention::prune(&tree, &remote, keep, &spared)
         })
         .await
     };
@@ -424,15 +426,13 @@ mod tests {
             .expect("rolls back");
         }
 
-        assert!(fixture.tree.release(&live).exists(), "current is spared");
+        assert!(fixture.release(&live).exists(), "current is spared");
         assert!(
-            !fixture.tree.release(&failed[0]).exists(),
+            !fixture.release(&failed[0]).exists(),
             "the oldest failure is reclaimed"
         );
-        assert!(fixture.tree.release(&failed[2]).exists(), "the newest kept");
-        let count = fs::read_dir(fixture.tree.releases())
-            .expect("reads")
-            .count();
+        assert!(fixture.release(&failed[2]).exists(), "the newest kept");
+        let count = fs::read_dir(fixture.releases()).expect("reads").count();
         assert_eq!(count, 3, "the newest two, plus what current names");
     }
 
@@ -568,7 +568,7 @@ mod tests {
         .await;
 
         assert!(
-            fixture.tree.release(&old).is_dir(),
+            fixture.release(&old).is_dir(),
             "the release the disk record names must survive"
         );
     }
@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(fixture.state.failed, None, "a landed sha is never held");
         assert_eq!(
             swap::resolve(&fixture.tree.current()).unwrap(),
-            Some(fixture.tree.release(&head))
+            Some(fixture.release(&head))
         );
     }
 
@@ -684,12 +684,12 @@ mod tests {
         );
         assert_eq!(daemon.reload_count(), 0);
         assert!(
-            !fixture.tree.release(&second).exists(),
+            !fixture.release(&second).exists(),
             "no release may be built"
         );
         assert_eq!(
             swap::resolve(&fixture.tree.current()).unwrap(),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
         assert_eq!(after.deployed.as_deref(), Some(previous.as_str()));
     }
@@ -749,8 +749,17 @@ mod tests {
         .await
         .expect("second release verifies");
 
-        fs::remove_dir_all(fixture.tree.git().join("worktrees").join(&first))
-            .expect("corrupt first's worktree bookkeeping");
+        // git names a worktree's admin directory after the worktree's own
+        // directory, which is `<sha>-<build key>` and not the sha alone.
+        fs::remove_dir_all(
+            fixture.tree.git().join("worktrees").join(
+                fixture
+                    .release(&first)
+                    .file_name()
+                    .expect("a named release"),
+            ),
+        )
+        .expect("corrupt first's worktree bookkeeping");
 
         commit_on_origin(&fixture, "third.txt");
         let outcome = deploy(

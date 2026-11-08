@@ -9,13 +9,13 @@
 //!
 //! That is the property the whole design is built on, and it is worth
 //! saying where it comes from rather than trusting the step order alone: a
-//! release is built in `releases/<sha>`, a directory the live release does
-//! not share, and the live release is reached through `current`, which
-//! nothing moves until the build has already exited zero. A fetch that
-//! fails, a worktree that cannot be created, a build that exits three -
-//! each of those returns from this module with `current` still pointing
-//! exactly where it did, and the app still serving from it. This is what
-//! replaces the hardcoded sleep between a build and a restart in the deploy
+//! release is built in its own directory under `deploy/repos/<key>/releases`,
+//! which the live release does not share, and the live release is reached
+//! through `current`, which nothing moves until the build has already exited
+//! zero. A fetch that fails, a worktree that cannot be created, a build that
+//! exits three - each of those returns from this module with `current` still
+//! pointing exactly where it did, and the app still serving from it. This is
+//! what replaces the hardcoded sleep between a build and a restart in the deploy
 //! scripts this dog exists to retire.
 //!
 //! # `Reload`, not `Restart`
@@ -51,10 +51,11 @@
 //! The tree lock is per sheep, so it says nothing between two sheep whose
 //! remote is one repository: `bpm`, `ctm` and `opm` off one `ReactMap`
 //! checkout are three trees. [`attempt`] takes [`crate::lock::hold_build`]
-//! before the build and lets go at the swap, so the builds of one repository
-//! queue and the reloads never do. A stage build and a setup build take the
-//! same turn, because the build cache they write into is one directory keyed
-//! by that remote. See [`crate::lock`].
+//! before it checks a release out and lets go at the swap, so the checkouts
+//! and builds of one repository queue and the reloads never do. They have to
+//! queue: the release directory, the completion marker and the build cache are
+//! all keyed by that remote and shared between the trees. A stage build and a
+//! setup build take the same turn. See [`crate::lock`].
 //!
 //! # A stale `current.tmp`
 //!
@@ -89,7 +90,7 @@ use record::record_landing;
 
 pub(crate) use landing::{run_release_hook, swap_and_land};
 pub(crate) use prepare::{
-    Staged, head_of, read_staged, refuse_ungated_at_setup, refuse_ungated_verification,
+    Staged, head_of, mark_built, read_staged, refuse_ungated_at_setup, refuse_ungated_verification,
     stage_release,
 };
 pub(crate) use record::record;
@@ -132,12 +133,14 @@ pub enum Outcome {
 /// interrupted or rolled-back deploy leaves the record naming whatever is
 /// actually serving.
 ///
-/// A release directory is reused rather than checked out again only when it
-/// carries the completion marker, which is written after `git worktree add`
-/// returns: it is the leftover of a finished earlier attempt at this same
-/// sha. A directory without the marker is the remains of a checkout that died
-/// partway, so it is removed and checked out afresh - see
-/// [`prepare::stage_release`]. The build runs over the release either way.
+/// A release directory is reused, without its checkout or its build, only when
+/// it carries the completion marker, which is written after its build exits
+/// zero. A directory without the marker is the remains of a checkout or a build
+/// that died partway, so it is removed, checked out afresh and built - see
+/// [`prepare::stage_release`]. The marker is keyed by the build command, the
+/// build `user` and `build_env` alongside the sha, so a release is reused only
+/// by a sheep that would have built it the same way, and one sheep's reuse is
+/// another sheep's build.
 ///
 /// # Errors
 /// [`Error::AlreadyDeploying`] if another process holds the tree, and
@@ -377,7 +380,20 @@ async fn attempt<D: Daemon>(
     config: &DogConfig,
 ) -> Result<Outcome, Error> {
     let sheep = tree.sheep();
-    let release = tree.release(head);
+    // The build turn for this repository, taken before the release is checked
+    // out and let go at the swap below. The tree lock is per sheep and says
+    // nothing between two sheep of one remote, and a release is now one
+    // directory shared by all of them: two sheep starting the same release at
+    // once are two `git worktree add` calls on one path and two compilers over
+    // one cache. The checkout is inside the turn for that reason, not only the
+    // build. See [`crate::lock`].
+    //
+    // Off the runtime's thread: the wait is for another sheep's build, which
+    // `build_timeout` bounds at an hour by default.
+    let building = {
+        let (tree, remote) = (tree.clone(), state.remote.clone());
+        shared::off_thread(move || lock::hold_build(&tree.repo(&remote))).await?
+    };
     let staged = {
         let (tree, checkout, head, remote) = (
             tree.clone(),
@@ -390,34 +406,34 @@ async fn attempt<D: Daemon>(
             .await?
     };
     refuse_ungated_verification(sheep, &staged.app, state.verify)?;
-    // The build turn for this repository, taken inside the tree lock and let
-    // go at the swap below. The tree lock is per sheep and says nothing
-    // between two sheep of one remote, and the build cache they write into is
-    // one directory keyed by that remote. See [`crate::lock`].
-    //
-    // Off the runtime's thread: the wait is for another sheep's build, which
-    // `build_timeout` bounds at an hour by default.
-    let building = {
-        let (tree, remote) = (tree.clone(), state.remote.clone());
-        shared::off_thread(move || lock::hold_build(&tree.repo(&remote))).await?
+    let snapshot = linkcheck::Snapshot::before(sheep, &staged.release, &staged.linked);
+    // A release another sheep of this repository already built, or this one
+    // built on an earlier attempt, is not built again: its marker says the
+    // checkout finished and the build exited zero, and the release directory
+    // is named by the command, user and build environment that produced it.
+    let built = if staged.reused {
+        Ok(())
+    } else {
+        build::run(
+            sheep,
+            &staged.release,
+            &staged.spec,
+            staged.app.user.as_deref(),
+            &config.passthrough,
+            &staged.cache,
+            config.build_timeout,
+        )
+        .await
     };
-    let snapshot = linkcheck::Snapshot::before(sheep, &release, &staged.linked);
-    let built = build::run(
-        sheep,
-        &release,
-        &staged.spec,
-        staged.app.user.as_deref(),
-        &config.passthrough,
-        &staged.cache,
-        config.build_timeout,
-    )
-    .await;
-    // Printed whether or not the build succeeded: a write into the checkout
+    // Printed whether or not the build ran: a write into the checkout
     // happened either way.
     for warning in snapshot.after() {
         eprintln!("{warning}");
     }
     built?;
+    if !staged.reused {
+        mark_built(&staged.marker)?;
+    }
     run_release_hook(tree, head, &staged, config).await?;
     // Let go at the swap, not at the end of the deploy: the lock is the
     // build's, and a reload of another sheep of the same repository must never
@@ -433,6 +449,7 @@ mod tests {
     mod clones;
     mod hooks;
     mod retarget;
+    mod reuse;
     mod settings;
     mod skip;
 
@@ -469,7 +486,7 @@ mod tests {
         assert!(matches!(outcome, Outcome::RolledBack { .. }));
         assert_eq!(
             swap::resolve(&fixture.tree.current()).unwrap(),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
     }
@@ -506,7 +523,7 @@ mod tests {
                 sha: second.clone()
             }
         );
-        let release = fixture.tree.release(&second);
+        let release = fixture.release_of(&daemon, &second);
         assert_eq!(
             fs::read_to_string(release.join("order.txt")).expect("the steps ran"),
             "build\nrelease\nafter\n"
@@ -567,7 +584,7 @@ mod tests {
         );
         assert_eq!(
             swap::resolve(&fixture.tree.current()).unwrap(),
-            Some(fixture.tree.release(&second))
+            Some(fixture.release(&second))
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(second.as_str()));
 
@@ -646,7 +663,7 @@ mod tests {
         assert_eq!(daemon.reload_count(), reloads, "nothing was reloaded");
         assert_eq!(
             swap::resolve(&fixture.tree.current()).unwrap(),
-            Some(fixture.tree.release(&previous)),
+            Some(fixture.release(&previous)),
             "and nothing was swapped"
         );
     }
@@ -742,7 +759,7 @@ mod tests {
         assert!(matches!(err, Error::Build { status: Some(3) }), "{err:?}");
         assert_eq!(
             swap::resolve(&fixture.tree.current()).unwrap(),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
     }
@@ -815,8 +832,10 @@ mod tests {
         let mut fixture = fixture_with_previous_release();
         let previous = fixture.state.deployed.clone().expect("a previous release");
         commit_on_origin(&fixture, "second.txt");
-        let daemon =
-            Shepherd::never_ready().with_settings("command = 'ln -sfn \"$PWD\" ../../current'\n");
+        let daemon = Shepherd::never_ready().with_settings(&format!(
+            "command = 'ln -sfn \"$PWD\" {current}'\n",
+            current = fixture.tree.current().display(),
+        ));
 
         let err = deploy(
             &daemon,
@@ -848,7 +867,7 @@ mod tests {
             fixtures::TEST_BUDGET,
         )
         .expect("fetch");
-        crate::git::worktree_add(&fixture.tree.git(), &fixture.tree.release(&staged), &staged)
+        crate::git::worktree_add(&fixture.tree.git(), &fixture.release(&staged), &staged)
             .expect("the staged release");
         fixture.state.staged = Some(staged.clone());
 
@@ -865,7 +884,7 @@ mod tests {
         }
 
         assert!(
-            fixture.tree.release(&staged).exists(),
+            fixture.release(&staged).exists(),
             "the staged release outlives the newest two"
         );
     }

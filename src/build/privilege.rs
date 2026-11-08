@@ -177,22 +177,6 @@ mod tests {
     use super::*;
     use crate::fixtures;
 
-    /// The username running this test process, via `id -un` rather than
-    /// the `USER` environment variable - not every CI runner is guaranteed
-    /// to set it, and asking the host directly is the same idiom [`uid_for`]
-    /// itself uses.
-    fn current_username() -> String {
-        let output = std::process::Command::new("id")
-            .arg("-un")
-            .output()
-            .expect("id -un runs");
-        assert!(output.status.success(), "id -un must succeed");
-        String::from_utf8(output.stdout)
-            .expect("id -un prints utf-8")
-            .trim()
-            .to_owned()
-    }
-
     /// This test process's own uid, via bare `id -u` (no username - `id`
     /// defaults to the caller).
     fn current_uid() -> u32 {
@@ -332,7 +316,7 @@ mod tests {
             command: Some("true".into()),
             ..Default::default()
         };
-        let user = current_username();
+        let user = fixtures::current_user();
         run(
             "web",
             rel.path(),
@@ -391,7 +375,7 @@ mod tests {
     /// call first.
     #[tokio::test]
     async fn uid_for_resolves_the_current_users_own_uid() {
-        let user = current_username();
+        let user = fixtures::current_user();
         let uid = uid_for(Path::new("."), &user).await.expect("resolves");
         assert_eq!(uid, current_uid());
     }
@@ -404,7 +388,7 @@ mod tests {
     /// design spec recommends.
     #[tokio::test]
     async fn gid_for_resolves_the_current_users_primary_gid() {
-        let user = current_username();
+        let user = fixtures::current_user();
         let gid = gid_for(Path::new("."), &user).await.expect("resolves");
         assert_eq!(gid, current_gid());
     }

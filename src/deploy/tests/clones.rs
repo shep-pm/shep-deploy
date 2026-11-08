@@ -33,7 +33,7 @@ async fn a_tree_with_its_own_clone_still_deploys() {
             sha: second.clone()
         }
     );
-    assert!(fixture.tree.release(&second).join("second.txt").is_file());
+    assert!(fixture.release(&second).join("second.txt").is_file());
 }
 
 /// fails if a deploy through a `git` link cannot fetch, add a worktree for the
@@ -63,7 +63,7 @@ async fn a_tree_linked_to_a_shared_clone_deploys() {
             sha: second.clone()
         }
     );
-    assert!(fixture.tree.release(&second).join("second.txt").is_file());
+    assert!(fixture.release(&second).join("second.txt").is_file());
     assert!(
         repo.git().join("worktrees").is_dir(),
         "the worktree is registered in the shared clone"

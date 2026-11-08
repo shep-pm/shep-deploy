@@ -168,8 +168,11 @@ pub(crate) fn is_due(euid: Option<u32>, uid: u32) -> bool {
 /// every sheep that deploys that remote, so what is inside belongs to whoever
 /// built it last.
 ///
-/// Everything else in the tree, including `releases/` above the release, and
-/// the shared clone beside the cache, stays the dog's.
+/// Everything else stays the dog's: the `releases/` directory the release sits
+/// in, the shared clone, and every other release in it. Two build users never
+/// share one release directory, because `user` is one of the three inputs of the
+/// build key that names it (see [`crate::paths::BuildKey`]), so a release is
+/// handed over at most once, to the one user its build ran as.
 ///
 /// # Errors
 /// [`Error::Config`] if `uid` or `gid` is `u32::MAX`, which is no account's.

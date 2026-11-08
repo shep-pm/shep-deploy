@@ -80,7 +80,7 @@ async fn an_unattended_deploy_skips_a_push_outside_the_paths() {
     );
     assert_eq!(shepherd.reload_count(), 0);
     assert_eq!(swap::resolve(&fixture.tree.current()).unwrap(), live);
-    assert!(!fixture.tree.release(&pushed).exists(), "no checkout");
+    assert!(!fixture.release(&pushed).exists(), "no checkout");
     assert_eq!(
         State::read(&fixture.tree.state_file()).expect("reads"),
         before,
@@ -142,7 +142,7 @@ async fn a_skipped_push_counts_toward_the_next_real_one() {
     .expect("completes");
 
     assert_eq!(second, Outcome::Deployed { sha: real.clone() });
-    let release = fixture.tree.release(&real);
+    let release = fixture.release(&real);
     assert_eq!(
         fs::read_to_string(release.join("cmd/bot/main.go")).expect("reads"),
         "2",

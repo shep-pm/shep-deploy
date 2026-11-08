@@ -213,7 +213,7 @@ pub(super) fn named(release: Option<&Path>) -> String {
 pub(super) fn sha_of(release: &Path) -> String {
     release.file_name().map_or_else(
         || release.display().to_string(),
-        |sha| sha.to_string_lossy().into_owned(),
+        |name| crate::paths::release_sha(&name.to_string_lossy()).to_owned(),
     )
 }
 
@@ -260,7 +260,7 @@ mod tests {
         assert!(matches!(outcome, Outcome::RolledBack { .. }), "{outcome:?}");
         assert_eq!(
             swap::resolve(&fixture.tree.current()).unwrap(),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
     }
@@ -322,7 +322,7 @@ mod tests {
         assert_eq!(daemon.attempt_count(), 5);
         assert_eq!(
             swap::resolve(&fixture.tree.current()).unwrap(),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
     }
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(daemon.attempt_count(), 2);
         assert_eq!(
             swap::resolve(&fixture.tree.current()).unwrap(),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
     }
@@ -507,7 +507,7 @@ mod tests {
         assert_eq!(daemon.attempt_count(), 1);
         assert_eq!(
             swap::resolve(&fixture.tree.current()).unwrap(),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
     }
@@ -550,7 +550,7 @@ mod tests {
         );
         assert_eq!(
             swap::resolve(&fixture.tree.current()).unwrap(),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
     }

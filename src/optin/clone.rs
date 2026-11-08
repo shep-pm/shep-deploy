@@ -10,8 +10,7 @@
 use std::path::Path;
 
 use crate::error::Error;
-use crate::paths::{Repo, Tree};
-use crate::state::is_sha;
+use crate::paths::{Repo, Tree, is_release_name};
 use crate::{git, lock, retention, shared};
 
 /// Gives `tree` the bare clone for `remote`: links it to the shared one,
@@ -96,11 +95,16 @@ fn relink_owned_clone(tree: &Tree, shep_home: &Path, repo: &Repo) -> Result<(), 
     tree.link_clone(repo)
 }
 
-/// Remove sha-named releases and their completion markers before changing clones
+/// Remove this tree's own sha-named releases and markers before changing clones
+///
+/// Only [`Tree::superseded_releases`] and [`Tree::superseded_completions`], the
+/// directories a tree filled while its clone was its own: releases under
+/// `repos/<key>/releases` belong to the remote, and another sheep of it may be
+/// serving from one, so [`crate::retention`] is what decides those.
 ///
 /// The new clone cannot prune releases it never registered. Keeping the old
 /// clone until cleanup finishes ensures a retry repeats interrupted cleanup.
-/// Other entries under `releases/` are the operator's and stay.
+/// Other entries under the tree's `releases/` are the operator's and stay.
 ///
 /// Nothing here serves traffic: setup refuses working directories inside this tree.
 ///
@@ -109,17 +113,17 @@ fn relink_owned_clone(tree: &Tree, shep_home: &Path, repo: &Repo) -> Result<(), 
 /// cannot be removed.
 fn drop_unregistered_releases(tree: &Tree) -> Result<(), Error> {
     // An interrupted deletion must never leave a marker vouching for a partial release.
-    match std::fs::remove_dir_all(tree.completions()) {
+    match std::fs::remove_dir_all(tree.superseded_completions()) {
         Ok(()) => {}
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => {
             return Err(Error::Io {
-                path: tree.completions(),
+                path: tree.superseded_completions(),
                 source,
             });
         }
     }
-    let releases = tree.releases();
+    let releases = tree.superseded_releases();
     let entries = match std::fs::read_dir(&releases) {
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
@@ -132,10 +136,9 @@ fn drop_unregistered_releases(tree: &Tree) -> Result<(), Error> {
     };
     for entry in entries {
         let entry = entry.map_err(Error::at(&releases))?;
-        let is_release = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| is_sha(name) && entry.file_type().is_ok_and(|kind| kind.is_dir()));
+        let is_release = entry.file_name().to_str().is_some_and(|name| {
+            is_release_name(name) && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        });
         if is_release {
             std::fs::remove_dir_all(entry.path()).map_err(Error::at(&entry.path()))?;
         }

@@ -23,11 +23,12 @@ async fn a_release_hook_runs_after_the_build_and_before_the_swap() {
     let mut fixture = fixture_with_previous_release();
     let previous = fixture.state.deployed.clone().expect("a previous release");
     let second = commit_on_origin(&fixture, "second.txt");
-    let daemon = Shepherd::ready().with_settings(
+    let daemon = Shepherd::ready().with_settings(&format!(
         "command = 'touch built'\n\
-         [release]\ncommand = 'readlink ../../current > current-at-hook.txt; \
+         [release]\ncommand = 'readlink {current} > current-at-hook.txt; \
          ls built > build-seen-by-hook.txt'\n",
-    );
+        current = fixture.tree.current().display(),
+    ));
 
     let outcome = deploy(
         &daemon,
@@ -44,11 +45,11 @@ async fn a_release_hook_runs_after_the_build_and_before_the_swap() {
             sha: second.clone()
         }
     );
-    let release = fixture.tree.release(&second);
+    let release = fixture.release_of(&daemon, &second);
     let at_hook = fs::read_to_string(release.join("current-at-hook.txt")).expect("hook ran");
     assert_eq!(
         std::path::Path::new(at_hook.trim()),
-        fixture.tree.release(&previous)
+        fixture.release(&previous)
     );
     assert!(
         release.join("build-seen-by-hook.txt").is_file(),
@@ -99,8 +100,8 @@ async fn a_hook_runs_with_the_resolved_secret_and_not_the_reference() {
             sha: second.clone()
         }
     );
-    let seen =
-        fs::read_to_string(fixture.tree.release(&second).join("secret.txt")).expect("the hook ran");
+    let seen = fs::read_to_string(fixture.release_of(&daemon, &second).join("secret.txt"))
+        .expect("the hook ran");
     assert_eq!(
         seen.trim(),
         "hunter2",
@@ -138,7 +139,7 @@ async fn a_failing_release_hook_never_moves_current_and_holds_the_sha() {
     );
     assert_eq!(
         swap::resolve(&fixture.tree.current()).unwrap(),
-        Some(fixture.tree.release(&previous))
+        Some(fixture.release(&previous))
     );
     assert_eq!(daemon.reload_count(), 0, "nothing may be reloaded");
     assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
@@ -164,7 +165,10 @@ async fn a_failing_build_runs_no_release_hook() {
 
     assert!(matches!(err, Error::Build { status: Some(3) }), "{err:?}");
     assert!(
-        !fixture.tree.release(&second).join("hook-ran").exists(),
+        !fixture
+            .release_of(&daemon, &second)
+            .join("hook-ran")
+            .exists(),
         "the hook ran after a failed build"
     );
 }
@@ -178,12 +182,14 @@ async fn a_failing_build_runs_no_release_hook() {
 async fn an_after_hook_runs_once_the_release_is_verified_and_recorded() {
     let mut fixture = fixture_with_previous_release();
     let second = commit_on_origin(&fixture, "second.txt");
-    let daemon = Shepherd::ready().with_settings(
-        "[after]\ncommand = 'cp ../../deploy.toml record-at-hook.toml; \
-         readlink ../../current > current-at-hook.txt; \
+    let daemon = Shepherd::ready().with_settings(&format!(
+        "[after]\ncommand = 'cp {record} record-at-hook.toml; \
+         readlink {current} > current-at-hook.txt; \
          printenv SHEP_DEPLOY_SHEEP > sheep.txt; printenv SHEP_DEPLOY_SHA > sha.txt; \
          printenv SHEP_DEPLOY_RELEASE > release.txt; echo ran >> runs.txt'\n",
-    );
+        record = fixture.tree.state_file().display(),
+        current = fixture.tree.current().display(),
+    ));
 
     let outcome = deploy(
         &daemon,
@@ -200,7 +206,7 @@ async fn an_after_hook_runs_once_the_release_is_verified_and_recorded() {
             sha: second.clone()
         }
     );
-    let release = fixture.tree.release(&second);
+    let release = fixture.release_of(&daemon, &second);
     let record = State::read(&release.join("record-at-hook.toml")).expect("the hook ran");
     assert_eq!(record.deployed.as_deref(), Some(second.as_str()));
     let at_hook = fs::read_to_string(release.join("current-at-hook.txt")).expect("current");
@@ -237,7 +243,10 @@ async fn an_after_hook_does_not_run_when_the_release_is_rolled_back() {
 
     assert!(matches!(outcome, Outcome::RolledBack { .. }), "{outcome:?}");
     assert!(
-        !fixture.tree.release(&second).join("after-ran").exists(),
+        !fixture
+            .release_of(&daemon, &second)
+            .join("after-ran")
+            .exists(),
         "the after hook ran over a release that was rolled back"
     );
 }
@@ -267,7 +276,7 @@ async fn a_failing_after_hook_still_reports_deployed_and_writes_no_hold() {
     );
     assert_eq!(
         swap::resolve(&fixture.tree.current()).unwrap(),
-        Some(fixture.tree.release(&second))
+        Some(fixture.release_of(&daemon, &second))
     );
     assert_eq!(daemon.reload_count(), 1, "nothing may be rolled back");
     assert_eq!(fixture.state.deployed.as_deref(), Some(second.as_str()));
@@ -334,7 +343,10 @@ async fn an_after_hook_does_not_run_when_the_record_cannot_be_written() {
         }
     );
     assert!(
-        !fixture.tree.release(&second).join("after-ran").exists(),
+        !fixture
+            .release_of(&daemon, &second)
+            .join("after-ran")
+            .exists(),
         "the after hook ran against a record that does not name the new sha"
     );
 }

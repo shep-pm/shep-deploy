@@ -38,7 +38,7 @@ async fn the_sheeps_command_runs_and_the_flockfiles_is_ignored() {
             sha: second.clone()
         }
     );
-    let release = fixture.tree.release(&second);
+    let release = fixture.release_of(&daemon, &second);
     assert!(release.join("from-settings").is_file(), "the sheep's build");
     assert!(
         !release.join("from-flockfile").exists(),
@@ -101,7 +101,7 @@ async fn an_unknown_key_refuses_the_deploy_naming_the_key_and_the_sheep() {
     assert_eq!(daemon.reload_count(), 0);
     assert_eq!(
         swap::resolve(&fixture.tree.current()).unwrap(),
-        Some(fixture.tree.release(&previous))
+        Some(fixture.release(&previous))
     );
 }
 
@@ -137,7 +137,7 @@ async fn no_table_deploys_with_no_build_and_no_hooks() {
             sha: second.clone()
         }
     );
-    let release = fixture.tree.release(&second);
+    let release = fixture.release(&second);
     for ran in ["built", "release-ran", "after-ran"] {
         assert!(!release.join(ran).exists(), "{ran}");
     }
@@ -178,8 +178,8 @@ async fn a_build_env_secret_reaches_the_build_resolved() {
             sha: second.clone()
         }
     );
-    let seen =
-        fs::read_to_string(fixture.tree.release(&second).join("key.txt")).expect("the build ran");
+    let seen = fs::read_to_string(fixture.release_of(&daemon, &second).join("key.txt"))
+        .expect("the build ran");
     assert_eq!(seen.trim(), "anon-key-value");
 }
 

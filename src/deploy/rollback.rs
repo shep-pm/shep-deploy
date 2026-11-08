@@ -12,7 +12,7 @@ use crate::daemon::Daemon;
 use crate::deploy::record::write_record;
 use crate::deploy::reload::{reload_until, sha_of};
 use crate::error::Error;
-use crate::paths::Tree;
+use crate::paths::{BuildKey, Tree};
 use crate::state::State;
 use crate::swap;
 use crate::verify;
@@ -59,6 +59,7 @@ pub(super) fn undo_swap(
     state: &State,
     previous: Option<&Path>,
     attempted: &str,
+    build: &BuildKey,
     why: &Error,
 ) -> Result<(), Error> {
     let wrap = |source| Error::RollbackFailed {
@@ -66,7 +67,7 @@ pub(super) fn undo_swap(
         source: Box::new(source),
     };
 
-    let Some(target) = rollback_target(tree, state, previous, attempted) else {
+    let Some(target) = rollback_target(tree, state, previous, attempted, build) else {
         return Err(wrap(Error::Config(format!(
             "current names {attempted}, which nothing verified, and neither the link it \
              replaced nor deploy.toml names an earlier release that is still on disk. Point {} \
@@ -127,10 +128,11 @@ pub(super) async fn roll_back<D: Daemon>(
     app: &AppConfig,
     previous: Option<&Path>,
     attempted: &str,
+    build: &BuildKey,
     why: &str,
     patience: Duration,
 ) -> Result<String, Error> {
-    let Some(previous) = rollback_target(tree, state, previous, attempted) else {
+    let Some(previous) = rollback_target(tree, state, previous, attempted, build) else {
         return Err(Error::Unverified {
             sheep: tree.sheep().to_owned(),
             sha: attempted.to_owned(),
@@ -185,6 +187,7 @@ fn rollback_target(
     state: &State,
     previous: Option<&Path>,
     attempted: &str,
+    build: &BuildKey,
 ) -> Option<PathBuf> {
     // A candidate has to be a release: a full sha, other than the one that
     // just failed, with a directory on disk. `previous` is the raw text of a
@@ -201,7 +204,7 @@ fn rollback_target(
     }
 
     let recorded = state.deployed.as_deref()?;
-    usable(tree.release(recorded))
+    usable(tree.release(&state.remote, recorded, build))
 }
 
 /// Points `current` back at `previous`, corrects the record to match, and

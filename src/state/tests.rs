@@ -517,31 +517,52 @@ fn write_survives_a_second_write_and_leaves_no_tmp_file_behind() {
     assert_eq!(State::read(&path).expect("reads").deployed, second.deployed);
 }
 
-/// fails if `remote_at` cannot read the one field out of a record a real deploy
-/// wrote, or answers something other than `None` for a file that is not one.
+/// fails if `releases_at` cannot read the fields it is asked for out of a
+/// record a real deploy wrote, or answers something other than `None` for a
+/// file that is not one.
 ///
-/// `retention::release_clone` asks which remotes are still deployed before it
-/// removes a shared build cache, and reads `None` as "cannot tell, keep it". A
-/// `None` for a valid record would take the cache out from under a live release.
+/// `retention` asks which releases and which builds are still named before it
+/// removes a shared one, and reads `None` as "cannot tell, keep it". A `None`
+/// for a valid record would take a build out from under a live release.
 #[test]
-fn remote_at_reads_the_remote_and_answers_none_for_a_file_that_is_not_a_record() {
+fn releases_at_reads_the_named_releases_and_answers_none_for_a_file_that_is_not_a_record() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("deploy.toml");
     let remote = "https://example.com/x.git";
 
     State {
         remote: remote.to_owned(),
-        ..sample(None)
+        staged: Some(fixtures::OTHER_SHA.to_owned()),
+        ..sample(Some(fixtures::SHA))
     }
     .write(&path)
     .expect("write a real record");
-    assert_eq!(State::remote_at(&path).as_deref(), Some(remote));
+    let (found, shas) = State::releases_at(&path).expect("a record");
+    assert_eq!(found, remote);
+    assert_eq!(
+        shas.into_iter().collect::<Vec<_>>(),
+        vec![fixtures::SHA.to_owned(), fixtures::OTHER_SHA.to_owned()],
+        "deployed and staged, whichever order the file wrote them in"
+    );
+
+    State {
+        remote: remote.to_owned(),
+        ..sample(None)
+    }
+    .write(&path)
+    .expect("a record naming no release");
+    assert!(
+        State::releases_at(&path)
+            .expect("still a record")
+            .1
+            .is_empty()
+    );
 
     fs::write(&path, "this is not toml = = =").expect("corrupt it");
-    assert_eq!(State::remote_at(&path), None, "a broken record");
+    assert_eq!(State::releases_at(&path), None, "a broken record");
 
     fs::write(&path, "[origin]\ncwd = \"/srv/web\"\n").expect("a record with no remote");
-    assert_eq!(State::remote_at(&path), None, "a record naming no remote");
+    assert_eq!(State::releases_at(&path), None, "a record naming no remote");
 
-    assert_eq!(State::remote_at(&dir.path().join("absent.toml")), None);
+    assert_eq!(State::releases_at(&dir.path().join("absent.toml")), None);
 }

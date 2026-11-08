@@ -73,7 +73,10 @@
 //! trees linked to the shared one. Blocking, like the record and clone locks,
 //! because a deploy wants its turn and not a refusal, and bounded because every
 //! holder's build is bounded by `build_timeout`. A deploy takes it inside the
-//! tree lock, after its fetch, and lets go at the swap, so builds of one
+//! tree lock, before the checkout and through the build, and lets go at the
+//! swap: the release directory is the repository's as well, so two sheep of one
+//! remote after one sha and one build key would otherwise be checking out the
+//! same path and writing its completion marker over each other. Builds of one
 //! repository queue and reloads never do. A stage build and a setup build take
 //! it too, for the same reason. Nothing holding it waits for a tree's, a
 //! record's or a clone's.

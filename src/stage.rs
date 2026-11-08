@@ -17,8 +17,8 @@ use crate::build;
 use crate::config::DogConfig;
 use crate::daemon::Daemon;
 use crate::deploy::{
-    self, Outcome, head_of, read_staged, record, refuse_ungated_verification, run_release_hook,
-    stage_release, swap_and_land,
+    Outcome, head_of, mark_built, read_staged, record, refuse_ungated_verification,
+    run_release_hook, stage_release, swap_and_land,
 };
 use crate::error::Error;
 use crate::paths::Tree;
@@ -123,9 +123,10 @@ pub async fn stage<D: Daemon>(
     // Only while the release is still there to promote: `promote` names this
     // verb as the way back from a release that is gone or unfinished, and
     // answering "already staged" would leave no way to build it again.
+    let build = settings.build_key(app.user.as_deref());
     if state.staged.as_deref() == Some(head.as_str())
-        && tree.release(&head).is_dir()
-        && tree.completion(&head).is_file()
+        && tree.release(&state.remote, &head, &build).is_dir()
+        && tree.completion(&state.remote, &head, &build).is_file()
     {
         return Ok(Staged::AlreadyStaged { sha: head });
     }
@@ -138,10 +139,10 @@ pub async fn stage<D: Daemon>(
         .map(str::to_owned)
         .collect();
     let pruned = {
-        let (tree, keep) = (tree.clone(), config.retention);
+        let (tree, remote, keep) = (tree.clone(), state.remote.clone(), config.retention);
         shared::off_thread(move || {
             let spared: Vec<&str> = spared.iter().map(String::as_str).collect();
-            retention::prune(&tree, keep, &spared)
+            retention::prune(&tree, &remote, keep, &spared)
         })
         .await
     };
@@ -157,7 +158,7 @@ pub async fn stage<D: Daemon>(
 ///
 /// Runs no build and fetches nothing: the sha is the one `state.staged`
 /// names, whatever the branch says now. The release hook runs first, since a
-/// stage never ran it, and the rest is [`deploy::swap_and_land`] followed by
+/// stage never ran it, and the rest is [`crate::deploy::swap_and_land`] followed by
 /// [`record`], so rollback, the held sha and retention are what a deploy's
 /// are. A sha that failed is recorded in `failed` and left `staged`, so the
 /// operator can promote it again. A hold on the sha does not stop a promote,
@@ -173,7 +174,7 @@ pub async fn stage<D: Daemon>(
 /// deploy. [`Error::Config`] if nothing is staged, or the staged release or
 /// its completion marker is gone, naming `--stage` as the way back.
 ///
-/// Then whatever the release hook and [`deploy::deploy`]'s steps from the
+/// Then whatever the release hook and [`crate::deploy::deploy`]'s steps from the
 /// swap on return, with the same rollback endings.
 pub async fn promote<D: Daemon>(
     daemon: &D,
@@ -200,7 +201,10 @@ pub async fn promote<D: Daemon>(
             "{sheep} has nothing staged. Run `shep-deploy deploy {sheep} --stage` first."
         )));
     };
-    if !tree.release(&head).is_dir() || !tree.completion(&head).is_file() {
+    let build = settings.build_key(app.user.as_deref());
+    if !tree.release(&state.remote, &head, &build).is_dir()
+        || !tree.completion(&state.remote, &head, &build).is_file()
+    {
         return Err(Error::Config(format!(
             "{sheep} has {head} staged, but its release is gone or unfinished. Run \
              `shep-deploy deploy {sheep} --stage` to build it again."
@@ -250,13 +254,18 @@ async fn build_and_record<D: Daemon>(
     config: &DogConfig,
 ) -> Result<(), Error> {
     let sheep = tree.sheep();
-    let release = tree.release(head);
-    let deploy::Staged {
-        spec,
-        linked,
-        cache,
-        ..
-    } = {
+    // The build turn for this repository, taken before the release is checked
+    // out and let go before the record write. The release directory, the
+    // completion marker and the cache this build writes into are all keyed by
+    // the remote and shared with every other sheep of it, and the tree lock
+    // says nothing between two sheep of one remote. A stage taking no turn
+    // would check out a release a deploy's build is inside, and compile over
+    // the outputs that build is still writing. See [`crate::lock`].
+    let building = {
+        let (tree, remote) = (tree.clone(), state.remote.clone());
+        shared::off_thread(move || lock::hold_build(&tree.repo(&remote))).await?
+    };
+    let staged = {
         let (tree, checkout, head, remote) = (
             tree.clone(),
             state.checkout.clone(),
@@ -268,27 +277,21 @@ async fn build_and_record<D: Daemon>(
             .await?
     };
     refuse_ungated_verification(sheep, app, state.verify)?;
-    // The build turn for this repository, taken inside the stage's own tree hold
-    // and let go before the record write. The cache this build writes into is one
-    // directory keyed by the remote, and the tree lock says nothing between two
-    // sheep of it: a stage taking no turn would compile into a cache a deploy's
-    // build is still filling, and then copy out whatever that build left there.
-    // See [`crate::lock`].
-    let building = {
-        let (tree, remote) = (tree.clone(), state.remote.clone());
-        shared::off_thread(move || lock::hold_build(&tree.repo(&remote))).await?
+    let snapshot = linkcheck::Snapshot::before(sheep, &staged.release, &staged.linked);
+    let built = if staged.reused {
+        Ok(())
+    } else {
+        build::run(
+            sheep,
+            &staged.release,
+            &staged.spec,
+            app.user.as_deref(),
+            &config.passthrough,
+            &staged.cache,
+            config.build_timeout,
+        )
+        .await
     };
-    let snapshot = linkcheck::Snapshot::before(sheep, &release, &linked);
-    let built = build::run(
-        sheep,
-        &release,
-        &spec,
-        app.user.as_deref(),
-        &config.passthrough,
-        &cache,
-        config.build_timeout,
-    )
-    .await;
     for warning in snapshot.after() {
         eprintln!("{warning}");
     }
@@ -296,6 +299,9 @@ async fn build_and_record<D: Daemon>(
     // waits for a record lock.
     drop(building);
     built?;
+    if !staged.reused {
+        mark_built(&staged.marker)?;
+    }
 
     record_staged(daemon, tree, state, head, &config.shared).await
 }
@@ -352,7 +358,8 @@ mod tests {
 
     use crate::deploy::Outcome;
     use crate::deploy::test_support::{
-        Shepherd, commit_on_origin, fixture_before_any_release, fixture_with_previous_release,
+        Fixture, Shepherd, commit_on_origin, fixture_before_any_release,
+        fixture_with_previous_release,
     };
     use crate::{fixtures, swap};
 
@@ -369,23 +376,37 @@ mod tests {
     }
 
     /// Stages the head of a new commit whose build runs `command`, returning
-    /// its sha. The record is on disk and in `fixture.state`.
-    async fn stage_a_build(
-        fixture: &mut crate::deploy::test_support::Fixture,
-        command: &str,
-    ) -> String {
+    /// its sha and the directory that build lands in. The record is on disk and
+    /// in `fixture.state`.
+    async fn stage_a_build(fixture: &mut Fixture, command: &str) -> (String, std::path::PathBuf) {
+        let daemon = building(command);
         let second = commit_on_origin(fixture, "second.txt");
         stage(
-            &building(command),
+            &daemon,
             &fixture.tree,
             &mut fixture.state,
             &fixtures::dog_config(),
         )
         .await
         .expect("stages");
-        second
+        let release = fixture.release_of(&daemon, &second);
+        (second, release)
     }
 
+    /// Where a build of `sha` by a sheep whose command is `command` lands, and
+    /// its completion marker. A release directory is named by its command, so
+    /// a test that builds with one names it with the same one.
+    fn built(
+        fixture: &Fixture,
+        command: &str,
+        sha: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let daemon = building(command);
+        (
+            fixture.release_of(&daemon, sha),
+            fixture.completion_of(&daemon, sha),
+        )
+    }
     /// fails if a promote builds again, does not reload, or leaves `staged`
     /// behind. The marker is removed after the stage, so a second build would
     /// put it back; the reload count is what separates a swap from a
@@ -393,10 +414,10 @@ mod tests {
     #[tokio::test]
     async fn promote_swaps_to_the_staged_release_and_clears_the_record() {
         let mut fixture = fixture_with_previous_release();
-        let second = stage_a_build(&mut fixture, "touch built.marker").await;
-        let marker = fixture.tree.release(&second).join("built.marker");
+        let (second, release) = stage_a_build(&mut fixture, "touch built.marker").await;
+        let marker = release.join("built.marker");
         fs::remove_file(&marker).expect("marker");
-        let daemon = Shepherd::ready();
+        let daemon = touching_marker();
 
         let outcome = promote(
             &daemon,
@@ -417,7 +438,7 @@ mod tests {
         assert_eq!(daemon.reload_count(), 1);
         assert_eq!(
             swap::resolve(&fixture.tree.current()).expect("reads"),
-            Some(fixture.tree.release(&second))
+            Some(release)
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(second.as_str()));
         assert_eq!(fixture.state.staged, None);
@@ -453,7 +474,7 @@ mod tests {
         assert_eq!(daemon.reload_count(), 0);
         assert_eq!(
             swap::resolve(&fixture.tree.current()).expect("reads"),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
         assert_eq!(
             fs::read_to_string(fixture.tree.state_file()).expect("deploy.toml"),
@@ -468,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn promote_after_the_branch_moved_still_deploys_the_staged_sha() {
         let mut fixture = fixture_with_previous_release();
-        let second = stage_a_build(&mut fixture, "true").await;
+        let (second, _) = stage_a_build(&mut fixture, "true").await;
         let third = commit_on_origin(&fixture, "third.txt");
         let remote = fixture.state.remote.clone();
         git::fetch(&fixture.tree.git(), &remote, "main", fixtures::TEST_BUDGET).expect("fetch");
@@ -479,7 +500,7 @@ mod tests {
         );
 
         let outcome = promote(
-            &Shepherd::ready(),
+            &building("true"),
             &fixture.tree,
             &mut fixture.state,
             &fixtures::dog_config(),
@@ -494,10 +515,8 @@ mod tests {
             }
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(second.as_str()));
-        assert!(
-            !fixture.tree.release(&third).exists(),
-            "the head was not built"
-        );
+        let (unbuilt, _) = built(&fixture, "true", &third);
+        assert!(!unbuilt.exists(), "the head was not built");
     }
 
     /// fails if a promote swaps to a release that retention or a hand has
@@ -508,10 +527,11 @@ mod tests {
     async fn promote_with_the_staged_release_gone_names_stage() {
         let mut fixture = fixture_with_previous_release();
         let previous = fixture.state.deployed.clone().expect("a previous release");
-        let second = stage_a_build(&mut fixture, "true").await;
-        let daemon = Shepherd::ready();
+        let (second, release) = stage_a_build(&mut fixture, "true").await;
+        let daemon = building("true");
+        let (_, marker) = built(&fixture, "true", &second);
 
-        fs::remove_file(fixture.tree.completion(&second)).expect("marker");
+        fs::remove_file(&marker).expect("marker");
         let err = promote(
             &daemon,
             &fixture.tree,
@@ -523,7 +543,7 @@ mod tests {
         assert!(matches!(err, Error::Config(_)), "{err:?}");
         assert!(err.to_string().contains("--stage"), "{err}");
 
-        fs::remove_dir_all(fixture.tree.release(&second)).expect("release");
+        fs::remove_dir_all(&release).expect("release");
         let err = promote(
             &daemon,
             &fixture.tree,
@@ -538,7 +558,7 @@ mod tests {
         assert_eq!(daemon.reload_count(), 0);
         assert_eq!(
             swap::resolve(&fixture.tree.current()).expect("reads"),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
         assert_eq!(fixture.state.staged.as_deref(), Some(second.as_str()));
     }
@@ -573,7 +593,7 @@ mod tests {
         assert!(matches!(outcome, Outcome::RolledBack { .. }), "{outcome:?}");
         assert_eq!(
             swap::resolve(&fixture.tree.current()).expect("reads"),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
         assert_eq!(fixture.state.deployed.as_deref(), Some(previous.as_str()));
         assert_eq!(fixture.state.staged.as_deref(), Some(second.as_str()));
@@ -581,7 +601,7 @@ mod tests {
         assert_eq!(written.deployed.as_deref(), Some(previous.as_str()));
         assert_eq!(written.staged.as_deref(), Some(second.as_str()));
         assert!(
-            fixture.tree.release(&second).exists(),
+            fixture.release(&second).exists(),
             "retention spares what is staged"
         );
     }
@@ -610,8 +630,9 @@ mod tests {
                 sha: second.clone()
             }
         );
+        let (release, _) = built(&fixture, "touch built.marker", &second);
         assert!(
-            fixture.tree.release(&second).join("built.marker").exists(),
+            release.join("built.marker").exists(),
             "the build ran in the release"
         );
         assert_eq!(fixture.state.staged.as_deref(), Some(second.as_str()));
@@ -621,7 +642,7 @@ mod tests {
         assert_eq!(written.failed, None);
         assert_eq!(
             swap::resolve(&fixture.tree.current()).expect("reads"),
-            Some(fixture.tree.release(&previous))
+            Some(fixture.release(&previous))
         );
     }
 
@@ -659,7 +680,8 @@ mod tests {
         )
         .await
         .expect("stages");
-        let marker = fixture.tree.release(&second).join("built.marker");
+        let (release, _) = built(&fixture, "touch built.marker", &second);
+        let marker = release.join("built.marker");
         fs::remove_file(&marker).expect("marker");
 
         let again = stage(
@@ -682,10 +704,10 @@ mod tests {
     #[tokio::test]
     async fn staging_again_rebuilds_a_staged_release_that_is_gone_or_unfinished() {
         let mut fixture = fixture_with_previous_release();
-        let second = stage_a_build(&mut fixture, "touch built.marker").await;
-        let release = fixture.tree.release(&second);
+        let (second, release) = stage_a_build(&mut fixture, "touch built.marker").await;
+        let (_, marker) = built(&fixture, "touch built.marker", &second);
 
-        fs::remove_file(fixture.tree.completion(&second)).expect("marker");
+        fs::remove_file(&marker).expect("marker");
         let again = stage(
             &touching_marker(),
             &fixture.tree,
@@ -700,7 +722,7 @@ mod tests {
                 sha: second.clone()
             }
         );
-        assert!(fixture.tree.completion(&second).is_file());
+        assert!(marker.is_file(), "it was checked out again");
 
         fs::remove_dir_all(&release).expect("release");
         let again = stage(
@@ -846,9 +868,11 @@ mod tests {
         .write(&fixture.tree.state_file())
         .expect("another stage's record");
         // What that stage left: a finished release, unbuilt here.
-        fs::create_dir_all(fixture.tree.release(&second)).expect("release");
-        fs::create_dir_all(fixture.tree.completions()).expect("markers");
-        fs::write(fixture.tree.completion(&second), b"").expect("marker");
+        let (release, marker) = built(&fixture, "touch built.marker", &second);
+        fs::create_dir_all(&release).expect("release");
+        fs::create_dir_all(marker.parent().expect("a marker beside the releases"))
+            .expect("markers");
+        fs::write(&marker, b"").expect("marker");
 
         let staged = stage(
             &touching_marker(),
@@ -865,10 +889,7 @@ mod tests {
                 sha: second.clone()
             }
         );
-        assert!(
-            !fixture.tree.release(&second).join("built.marker").exists(),
-            "nothing was built"
-        );
+        assert!(!release.join("built.marker").exists(), "nothing was built");
         assert_eq!(fixture.state.staged.as_deref(), Some(second.as_str()));
     }
 
