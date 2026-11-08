@@ -319,6 +319,9 @@ pub async fn prepare_with<D: Daemon>(
         // fields above alone.
         origin: Some(previous_config.clone()),
         staged: None,
+        // Nothing has landed yet, so there is nothing to record about the
+        // script the sheep is running. The first deploy records it.
+        served_script: None,
     };
     // Checked here, before the fetch, the worktree and the build, rather
     // than found out by the record write at the very end. Neither value was

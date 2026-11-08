@@ -243,7 +243,10 @@ pub async fn deploy<D: Daemon>(
 /// build produced rather than on the paths a push touched. That one is checked
 /// out and built, and then swaps nothing and records nothing, for the same
 /// reason: the record names what is serving, and `crate::retention` spares the
-/// release it names whatever its age.
+/// release it names whatever its age. What it compares against is the digest
+/// that record has been carrying since the last landing, which is the only
+/// thing that identifies this sheep's own binary once the repository's build
+/// cache is shared - see [`crate::skip`].
 ///
 /// # Errors
 /// [`Error::Held`] if the branch head is the sha `state.failed` names, in
@@ -383,8 +386,8 @@ async fn go<D: Daemon>(
 ///
 /// A sheep with `reload_script` set, asked for by the poll loop rather than by
 /// an operator, ends here before the release hook: its build is compared with
-/// what is serving, and an unchanged script runs no hook, swaps nothing and
-/// records nothing.
+/// the script its last landing recorded in [`State::served_script`], and an
+/// unchanged one runs no hook, swaps nothing and records nothing.
 #[expect(clippy::too_many_arguments, reason = "one deploy, one call site")]
 async fn attempt<D: Daemon>(
     daemon: &D,
@@ -425,13 +428,6 @@ async fn attempt<D: Daemon>(
     };
     refuse_ungated_verification(sheep, &staged.app, state.verify)?;
     let snapshot = linkcheck::Snapshot::before(sheep, &staged.release, &staged.linked);
-    // What is serving, read now, while this repository's build turn is held and
-    // before anything of this deploy's has been written. Only the poll loop is
-    // answered by a skip, and only for a sheep that asked for it.
-    let serving = match (held, settings.reload_script, &started_at) {
-        (Held::Hold, true, Some(live)) => skip::serving_script(sheep, &staged.app, live).await,
-        _ => None,
-    };
     // A release another sheep of this repository already built, or this one
     // built on an earlier attempt, is not built again: its marker says the
     // checkout finished and the build exited zero, and the release directory
@@ -462,13 +458,29 @@ async fn attempt<D: Daemon>(
     // Ahead of the release hook, so a skip runs none of it. The build is paid
     // for and its release is on disk with its marker; what is refused is the
     // swap, the reload and the record.
-    if let Some(serving) = serving
-        && skip::built_script_matches(sheep, &staged.app, &staged.release, &serving).await
-    {
-        return Ok(Outcome::Skipped {
-            sha: head.to_owned(),
-            reason: skip::Reason::UnchangedScript,
-        });
+    //
+    // The digest is taken here, inside the build turn this deploy has not let go
+    // of yet, so the file it hashes is the one this build wrote and no rival
+    // sheep of this remote is inside the cache. It is compared with this tree's
+    // own record and never with the live release: see [`crate::skip`] for what
+    // the shared cache does to that comparison. A record written before the
+    // field, or a tree the cutover has served but no deploy has landed yet,
+    // holds nothing to compare with, and deploys.
+    if held == Held::Hold && settings.reload_script {
+        match skip::stamp(&staged.app, &staged.release).await {
+            Ok(stamp) if state.served_script.as_deref() == Some(stamp.as_str()) => {
+                return Ok(Outcome::Skipped {
+                    sha: head.to_owned(),
+                    reason: skip::Reason::UnchangedScript,
+                });
+            }
+            Ok(_) => {}
+            Err(why) => {
+                eprintln!(
+                    "shep-deploy: {sheep}: cannot compare its built script, deploying it: {why}"
+                );
+            }
+        }
     }
     run_release_hook(tree, head, &staged, config).await?;
     // Let go at the swap, not at the end of the deploy: the lock is the

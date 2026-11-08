@@ -1,12 +1,21 @@
-//! A commit whose build produced the script its sheep is already serving: when
-//! the poll loop leaves it alone, and when it does not.
+//! A commit whose build produced the script its sheep last landed: when the
+//! poll loop leaves it alone, and when it does not.
+//!
+//! The compare is against `State::served_script`, the digest the sheep's own
+//! last landing recorded, and these fixtures write one the way a landing does.
+//! Two of them put the script under the repository's shared build cache, which
+//! is where a comparison against the live release goes wrong: that file is one
+//! file every release of the remote resolves to, and another sheep's build has
+//! already replaced it.
 
 use std::fs;
 
-use crate::deploy::test_support::{FIXTURE_TABLE, Fixture, Shepherd, fixture_before_any_release};
+use crate::deploy::test_support::{
+    FIXTURE_TABLE, Fixture, Shepherd, another_sheep, fixture_before_any_release, shared_clone,
+};
 use crate::deploy::{Outcome, deploy, unattended};
 use crate::state::State;
-use crate::{fixtures, git, skip, swap};
+use crate::{fixtures, git, paths, skip, swap};
 
 /// Commits `files` on the origin's `main` and returns the new head.
 fn push(fixture: &Fixture, files: &[(&str, &str)]) -> String {
@@ -18,6 +27,11 @@ fn push(fixture: &Fixture, files: &[(&str, &str)]) -> String {
 /// script compare.
 const SCRIPT_BUILD: &str = "command = 'cp build/input.txt app'\nreload_script = true\n";
 
+/// A build whose output is under `target/`, which is where a compiled app's
+/// script really lives, and therefore under the repository's shared cache.
+const CACHE_BUILD: &str = "command = 'mkdir -p target/release && cp build/input.txt \
+                           target/release/app'\nreload_script = true\n";
+
 /// A shepherd whose sheep has `script` as its script and `settings` as its
 /// table, and is otherwise the fixture's.
 fn a_sheep_that_builds(script: &str, settings: &str) -> Shepherd {
@@ -26,19 +40,16 @@ fn a_sheep_that_builds(script: &str, settings: &str) -> Shepherd {
     Shepherd::ready().with_app(app)
 }
 
-/// A target whose live release holds a built `./app`, in a repository whose
-/// `build/input.txt` says `one`.
+/// A target live on its repository's first commit, `current` pointing at that
+/// release, and its record carrying the digest a landing would have recorded
+/// for a script of `script` bytes.
 ///
-/// The built script is committed rather than built here. The bytes a live
-/// release holds at its `script` path are what the compare is against, and a
-/// commit puts the same bytes there without a build the test is not about.
-fn serving_a_built_script(daemon: &Shepherd) -> Fixture {
+/// Recorded here rather than landed for, because the digest is what these tests
+/// are about and a landing is only the thing that normally writes one.
+/// [`paths::digest`] is the call the landing makes.
+fn serving(daemon: &Shepherd, files: &[(&str, &str)], script: &str) -> Fixture {
     let mut fixture = fixture_before_any_release();
-    fixtures::commit(
-        fixture.origin.path(),
-        &[("build/input.txt", "one"), ("app", "one")],
-        "the app",
-    );
+    fixtures::commit(fixture.origin.path(), files, "the app");
     git::fetch(
         &fixture.tree.git(),
         &fixture.state.remote,
@@ -51,6 +62,7 @@ fn serving_a_built_script(daemon: &Shepherd) -> Fixture {
     git::worktree_add(&fixture.tree.git(), &release, &live).expect("worktree");
     swap::point_at(&fixture.tree.current(), &release).expect("current");
     fixture.state.deployed = Some(live);
+    fixture.state.served_script = Some(paths::digest(script.as_bytes()));
     fixture
         .state
         .write(&fixture.tree.state_file())
@@ -58,16 +70,21 @@ fn serving_a_built_script(daemon: &Shepherd) -> Fixture {
     fixture
 }
 
+/// A target whose live release holds a built `./app` saying `one`.
+fn serving_a_built_script(daemon: &Shepherd) -> Fixture {
+    serving(daemon, &[("build/input.txt", "one"), ("app", "one")], "one")
+}
+
 /// [`serving_a_built_script`] with the live release's `target` linked at the
-/// repository's shared build cache, which holds `serving` as the binary.
+/// repository's shared build cache, which holds `script` as the binary.
 ///
-/// What a compiled target really is: a release's `target` is a link, so the
-/// script the live release runs and the one the next build writes are one file.
-fn serving_under_the_shared_cache(daemon: &Shepherd, serving: &str) -> Fixture {
-    let fixture = serving_a_built_script(daemon);
+/// What a compiled target really is: the live release's script path and the
+/// path the next build writes resolve to one file.
+fn under_the_shared_cache(daemon: &Shepherd, script: &str) -> Fixture {
+    let fixture = serving(daemon, &[("build/input.txt", "one")], script);
     let cache = fixture.tree.cache_target(&fixture.state.remote);
     fs::create_dir_all(cache.join("release")).expect("the shared cache");
-    fs::write(cache.join("release/app"), serving).expect("the serving binary");
+    fs::write(cache.join("release/app"), script).expect("the serving binary");
     let live = swap::resolve(&fixture.tree.current())
         .expect("reads")
         .expect("a live release");
@@ -155,6 +172,40 @@ async fn a_commit_whose_build_produced_a_different_script_deploys() {
         Some(fixture.release_of(&daemon, &pushed))
     );
     assert_eq!(fixture.state.deployed.as_deref(), Some(pushed.as_str()));
+    assert_eq!(
+        fixture.state.served_script,
+        State::read(&fixture.tree.state_file())
+            .expect("reads")
+            .served_script,
+        "and the landing recorded the digest of the binary it landed"
+    );
+}
+
+/// fails if a tree with nothing recorded starts skipping. A record written
+/// before `served_script` existed, or a cutover that has served a release no
+/// deploy landed, has no digest, and no digest is not a match.
+#[tokio::test]
+async fn a_sheep_with_nothing_recorded_deploys_an_unchanged_build() {
+    let daemon = a_sheep_that_builds("./app", SCRIPT_BUILD);
+    let mut fixture = serving_a_built_script(&daemon);
+    fixture.state.served_script = None;
+    fixture
+        .state
+        .write(&fixture.tree.state_file())
+        .expect("deploy.toml");
+    let pushed = push(&fixture, &[("notes.txt", "2")]);
+
+    let outcome = unattended(
+        &daemon,
+        &fixture.tree,
+        &mut fixture.state,
+        &fixtures::dog_config(),
+    )
+    .await
+    .expect("completes");
+
+    assert_eq!(outcome, Outcome::Deployed { sha: pushed });
+    assert_eq!(daemon.reload_count(), 1);
 }
 
 /// fails if a hand deploy skips on the script. `reload_script` says the poll
@@ -228,20 +279,18 @@ async fn a_skip_on_the_script_runs_no_release_hook() {
     assert!(!release.join("hooked").exists(), "the hook did not");
 }
 
-/// fails if the live script is read after the build instead of before it. A
-/// release's `target` is a symlink at the repository's shared build cache, so
-/// a script under it is one file every release of that remote resolves to:
-/// read after the build, the compare is the new binary against itself, and
-/// every commit of a compiled app is skipped.
+/// fails if the compare is taken against the live release's own bytes instead
+/// of the recorded ones. A release's `target` is a symlink at the repository's
+/// shared build cache, so a script under it is one file every release of that
+/// remote resolves to, and this deploy's own build has replaced it by the time
+/// a compare that read the live path would run: the new binary against itself,
+/// and every commit of a compiled app skipped.
 #[tokio::test]
-async fn a_script_under_the_shared_cache_is_compared_with_what_was_serving() {
-    let build = "command = 'mkdir -p target/release && cp build/input.txt target/release/app'\n\
-                 reload_script = true\n";
-
+async fn a_script_under_the_shared_cache_is_compared_with_what_was_recorded() {
     // The push the build reads. The cache held "one" and holds "two", and the
     // release that turns it into a different binary deploys.
-    let daemon = a_sheep_that_builds("./target/release/app", build);
-    let mut fixture = serving_under_the_shared_cache(&daemon, "one");
+    let daemon = a_sheep_that_builds("./target/release/app", CACHE_BUILD);
+    let mut fixture = under_the_shared_cache(&daemon, "one");
     let pushed = push(&fixture, &[("build/input.txt", "two")]);
     let outcome = unattended(
         &daemon,
@@ -254,8 +303,8 @@ async fn a_script_under_the_shared_cache_is_compared_with_what_was_serving() {
     assert_eq!(outcome, Outcome::Deployed { sha: pushed }, "{outcome:?}");
 
     // The push it does not read, over one more commit's worth of cache.
-    let daemon = a_sheep_that_builds("./target/release/app", build);
-    let mut fixture = serving_under_the_shared_cache(&daemon, "one");
+    let daemon = a_sheep_that_builds("./target/release/app", CACHE_BUILD);
+    let mut fixture = under_the_shared_cache(&daemon, "one");
     let pushed = push(&fixture, &[("notes.txt", "2")]);
     let outcome = unattended(
         &daemon,
@@ -274,4 +323,70 @@ async fn a_script_under_the_shared_cache_is_compared_with_what_was_serving() {
         }
     );
     assert_eq!(daemon.reload_count(), 0);
+}
+
+/// fails if a sheep skips a reload because another sheep of its repository has
+/// already built the new binary into the shared cache.
+///
+/// `Tree::cache_target` is one directory for every sheep of one remote, and the
+/// poll loop deploys them one after another, so by the time the second is asked
+/// the cache holds the first's binary and the second's live release resolves to
+/// it through its own `target` link. Its process is still running the old one.
+/// Only the digest its own last landing recorded says so, and this is the test
+/// that fails when the compare reads the live path instead.
+#[tokio::test]
+async fn a_sheep_deploys_a_commit_another_sheep_of_its_remote_already_built() {
+    let daemon = a_sheep_that_builds("./target/release/app", CACHE_BUILD);
+    let mut web = under_the_shared_cache(&daemon, "one");
+    let repo = shared_clone(&web);
+    // The second sheep of the same remote, on the same first commit, serving
+    // from the same shared cache, with the same digest recorded.
+    let (api_tree, mut api_state) = another_sheep(&web, &repo, "api", &daemon);
+    api_state.served_script = web.state.served_script.clone();
+    api_state
+        .write(&api_tree.state_file())
+        .expect("the second sheep's deploy.toml");
+
+    let pushed = push(&web, &[("build/input.txt", "two")]);
+
+    let first = unattended(&daemon, &web.tree, &mut web.state, &fixtures::dog_config())
+        .await
+        .expect("the first sheep deploys");
+    assert!(matches!(first, Outcome::Deployed { .. }), "{first:?}");
+    assert_eq!(
+        fs::read_to_string(web.tree.cache_target(&web.state.remote).join("release/app"))
+            .expect("reads"),
+        "two",
+        "and the shared cache now holds the binary it built"
+    );
+
+    // The hazard, on disk. The second sheep is still serving its old release,
+    // and that release's script path resolves through its `target` link to the
+    // binary the first sheep just built. A compare against the live path reads
+    // the new binary as itself, and would skip the reload this sheep needs.
+    let api_live = swap::resolve(&api_tree.current())
+        .expect("reads")
+        .expect("a live release");
+    assert_eq!(
+        fs::read_to_string(api_live.join("target/release/app")).expect("reads"),
+        "two",
+        "the live release resolves to another sheep's build"
+    );
+
+    let second = unattended(&daemon, &api_tree, &mut api_state, &fixtures::dog_config())
+        .await
+        .expect("the second sheep deploys too");
+    assert_eq!(
+        second,
+        Outcome::Deployed {
+            sha: pushed.clone()
+        },
+        "{second:?}"
+    );
+    assert_eq!(api_state.deployed.as_deref(), Some(pushed.as_str()));
+    assert_eq!(
+        api_state.served_script, web.state.served_script,
+        "and both records now describe the binary each is running"
+    );
+    assert_eq!(daemon.reload_count(), 2, "and both were reloaded");
 }

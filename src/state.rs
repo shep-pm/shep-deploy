@@ -190,6 +190,30 @@ pub struct State {
     /// refuses unknown fields. Cleared when a deploy lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged: Option<String>,
+    /// What the bytes at the app's `script` path were when this sheep last
+    /// landed a release: [`crate::paths::digest`] of them, or `None` when no
+    /// landing has recorded any yet.
+    ///
+    /// The only answer to "would the binary I am about to build be the one this
+    /// sheep is running?" once a repository shares its build cache. A release's
+    /// `target` is a symlink at that cache, so a script under it is one file
+    /// every release of the remote resolves to, and another sheep's build has
+    /// already replaced it by the time this one asks: the live release's own
+    /// bytes describe the cache, not this sheep's process. What this tree's last
+    /// landing recorded does. See [`crate::skip`].
+    ///
+    /// Recorded by every landing, whether or not `reload_script` is set, so it
+    /// always describes what is serving and turning the key on needs no deploy
+    /// first. Cleared by an ending that landed nothing, because a rollback puts
+    /// back a release whose bytes this module cannot name: the shared cache has
+    /// been rebuilt since it was recorded.
+    ///
+    /// Left out of the file while `None`, the same trade [`Self::staged`] makes,
+    /// so a record that has never landed a script still reads in a shep-deploy
+    /// from before the field. One that carries it is refused by an older reader,
+    /// as [`Self::origin`] is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_script: Option<String>,
 }
 
 impl State {
@@ -317,8 +341,8 @@ impl State {
     /// `remote` or `checkout`; a `remote` beginning with `-` or carrying a
     /// character that would rewrite a log line; a relative `checkout`; a
     /// `deployed`, `failed` or `staged` that is not a full commit sha; `deployed` and
-    /// `failed` naming the same sha; or exactly one of `origin_cwd` and
-    /// `origin_script` set.
+    /// `failed` naming the same sha; a `served_script` that is not a script
+    /// digest; or exactly one of `origin_cwd` and `origin_script` set.
     pub(crate) fn validate(&self, path: &Path) -> Result<(), Error> {
         let refuse =
             |field: &str, why: &str| Error::Config(format!("{}: `{field}` {why}", path.display()));
@@ -358,6 +382,16 @@ impl State {
                 "failed",
                 "names the sha `deployed` names. A release that is serving cannot also be the \
                  one being held; remove `failed`",
+            ));
+        }
+
+        if let Some(stamp) = &self.served_script
+            && !crate::paths::is_digest(stamp)
+        {
+            return Err(refuse(
+                "served_script",
+                "is not a script digest: 16 hexadecimal characters, which is what this dog \
+                 writes there. Remove the key and the next deploy records it again",
             ));
         }
 

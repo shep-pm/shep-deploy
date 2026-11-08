@@ -199,10 +199,11 @@ pub struct Settings {
     /// its contents. Empty means every new sha deploys.
     pub reload: Vec<String>,
     /// Whether an unattended deploy may also skip a new commit whose build
-    /// produced a `script` byte-identical to the one now serving. Off by
-    /// default, and never for a deploy asked for by name. It fits a compiled
-    /// app: an interpreted app's `script` misses the files it imports, and a Go
-    /// build stamps the commit into the binary unless it passes `-buildvcs=false`.
+    /// produced a `script` byte-identical to the one its last deploy landed.
+    /// Off by default, and never for a deploy asked for by name. It fits a
+    /// compiled app: an interpreted app's `script` misses the files it imports,
+    /// and a Go build stamps the commit into the binary unless it passes
+    /// `-buildvcs=false`.
     pub reload_script: bool,
     /// Runs after the build and before the swap.
     pub release: HookSpec,

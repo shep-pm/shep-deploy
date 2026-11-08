@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use super::build_key::BuildKey;
-use super::{REPOS, fnv1a};
+use super::{REPOS, digest};
 
 /// One remote's shared directory, `$SHEP_HOME/deploy/repos/<key>`: the bare
 /// clone every tree with that remote links its `git` to, and the build cache
@@ -68,7 +68,7 @@ impl Repo {
         let tail = tail.trim_start_matches('.');
         let tail = if tail.is_empty() { "repo" } else { tail };
         Self {
-            root: repos.join(format!("{tail}-{:016x}", fnv1a(&normalized))),
+            root: repos.join(format!("{tail}-{}", digest(normalized.as_bytes()))),
         }
     }
 

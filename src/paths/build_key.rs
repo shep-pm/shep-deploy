@@ -6,10 +6,7 @@ use std::path::Path;
 
 use crate::state::is_sha;
 
-use super::fnv1a;
-
-/// How [`BuildKey`] is spelled in a release directory name: a `u64` in hex.
-const BUILD_KEY_WIDTH: usize = 16;
+use super::{digest, is_digest};
 
 /// What tells one sheep's release of a sha from another's: the hash of the
 /// `command`, the build `user`, the `build_env` and the operator `checkout`
@@ -73,7 +70,7 @@ impl BuildKey {
             field(&mut keyed, name);
             field(&mut keyed, value);
         }
-        Self(format!("{:016x}", fnv1a(&keyed)))
+        Self(digest(keyed.as_bytes()))
     }
 
     /// The key as it appears in a release directory name.
@@ -101,14 +98,9 @@ fn field(keyed: &mut String, text: &str) {
 #[must_use]
 pub fn release_sha(name: &str) -> &str {
     match name.rsplit_once('-') {
-        Some((sha, key)) if is_build_key(key) => sha,
+        Some((sha, key)) if is_digest(key) => sha,
         _ => name,
     }
-}
-
-/// Whether `text` is a [`BuildKey`] as it is spelled in a release name.
-fn is_build_key(text: &str) -> bool {
-    text.len() == BUILD_KEY_WIDTH && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Whether a directory name under `releases/` is one of this crate's releases:

@@ -3,9 +3,21 @@
 //! One repository can be several sheep, and the poll loop compares only
 //! shas, so a push to any of them reloaded all of them. Two answers say it
 //! did not: nothing under the sheep's `reload` pathspecs changed, and the
-//! build produced the `script` the sheep is already serving. The first
-//! needs a path list and works for any app; the second needs none and is
-//! exact only for a compiled one. See [`changed`] and [`serving_script`].
+//! build produced the same `script` this sheep last landed. The first needs a
+//! path list and works for any app; the second needs none and is exact only
+//! for a compiled one. See [`changed`] and [`stamp`].
+//!
+//! # The second answer is a comparison with a record, not with the live release
+//!
+//! A release's `target` is a symlink at its repository's shared build cache
+//! (see [`crate::paths`]), so a `script` under it resolves to one file every
+//! release of that remote shares, and whichever sheep built last owns its
+//! bytes. Read that path and you have the cache, not what this sheep's process
+//! execs. The poll loop deploys sheep one after another, so by the time the
+//! second asks, the first has already overwritten it, and a comparison against
+//! the live release would skip the reload for a sheep still running the old
+//! binary. What this tree's own last landing recorded in
+//! [`State::served_script`] is the half that identifies this sheep.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +26,7 @@ use shep_client::shep_core::config::AppConfig;
 
 use crate::error::Error;
 use crate::git;
-use crate::paths::Tree;
+use crate::paths::{self, Tree};
 use crate::shared;
 use crate::state::State;
 
@@ -23,8 +35,8 @@ use crate::state::State;
 pub(crate) enum Reason {
     /// Nothing under the sheep's `reload` pathspecs changed. See [`nothing_changed`].
     ReloadPaths,
-    /// The build produced the `script` the sheep is already serving. See
-    /// [`serving_script`] and [`built_script_matches`].
+    /// The build produced the `script` this sheep last landed. See [`stamp`]
+    /// and [`State::served_script`].
     UnchangedScript,
 }
 
@@ -103,8 +115,8 @@ fn script_in(release: &Path, app: &AppConfig) -> Option<PathBuf> {
     (!script.is_absolute() && !app.script.starts_with('~')).then(|| release.join(script))
 }
 
-/// `release`'s script bytes, or why it has none to compare.
-fn read_script(release: &Path, app: &AppConfig) -> Result<Vec<u8>, Error> {
+/// `release`'s script digest, or why it has none to take.
+fn stamped(release: &Path, app: &AppConfig) -> Result<String, Error> {
     let Some(path) = script_in(release, app) else {
         return Err(Error::Config(format!(
             "`{}` is not a path inside a release, so there is no built script to \
@@ -112,48 +124,30 @@ fn read_script(release: &Path, app: &AppConfig) -> Result<Vec<u8>, Error> {
             shared::printable(&app.script)
         )));
     };
-    fs::read(&path).map_err(Error::at(&path))
+    Ok(paths::digest(&fs::read(&path).map_err(Error::at(&path))?))
 }
 
-/// The script bytes `live` is serving.
+/// What `release`'s `script` looks like, as [`State::served_script`] stores it.
 ///
-/// Read before the build rather than at the compare, which is the whole of why
-/// it is its own step: a release's `target` is a symlink at the repository's
-/// shared build cache, so a script under it is one file every release of that
-/// remote resolves to, and the build has already replaced it by the time the
-/// compare runs. Reading it then would compare a build with itself and skip
-/// every commit.
+/// Two callers, and both are moments at which the file is this deploy's to
+/// describe. `crate::deploy`'s own attempt takes it after its build, inside the
+/// repository's build turn, so no other sheep's compiler is inside the cache
+/// yet; [`crate::deploy::swap_and_land`] takes it once its reload has landed,
+/// which is the file the sheep's process is now running from. At any other
+/// moment the digest belongs to whichever sheep built last.
 ///
-/// `None` is "nothing to compare against", said out loud. The caller deploys.
-pub(crate) async fn serving_script(sheep: &str, app: &AppConfig, live: &Path) -> Option<Vec<u8>> {
-    let (app, live) = (app.clone(), live.to_owned());
-    match shared::off_thread(move || read_script(&live, &app)).await {
-        Ok(bytes) => Some(bytes),
-        Err(why) => {
-            eprintln!("shep-deploy: {sheep}: cannot compare its built script, deploying it: {why}");
-            None
-        }
-    }
-}
-
-/// Whether `release`'s build produced `serving` byte for byte.
+/// Off the runtime's thread: it reads the whole file, which for a compiled app
+/// is a binary of some megabytes.
 ///
-/// A failure to read `release`'s script answers `false` and says why, so a
-/// script the dog cannot read deploys as it always did.
-pub(crate) async fn built_script_matches(
-    sheep: &str,
-    app: &AppConfig,
-    release: &Path,
-    serving: &[u8],
-) -> bool {
-    let (app, release, serving) = (app.clone(), release.to_owned(), serving.to_vec());
-    match shared::off_thread(move || read_script(&release, &app)).await {
-        Ok(bytes) => bytes == serving,
-        Err(why) => {
-            eprintln!("shep-deploy: {sheep}: cannot compare its built script, deploying it: {why}");
-            false
-        }
-    }
+/// # Errors
+/// [`Error::Config`] when `script` names no file inside a release, and
+/// [`Error::Io`] naming that path when it cannot be read. Each caller says what
+/// it is doing about it: the deploy that cannot compare prints why and deploys,
+/// and the landing that cannot record leaves the field out, which the next
+/// compare reports as "nothing to compare with".
+pub(crate) async fn stamp(app: &AppConfig, release: &Path) -> Result<String, Error> {
+    let (app, release) = (app.clone(), release.to_owned());
+    shared::off_thread(move || stamped(&release, &app)).await
 }
 
 #[cfg(test)]
@@ -230,5 +224,43 @@ mod tests {
         let err = changed(repo.path(), &[":(bogus)cmd".to_owned()], &from, &to)
             .expect_err("git refuses it");
         assert!(matches!(err, Error::Git { .. }), "{err}");
+    }
+
+    /// An app whose `script` is `./app`, for the two questions below: which
+    /// file a release's digest is taken from, and what happens when `script`
+    /// names no file inside a release at all.
+    fn app_with(script: &str) -> AppConfig {
+        let mut app = fixtures::gated_app("web", "");
+        app.script = script.to_owned();
+        app
+    }
+
+    /// fails if the digest is taken from anywhere but the file `script` names
+    /// inside the release, which is the file the sheep is launched from.
+    #[test]
+    fn a_releases_digest_is_of_the_file_its_script_names() {
+        let release = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(release.path().join("target/release")).expect("dir");
+        std::fs::write(release.path().join("target/release/app"), "one").expect("write");
+
+        let stamp = stamped(release.path(), &app_with("./target/release/app")).expect("digest");
+        assert_eq!(stamp, paths::digest(b"one"));
+    }
+
+    /// fails if an absolute `script`, or a `~` one, is compared at all: it names
+    /// a file no build of this repository wrote, so the compare would be one
+    /// file against itself and every commit would look unchanged.
+    #[test]
+    fn a_script_outside_a_release_has_nothing_to_compare() {
+        let release = tempfile::tempdir().expect("tempdir");
+        for script in ["/usr/local/bin/app", "~/bin/app"] {
+            let err = stamped(release.path(), &app_with(script))
+                .expect_err(&format!("must refuse {script}"));
+            assert!(matches!(err, Error::Config(_)), "{script}: {err}");
+            assert!(
+                err.to_string().contains("not a path inside a release"),
+                "{err}"
+            );
+        }
     }
 }

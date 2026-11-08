@@ -25,7 +25,7 @@ async fn a_branch_set_while_a_deploy_runs_is_followed_by_its_record() {
         .await
         .expect("--branch release");
 
-    record_landing(&fixture.tree, &mut in_flight, fixtures::OTHER_SHA)
+    record_landing(&fixture.tree, &mut in_flight, fixtures::OTHER_SHA, None)
         .expect("the landing is recorded");
     record(
         &daemon,

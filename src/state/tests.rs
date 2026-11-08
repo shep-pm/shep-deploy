@@ -476,6 +476,50 @@ fn a_staged_value_that_is_not_a_sha_is_refused_by_field() {
     }
 }
 
+/// fails if a script digest is lost between a write and a read, or if a record
+/// with none grows a `served_script` line. The second is what keeps an older
+/// shep-deploy, which refuses unknown fields, able to read every record written
+/// before the field existed.
+#[test]
+fn a_script_digest_round_trips_and_an_empty_one_is_not_written() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("deploy.toml");
+
+    let landed = State {
+        served_script: Some(crate::paths::digest(b"one")),
+        ..fixtures::state()
+    };
+    landed.write(&path).expect("writes");
+    assert_eq!(
+        State::read(&path).expect("reads").served_script,
+        landed.served_script
+    );
+
+    fixtures::state().write(&path).expect("writes");
+    let text = fs::read_to_string(&path).expect("record");
+    assert!(!text.contains("served_script"), "{text}");
+}
+
+/// fails if a hand-edited `served_script` that no digest could be is accepted.
+/// Every `reload_script` compare is against it, so a value that cannot be one
+/// means a sheep that asked for the compare never gets one, and the refusal has
+/// to name the field an operator typed.
+#[test]
+fn a_script_digest_that_is_not_one_is_refused_by_field() {
+    let base = "remote = \"https://example.com/x\"\ncheckout = \"/srv/x\"\n";
+    for stamp in [
+        "\"\"",
+        "\"abc\"",
+        "\"zzzzzzzzzzzzzzzz\"",
+        "\"0123456789abcdef0\"",
+    ] {
+        let text = format!("{base}served_script = {stamp}");
+        let err = read_text(&text).expect_err(&format!("must refuse: {text}"));
+        assert!(matches!(err, Error::Config(_)), "{text}: {err}");
+        assert!(err.to_string().contains("`served_script`"), "{text}: {err}");
+    }
+}
+
 /// A minimal, valid `State` for the write tests below, where the exact
 /// values don't matter - only that they change between the two writes.
 fn sample(deployed: Option<&str>) -> State {
