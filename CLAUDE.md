@@ -116,7 +116,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
 
 565 unit tests, 9 integration and 7 probe as of 2026-11-03, ~27s, ~32s and instant.
-610 unit tests and ~45s as of 2026-11-08, after the shared-release slice. The number moves with every task; treat it as a shape, not a checksum.
+612 unit tests and ~45s as of 2026-11-08, after the shared-release slice. The number moves with every task; treat it as a shape, not a checksum.
 
 ### Commit subjects
 
