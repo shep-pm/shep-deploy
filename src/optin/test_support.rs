@@ -83,7 +83,7 @@ impl Daemon for RollOf<'_> {
     }
 
     async fn sheep_dog_table(&self, _sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
-        Ok(self.held.table(dog))
+        self.held.table(dog)
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
@@ -149,7 +149,7 @@ impl Daemon for RollBuilding<'_> {
     }
 
     async fn sheep_dog_table(&self, _sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
-        Ok(self.held.table(dog))
+        self.held.table(dog)
     }
 
     crate::fixtures::daemon_methods!(unimplemented;
@@ -575,7 +575,7 @@ impl Daemon for CutOverDouble {
         self.registered.replace(dog, table)
     }
     async fn sheep_dog_table(&self, _sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
-        Ok(self.registered.table(dog))
+        self.registered.table(dog)
     }
     async fn start(&self, apps: Vec<AppConfig>) -> Result<Vec<u32>, Error> {
         let attempt = self.attempts.get();

@@ -170,9 +170,12 @@ exist and each has a precise edge:
   by descriptor, never by path, skipping symlinks, files with a second hard
   link and the root `.git` file, which it writes back after the build because
   owning the directory lets the build replace it; every other write root makes into a release must stay handle-based too.
-- **cleared environment** (`build/env.rs`), so a build gets `BASE_ENV` plus the
-  operator's `passthrough`, and nothing else.
-  `SSH_AUTH_SOCK` is excluded on purpose.
+- **cleared environment** (`build/env.rs`), so a build gets `BASE_ENV`, then the
+  operator's `passthrough`, then the sheep's `build_env` (secret references
+  already resolved by `sheep_dog_table`), in that order with the later one
+  winning a shared name, and nothing else.
+  `SSH_AUTH_SOCK` is excluded on purpose. `build_env` and a hook's `env` are
+  the operator's values, so `Settings`' `Debug` prints a count for both.
 - **`user` on the app**, which is the only bound that also covers what the
   build can READ. It does not cover the project's own `.env`: gitignored files
   are symlinked into every release by design, so a build reads whatever the app

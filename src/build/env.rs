@@ -1,5 +1,7 @@
 //! The environment a build runs in: cleared, then rebuilt from three named
-//! sources and nothing else.
+//! sources and nothing else, in this order: [`BASE_ENV`], the operator's
+//! `passthrough`, then `build_env`. A later source wins a name it shares with
+//! an earlier one.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -25,13 +27,14 @@ use tokio::process::Command;
 pub(crate) const BASE_ENV: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TZ"];
 
 /// Replaces `child`'s environment with [`BASE_ENV`], then whatever the
-/// operator's `passthrough` names, then `spec_env`, and nothing this process
-/// itself inherited beyond those.
+/// operator's `passthrough` names, then `build_env`, and nothing this process
+/// itself inherited beyond those. `build_env` is the sheep's `build_env`
+/// setting, its secret references already resolved.
 pub(crate) fn apply(
     child: &mut Command,
     sheep: &str,
     passthrough: &[String],
-    spec_env: &BTreeMap<String, String>,
+    build_env: &BTreeMap<String, String>,
 ) {
     // Cleared, then rebuilt deliberately. Dropping uid and gid below bounds
     // what the build can TOUCH; it does nothing about what it can READ out of
@@ -42,7 +45,7 @@ pub(crate) fn apply(
     // commit on the tracked branch.
     //
     // What survives is named in three places and nowhere else: BASE_ENV, the
-    // operator's `passthrough` list, and the build spec's `env`.
+    // operator's `passthrough` list, and the sheep's `build_env`.
     //
     // `var_os` rather than `var`, because `var` reports a value that is not
     // UTF-8 as absent and a `PATH` with one such component then vanished,
@@ -68,7 +71,7 @@ pub(crate) fn apply(
             ),
         }
     }
-    child.envs(spec_env);
+    child.envs(build_env);
 }
 
 #[cfg(test)]
@@ -168,5 +171,55 @@ mod tests {
                 .trim(),
             "shep-deploy"
         );
+    }
+
+    /// fails if the three sources stop applying in the order `BASE_ENV`, then
+    /// `passthrough`, then `build_env`.
+    ///
+    /// `HOME` is a `BASE_ENV` name and `CARGO_PKG_NAME` is set by cargo for this
+    /// process and named in `passthrough`, so each has a value from an earlier
+    /// source for `build_env` to overwrite. `passthrough` over `BASE_ENV` cannot
+    /// be seen from outside: both read this process's environment, so a name in
+    /// both has one value whichever applies last.
+    #[tokio::test]
+    async fn build_env_comes_last_and_wins_a_name_the_others_set() {
+        let rel = fixtures::fixture_release(&[]);
+        let spec = BuildSpec {
+            command: Some(
+                "printenv HOME > home.txt; printenv CARGO_PKG_NAME > passed.txt; \
+                 printenv ONLY_BUILD_ENV > only.txt; true"
+                    .into(),
+            ),
+            env: BTreeMap::from([
+                ("HOME".to_owned(), "/from/build_env".to_owned()),
+                ("CARGO_PKG_NAME".to_owned(), "from-build-env".to_owned()),
+                ("ONLY_BUILD_ENV".to_owned(), "set".to_owned()),
+            ]),
+            artifacts: vec![],
+        };
+        run(
+            "web",
+            rel.path(),
+            &spec,
+            None,
+            &["CARGO_PKG_NAME".to_owned()],
+            fixtures::tempdir().path(),
+            TEST_BUILD_BUDGET,
+        )
+        .await
+        .expect("builds");
+        for (name, want) in [
+            ("home.txt", "/from/build_env"),
+            ("passed.txt", "from-build-env"),
+            ("only.txt", "set"),
+        ] {
+            assert_eq!(
+                std::fs::read_to_string(rel.path().join(name))
+                    .unwrap_or_default()
+                    .trim(),
+                want,
+                "{name}"
+            );
+        }
     }
 }

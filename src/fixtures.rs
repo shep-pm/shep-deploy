@@ -35,7 +35,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use shep_client::RequestError;
 use shep_client::shep_core::config::{AppConfig, DogTable};
+use shep_client::shep_core::protocol::{RpcError, RpcErrorCode};
 use tempfile::TempDir;
 
 use crate::config::DogConfig;
@@ -502,15 +504,31 @@ impl Sheep {
 
     /// The `sheep_dog_table` answer: `dog`'s table as the shepherd holds it,
     /// with every `{{secret:KEY}}` swapped for what [`resolving`](Self::resolving)
-    /// named for `KEY`. A reference with no name there is left as written.
-    pub fn table(&self, dog: &str) -> Option<DogTable> {
-        let held = self.app.borrow().dogs.get(dog).cloned()?;
+    /// named for `KEY`.
+    ///
+    /// # Errors
+    /// [`Error::Request`] carrying `InvalidConfig`, as the shepherd answers, when
+    /// the table names a `KEY` that [`resolving`](Self::resolving) gave no value.
+    /// The message names the key and never a value.
+    pub fn table(&self, dog: &str) -> Result<Option<DogTable>, Error> {
+        let Some(held) = self.app.borrow().dogs.get(dog).cloned() else {
+            return Ok(None);
+        };
         let secrets = self.secrets.borrow();
         if secrets.is_empty() {
-            return Some(held);
+            return Ok(Some(held));
         }
-        held.try_map_strings::<core::convert::Infallible>("", |_, text| Ok(resolve(text, &secrets)))
-            .ok()
+        held.try_map_strings::<String>("", |_, text| resolve(text, &secrets))
+            .map(Some)
+            .map_err(|key| {
+                Error::Request(RequestError::Rpc(RpcError {
+                    code: RpcErrorCode::InvalidConfig,
+                    message: format!(
+                        "`{{{{secret:{key}}}}}` has no value in the sheep's environment"
+                    ),
+                    daemon_version: None,
+                }))
+            })
     }
 
     /// The `set_sheep_dog_settings` answer: replaces `dog`'s whole table, as
@@ -527,7 +545,7 @@ impl Daemon for Sheep {
     }
 
     async fn sheep_dog_table(&self, _sheep: &str, dog: &str) -> Result<Option<DogTable>, Error> {
-        Ok(self.table(dog))
+        self.table(dog)
     }
 
     async fn set_sheep_dog_settings(
@@ -545,13 +563,12 @@ impl Daemon for Sheep {
 }
 
 /// `text` with every `{{secret:KEY}}` in it swapped for what `secrets` names
-/// for `KEY`, or `None` when it names one `secrets` has no value for, which
-/// [`DogTable::try_map_strings`] reads as "leave that string alone".
+/// for `KEY`, or the first `KEY` `secrets` has no value for.
 ///
 /// The shape shep resolves, written here rather than called from shep-core so
 /// the double stays a double: what a test needs is two answers that differ,
 /// not a second copy of the shepherd's resolver.
-fn resolve(text: &str, secrets: &BTreeMap<String, String>) -> Option<String> {
+fn resolve(text: &str, secrets: &BTreeMap<String, String>) -> Result<Option<String>, String> {
     const OPEN: &str = "{{secret:";
     const CLOSE: &str = "}}";
 
@@ -560,12 +577,15 @@ fn resolve(text: &str, secrets: &BTreeMap<String, String>) -> Option<String> {
     while let Some(at) = rest.find(OPEN) {
         out.push_str(&rest[..at]);
         let key = &rest[at + OPEN.len()..];
-        let end = key.find(CLOSE)?;
-        out.push_str(secrets.get(&key[..end])?);
+        let Some(end) = key.find(CLOSE) else {
+            return Ok(None);
+        };
+        let name = &key[..end];
+        out.push_str(secrets.get(name).ok_or_else(|| name.to_owned())?);
         rest = &key[end + CLOSE.len()..];
     }
     out.push_str(rest);
-    Some(out)
+    Ok(Some(out))
 }
 
 /// The shared settings layer of a dog with no `[deploy]` section at all: what

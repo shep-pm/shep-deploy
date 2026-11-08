@@ -98,7 +98,8 @@ env = { SUPABASE_DB_PASSWORD = "..." }
   same way.
 - It runs in the release, as the app's `user`, through `sh -c`, with the build's
   cleared environment: the base set, the dog's `passthrough`, then the hook's
-  own `env`. The dog sets `SHEP_DEPLOY_SHEEP`, `SHEP_DEPLOY_SHA` and
+  own `env`. A `{{secret:KEY}}` in that `env` is replaced with the secret
+  before the hook runs. The dog sets `SHEP_DEPLOY_SHEEP`, `SHEP_DEPLOY_SHA` and
   `SHEP_DEPLOY_RELEASE` (an absolute path) last, so the hook's `env` cannot
   override them.
 - It is bounded by `build_timeout` and killed as a process group, like the
@@ -400,6 +401,19 @@ in dogs.toml, where every sheep this dog serves shares it
 The pane draws both levels, and marks the five as dog-wide where it offers
 them. A hook's `env` is marked secret, so the pane shows `<set>` there and
 never the value it holds.
+
+A build's environment is the sheep's `build_env`, a map of name to value, and a
+value of `{{secret:KEY}}` reaches the build as the secret's value:
+
+```toml
+[app.dogs.deploy]
+command = "bun install && bun run build"
+build_env = { VITE_SUPABASE_ANON_KEY = "{{secret:SUPABASE_ANON}}" }
+```
+
+`build_env` is marked secret, so the pane shows `<set>` there and `Debug` prints
+a count. A key the sheep's environment has no secret for refuses the deploy,
+naming the key.
 
 A `{{secret:KEY}}` in a sheep's table is resolved by the shepherd before the
 dog reads the table, and that read is one the shepherd gates: `secrets.read`,
@@ -734,9 +748,9 @@ It does not refuse. Whether an app runs without a `user` is shep's call and the
 operator's, not a deploy dog's.
 
 A build starts from a cleared environment, not this process's. It gets `PATH`,
-`HOME`, `LANG`, `LC_ALL` and `TZ`, whatever `passthrough` names in
-`[deploy]` in `dogs.toml`.
-Nothing else. Dropping uid and gid bounds what a build can touch; it does
+`HOME`, `LANG`, `LC_ALL` and `TZ`, then whatever `passthrough` names in
+`[deploy]` in `dogs.toml`, then the sheep's `build_env`, which wins a name an
+earlier source also set. Nothing else. Dropping uid and gid bounds what a build can touch; it does
 nothing about what it can read out of its own environment, because those values
 are copied in before the drop happens. A dog started with a registry token in
 its environment would otherwise hand it to every build it runs.

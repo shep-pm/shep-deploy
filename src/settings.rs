@@ -21,6 +21,7 @@
 //! [app.dogs.deploy]
 //! branch = "release"
 //! command = "bun install && bun run build"
+//! build_env = { VITE_SUPABASE_ANON_KEY = "{{secret:SUPABASE_ANON}}" }
 //! artifacts = ["target/release/koji"]
 //! reload = ["cmd/voting", "assets/*.png"]
 //!
@@ -34,15 +35,16 @@
 //!
 //! Neither table lives in a release. A release's Flockfile is whatever the
 //! tracked branch carried at its sha, so a setting read from it - the build
-//! command above all - is chosen by whoever can land a commit. A hook's `env`
-//! is marked `#[shep(secret)]`, so `shep lookout` shows `<set>` and never the
+//! command above all - is chosen by whoever can land a commit. `build_env` and a hook's `env`
+//! are marked `#[shep(secret)]`, so `shep lookout` shows `<set>` and never the
 //! value, and a refusal to parse never quotes one either, see [`without_value`].
 //!
 //! `branch`, `watch` and `verify` used to live in `deploy.toml`. They are
 //! filled into [`State`] by [`State::adopt`] and written back here by
 //! [`change`], so the record holds state only.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -122,7 +124,7 @@ fn dog_wide() -> &'static BTreeSet<String> {
 /// `reload` would otherwise be a filter that is never applied, and one in
 /// `command` a build that never runs, each with nothing saying so.
 #[shep_client::dogs::dog_config]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 // `rename` sets the root schema's title, which the settings pane heads its
 // form with. `Settings` alone would name this crate's Rust type at an operator
@@ -183,6 +185,12 @@ pub struct Settings {
     /// The build command, run through `sh -c` inside the release. `None` is no
     /// build.
     pub command: Option<String>,
+    /// Environment variables to set for the build, by name. They come after
+    /// the fixed set and `passthrough`, so one of the same name wins. A value
+    /// of `{{secret:KEY}}` is replaced with the secret `KEY` holds in the
+    /// sheep's own environment, and a key with no secret refuses the deploy.
+    #[shep(secret)]
+    pub build_env: BTreeMap<String, String>,
     /// Paths, relative to the release, to copy back in after a successful
     /// build. See [`BuildSpec::artifacts`].
     #[serde(deserialize_with = "contained_artifacts")]
@@ -194,6 +202,33 @@ pub struct Settings {
     pub release: HookSpec,
     /// Runs once the new release is swapped in, verified and recorded.
     pub after: HookSpec,
+}
+
+/// `Debug` does not print `build_env`'s values (IR-41): after resolution they
+/// are the secrets themselves. A hook's `env` is redacted by [`HookSpec`]'s own
+/// `Debug`.
+impl fmt::Debug for Settings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Settings")
+            .field("interval", &self.interval)
+            .field("retention", &self.retention)
+            .field("git_timeout", &self.git_timeout)
+            .field("build_timeout", &self.build_timeout)
+            .field("passthrough", &self.passthrough)
+            .field("branch", &self.branch)
+            .field("watch", &self.watch)
+            .field("verify", &self.verify)
+            .field("command", &self.command)
+            .field(
+                "build_env",
+                &format_args!("<{} vars>", self.build_env.len()),
+            )
+            .field("artifacts", &self.artifacts)
+            .field("reload", &self.reload)
+            .field("release", &self.release)
+            .field("after", &self.after)
+            .finish()
+    }
 }
 
 impl Default for Settings {
@@ -208,6 +243,7 @@ impl Default for Settings {
             watch: Watch::default(),
             verify: Verify::default(),
             command: None,
+            build_env: BTreeMap::new(),
             artifacts: Vec::new(),
             reload: Vec::new(),
             release: HookSpec::default(),
@@ -221,8 +257,8 @@ impl Settings {
     pub(crate) fn build_spec(&self) -> BuildSpec {
         BuildSpec {
             command: self.command.clone(),
+            env: self.build_env.clone(),
             artifacts: self.artifacts.clone(),
-            ..BuildSpec::default()
         }
     }
 

@@ -137,10 +137,33 @@ fn debug_redacts_hook_env_values() {
         format!("{settings:?}"),
         "Settings { interval: UpDuration(30s), retention: 5, git_timeout: UpDuration(300s), \
          build_timeout: UpDuration(3600s), passthrough: [], branch: None, watch: Auto, \
-         verify: Probed, command: Some(\"make\"), artifacts: [], reload: [], \
+         verify: Probed, command: Some(\"make\"), build_env: <0 vars>, artifacts: [], reload: [], \
          release: HookSpec { command: Some(\"migrate\"), env: <1 vars> }, \
          after: HookSpec { command: None, env: <0 vars> } }"
     );
+}
+
+/// fails if `Debug` prints a `build_env` value through `Settings`: it is where
+/// an operator keeps a database URL or an API key, and a resolved secret is the
+/// value itself.
+///
+/// Exact, so that a `derive(Debug)` put back on `Settings` fails here.
+#[test]
+fn debug_redacts_build_env_values() {
+    let settings = Settings {
+        build_env: [(
+            "PROD_DB_URL".to_owned(),
+            "postgres://u:hunter2@db".to_owned(),
+        )]
+        .into(),
+        ..Settings::default()
+    };
+
+    let shown = format!("{settings:?}");
+
+    assert!(!shown.contains("hunter2"), "{shown}");
+    assert!(!shown.contains("postgres://"), "{shown}");
+    assert!(shown.contains("build_env: <1 vars>"), "{shown}");
 }
 
 /// fails if a message carries a control character from a key the operator
@@ -260,7 +283,7 @@ fn the_schema_publishes_every_key_and_marks_the_ones_that_are_not_per_sheep() {
 
     assert_eq!(
         properties.len(),
-        13,
+        14,
         "a key was added or removed without this test being read"
     );
     for name in properties.keys() {
