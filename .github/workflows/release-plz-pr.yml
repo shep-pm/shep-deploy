@@ -1,6 +1,7 @@
 name: Release PR
 # Maintains the pull request that bumps the version and writes the changelog,
-# then queues it to merge itself.
+# then, where the RELEASE_AUTO_MERGE variable is `true`, queues it to merge
+# itself.
 #
 # Split from the publish half on 2026-08-27, matching zendriver-rs and shep.
 # One file with two jobs meant one `on:` block serving two triggers that want
@@ -224,8 +225,12 @@ jobs:
       # `--auto` then sits queued against whatever the head becomes, so the
       # thing that merges need never have been the thing that was checked.
       # With the SHA, a moved head refuses instead.
+      #
+      # Only where the repo's RELEASE_AUTO_MERGE variable is `true`. Anything
+      # else leaves the pull request for a hand merge, so several merges to
+      # main stack into one release.
       - name: Auto-merge the release PR
-        if: ${{ steps.release-plz.outputs.prs_created == 'true' }}
+        if: ${{ steps.release-plz.outputs.prs_created == 'true' && vars.RELEASE_AUTO_MERGE == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           PR_NUMBER: ${{ fromJSON(steps.release-plz.outputs.pr || '{}').number }}
