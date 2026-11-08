@@ -158,6 +158,10 @@ pub fn prune(tree: &Tree, keep: usize, recorded: &[&str]) -> Result<Vec<String>,
 ///
 /// A tree with a clone of its own, or none, is left as it is.
 ///
+/// The build cache keyed by the same remote goes with the directory. A tree
+/// that owns a clone of its own builds against that cache too, so this can
+/// cost one a cold build. It cannot cost one a wrong build.
+///
 /// # Errors
 /// [`Error::Io`] if the lock cannot be taken, the tree's link cannot be
 /// removed, the deploy directory cannot be listed, or the clone cannot be

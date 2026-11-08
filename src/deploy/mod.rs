@@ -369,9 +369,15 @@ async fn attempt<D: Daemon>(
     let sheep = tree.sheep();
     let release = tree.release(head);
     let staged = {
-        let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
+        let (tree, checkout, head, remote) = (
+            tree.clone(),
+            state.checkout.clone(),
+            head.to_owned(),
+            state.remote.clone(),
+        );
         let (app, settings) = (app.clone(), settings.clone());
-        shared::off_thread(move || stage_release(&tree, &checkout, &head, &app, &settings)).await?
+        shared::off_thread(move || stage_release(&tree, &checkout, &head, &remote, &app, &settings))
+            .await?
     };
     refuse_ungated_verification(sheep, &staged.app, state.verify)?;
     let snapshot = linkcheck::Snapshot::before(sheep, &release, &staged.linked);
@@ -381,7 +387,7 @@ async fn attempt<D: Daemon>(
         &staged.spec,
         staged.app.user.as_deref(),
         &config.passthrough,
-        &tree.cache_target(),
+        &staged.cache,
         config.build_timeout,
     )
     .await;

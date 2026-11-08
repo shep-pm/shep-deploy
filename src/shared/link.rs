@@ -199,8 +199,8 @@ pub fn link_into(release: &Path, checkout: &Path, paths: &FromCheckout) -> Resul
             return Err(Error::Config(format!(
                 "{} is already present in the release, so {} cannot be linked from the \
                  checkout. The usual cause is a build output that git ignores and \
-                 `.shepignore` does not: this dog gives each sheep its own build cache and \
-                 links it in first, and the operator's own build artifacts must not be \
+                 `.shepignore` does not: this dog gives each repository its own build cache \
+                 and links it in first, and the operator's own build artifacts must not be \
                  shared into a release at all, because the next release's build would write \
                  through the link and replace what the current one is serving. Add {} to \
                  `.shepignore` in the checkout.",
@@ -214,8 +214,8 @@ pub fn link_into(release: &Path, checkout: &Path, paths: &FromCheckout) -> Resul
     Ok(())
 }
 
-/// Points `release/target` at the dog's own build cache, creating the cache
-/// if this is the first release to want it.
+/// Points `release/target` at the build cache of the repository the release
+/// was checked out from, creating it if this is the first release to want it.
 ///
 /// Runs BEFORE [`link_into`], so a checkout that shares its own `target`
 /// (no `.shepignore`, which the design says is a misconfiguration rather

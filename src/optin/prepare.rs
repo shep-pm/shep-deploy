@@ -372,12 +372,21 @@ pub async fn prepare_with<D: Daemon>(
     // resume, which is the opposite of what the doc above promises.
     // Setup runs no hook: a cutover must not touch the app's database.
     let crate::deploy::Staged {
-        app, spec, linked, ..
+        app,
+        spec,
+        linked,
+        cache,
+        ..
     } = {
-        let (tree, checkout, sha) = (tree.clone(), state.checkout.clone(), sha.clone());
+        let (tree, checkout, sha, remote) = (
+            tree.clone(),
+            state.checkout.clone(),
+            sha.clone(),
+            state.remote.clone(),
+        );
         let (app, settings) = (previous_config.clone(), settings.clone());
         shared::off_thread(move || {
-            crate::deploy::stage_release(&tree, &checkout, &sha, &app, &settings)
+            crate::deploy::stage_release(&tree, &checkout, &sha, &remote, &app, &settings)
         })
         .await?
     };
@@ -390,7 +399,7 @@ pub async fn prepare_with<D: Daemon>(
         &spec,
         app.user.as_deref(),
         &config.passthrough,
-        &tree.cache_target(),
+        &cache,
         config.build_timeout,
     )
     .await;

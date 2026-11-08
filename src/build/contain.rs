@@ -38,8 +38,9 @@ pub(super) fn lands_within(roots: &[PathBuf], candidate: &Path) -> bool {
     resolve_deepest(candidate).is_some_and(|real| roots.iter().any(|root| real.starts_with(root)))
 }
 
-/// The two places an artifact may really land, resolved: the release and
-/// the dog's own build cache for this sheep.
+/// The two approved roots an artifact may really land under, resolved: the
+/// release, and the build cache of the repository it was checked out from,
+/// which every sheep deploying that remote shares.
 ///
 /// `cache` is passed in rather than read from `release/target`, which is
 /// exactly the entry an attacker controls: `link_cache` leaves a release's

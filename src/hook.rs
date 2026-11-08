@@ -106,7 +106,8 @@ pub(crate) struct Context<'a> {
     pub passthrough: &'a [String],
     /// The dog's `build_timeout`.
     pub budget: Duration,
-    /// The build cache directory, handed over with the release.
+    /// The build cache of the repository being deployed, handed over with the
+    /// release.
     pub cache: &'a Path,
     /// Whether a build command ran in the release, which handed it over to
     /// `as_user` already.

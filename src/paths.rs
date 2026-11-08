@@ -11,9 +11,6 @@
 //! │                        below, or, on a tree set up before those
 //! │                        existed, a directory of its own
 //! ├── releases/<sha>/      a git worktree per built release
-//! ├── cache/target/        the dog's build cache, symlinked into every
-//! │                        release as `target` so builds stay warm and a
-//! │                        hardcoded `./target/release/x` still resolves
 //! ├── current -> releases/<sha>   swapped with rename(2) at cutover
 //! ├── complete/<sha>       per-release completion marker, kept outside the
 //! │                        release on purpose - see `Tree::completion`
@@ -22,7 +19,11 @@
 //!
 //! $SHEP_HOME/deploy/repos/<key>/
 //! ├── git/                 the shared bare clone, one per remote; see [`Repo`]
-//! └── git.lock             held while one fetch into it runs
+//! ├── git.lock             held while one fetch into it runs
+//! └── cache/target/        the dog's build cache, one per remote, symlinked
+//!                          into every release of every sheep that deploys
+//!                          that remote as `target`, so builds stay warm and a
+//!                          hardcoded `./target/release/x` still resolves
 //! ```
 
 use std::path::{Component, Path, PathBuf};
@@ -91,8 +92,9 @@ pub fn targets(shep_home: &Path) -> Result<Targets, Error> {
 /// called it. `setup` refuses it.
 pub const REPOS: &str = "repos";
 
-/// A bare clone shared by every tree whose remote is the same repository,
-/// at `$SHEP_HOME/deploy/repos/<key>/git`.
+/// One remote's shared directory, `$SHEP_HOME/deploy/repos/<key>`: the bare
+/// clone every tree with that remote links its `git` to, and the build cache
+/// they build against.
 ///
 /// The key is `<tail>-<hash>`: `tail` is the last path component of the
 /// normalized remote, reduced to `[A-Za-z0-9._-]` for whoever reads the
@@ -154,6 +156,27 @@ impl Repo {
     #[must_use]
     pub fn git(&self) -> PathBuf {
         self.root.join("git")
+    }
+
+    /// The build cache every tree that deploys this remote shares.
+    ///
+    /// Beside the clone the same remote keys, rather than inside any one
+    /// tree, so two sheep off one repository compile against one incremental
+    /// cache instead of building the same tree once per sheep.
+    #[must_use]
+    pub fn cache(&self) -> PathBuf {
+        self.root.join("cache")
+    }
+
+    /// The directory every release of this remote links in as `target`.
+    ///
+    /// Named `target` rather than pointed at by `CARGO_TARGET_DIR` because
+    /// setting that variable means `./target` is never created, and a build
+    /// command ending in `cp ./target/release/koji koji` then exits 1.
+    /// Measured, and the reason this is a symlink at all.
+    #[must_use]
+    pub fn cache_target(&self) -> PathBuf {
+        self.cache().join("target")
     }
 }
 
@@ -334,12 +357,27 @@ impl Tree {
     /// has nothing shared to spoil.
     #[must_use]
     pub fn clone_serves(&self, remote: &str) -> bool {
-        let Some(linked) = self.linked_clone() else {
-            return true;
-        };
-        self.root
-            .parent()
-            .is_some_and(|deploy| linked == Repo::keyed(&deploy.join(REPOS), remote))
+        self.linked_clone()
+            .is_none_or(|linked| linked == self.repo(remote))
+    }
+
+    /// The `deploy` directory this tree lives in, which is where the clones
+    /// and build caches shared between trees live.
+    fn deploy_dir(&self) -> &Path {
+        self.root.parent().unwrap_or(&self.root)
+    }
+
+    /// What `remote` shares between the trees beside this one: its clone and
+    /// its build cache.
+    ///
+    /// Keyed from the tree's own location rather than from `$SHEP_HOME`, so a
+    /// tree, the clone it links to and the cache it builds against are keyed
+    /// by one directory however the home is spelled. [`Self::for_sheep`] roots
+    /// every tree under a `deploy` directory, so a tree always has a parent;
+    /// one handed a root with none is keyed by that root.
+    #[must_use]
+    pub fn repo(&self, remote: &str) -> Repo {
+        Repo::keyed(&self.deploy_dir().join(REPOS), remote)
     }
 
     /// The directory holding every built release, one per sha.
@@ -417,25 +455,12 @@ impl Tree {
         self.root.join("deploy.toml.lock")
     }
 
-    /// The dog's own build cache for this sheep, shared by every release.
-    ///
-    /// Outside `releases/` deliberately: retention removes worktrees under
-    /// there, and a cache swept up with one would turn the next deploy into
-    /// a from-scratch build.
+    /// Shorthand for [`Repo::cache_target`] for the repository `remote`
+    /// names: the directory every release of that remote links in as
+    /// `target`, shared by every sheep that deploys it.
     #[must_use]
-    pub fn cache(&self) -> PathBuf {
-        self.root.join("cache")
-    }
-
-    /// The directory every release's `target` symlink points at.
-    ///
-    /// Named `target` rather than pointed at by `CARGO_TARGET_DIR` because
-    /// setting that variable means `./target` is never created, and a build
-    /// command ending in `cp ./target/release/koji koji` then exits 1.
-    /// Measured, and the reason this is a symlink at all.
-    #[must_use]
-    pub fn cache_target(&self) -> PathBuf {
-        self.cache().join("target")
+    pub fn cache_target(&self, remote: &str) -> PathBuf {
+        self.repo(remote).cache_target()
     }
 }
 
@@ -624,29 +649,78 @@ mod tests {
         assert_ne!(a.state_file(), b.state_file());
     }
 
-    /// fails if the cache moves out of the tree or changes name. Every
-    /// release symlinks `target` at this one path, so a release built
-    /// against a cache at one location and a later release linking another
-    /// would silently lose every incremental artifact between them, which
-    /// reads as "the build is just slow today".
+    /// fails if the cache moves out of `repos/<key>/` or changes name. Every
+    /// release symlinks `target` at this one path, so a release built against
+    /// a cache at one location and a later release linking another silently
+    /// loses every incremental artifact between them, which reads as "the
+    /// build is just slow today".
     #[test]
-    fn the_build_cache_lives_in_the_tree() {
+    fn the_build_cache_lives_beside_the_shared_clone() {
+        let remote = "https://github.com/shep-pm/koji";
         let tree = Tree::for_sheep(Path::new("/srv/shep"), "koji");
-        assert_eq!(tree.cache(), Path::new("/srv/shep/deploy/koji/cache"));
-        assert_eq!(
-            tree.cache_target(),
-            Path::new("/srv/shep/deploy/koji/cache/target")
+        let (repo, target) = (tree.repo(remote), tree.cache_target(remote));
+
+        assert_eq!(repo.cache(), repo.root().join("cache"));
+        assert_eq!(target, repo.cache().join("target"));
+
+        let rel = target
+            .strip_prefix("/srv/shep/deploy/repos")
+            .expect("under repos");
+        let parts: Vec<_> = rel.components().collect();
+        assert_eq!(parts.len(), 3, "<key>/cache/target, got {rel:?}");
+        assert_eq!(parts[1].as_os_str(), "cache");
+        assert_eq!(parts[2].as_os_str(), "target");
+        assert!(
+            matches!(parts[0], Component::Normal(_)),
+            "key is an ordinary component: {rel:?}"
         );
     }
 
-    /// fails if the cache is ever placed inside `releases/`. It has to
-    /// outlive every release it serves: retention removes worktrees under
-    /// `releases/`, and a cache swept up with one would make the next
-    /// deploy a from-scratch build, which for Koji is the exact outcome
-    /// this whole mechanism exists to avoid.
+    /// fails if two sheep of one remote build against different caches, or
+    /// two remotes against one. `bpm`, `ctm` and `opm` off one checkout are
+    /// one repository, and building it once per sheep is what this placement
+    /// exists to remove.
     #[test]
-    fn the_cache_is_not_inside_releases() {
+    fn two_sheep_of_one_remote_share_one_build_cache() {
+        let home = Path::new("/srv/shep");
+        let remote = "https://github.com/shep-pm/ReactMap";
+        let shared = Tree::for_sheep(home, "bpm").cache_target(remote);
+
+        assert_eq!(Tree::for_sheep(home, "ctm").cache_target(remote), shared);
+        assert_eq!(Tree::for_sheep(home, "opm").cache_target(remote), shared);
+        assert_ne!(
+            Tree::for_sheep(home, "bpm").cache_target("https://github.com/shep-pm/other"),
+            shared,
+            "another remote is another cache"
+        );
+    }
+
+    /// fails if the cache lands inside a tree after all. A tree is per sheep,
+    /// and a cache in one is per sheep too: every sheep of one remote would
+    /// rebuild the same tree on its own, with nothing anywhere saying so.
+    #[test]
+    fn the_build_cache_is_not_inside_a_tree() {
         let tree = Tree::for_sheep(Path::new("/srv/shep"), "koji");
-        assert!(!tree.cache().starts_with(tree.releases()));
+        let cache = tree.repo("https://github.com/shep-pm/koji").cache();
+
+        assert!(!cache.starts_with(tree.root()), "{cache:?}");
+        assert!(!cache.starts_with(tree.releases()), "{cache:?}");
+    }
+
+    /// fails if a tree that owns its clone stops sharing the cache. The cache
+    /// is keyed by remote, not by which clone a tree uses, so a tree set up
+    /// before clones were shared warms the same cache as the trees linked to
+    /// the shared one.
+    #[test]
+    fn a_tree_that_owns_its_clone_shares_the_remote_cache() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let remote = "https://example.com/koji";
+        let owned = Tree::for_sheep(home.path(), "koji");
+        std::fs::create_dir_all(owned.git()).expect("a clone of its own");
+        let sibling = Tree::for_sheep(home.path(), "koji-staging");
+
+        assert!(owned.owns_clone());
+        assert_eq!(owned.cache_target(remote), sibling.cache_target(remote));
+        assert!(!owned.cache_target(remote).starts_with(owned.root()));
     }
 }

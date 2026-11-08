@@ -29,7 +29,7 @@ rules in 6.7.
 The ruleset almost writes itself, because a build genuinely needs very little:
 
 ```text
-write:  <release>, <tree>/cache, /tmp
+write:  <release>, <repos>/<key>/cache, /tmp
 read:   /usr, /lib, /etc/ssl, the toolchain's own cache
 deny:   everything else, including $SHEP_HOME/deploy/*/deploy.toml
 ```
@@ -164,7 +164,7 @@ version that was tried and was wrong.
    follows one, to a root and no further.
 
 2. **Confinement to the release alone is too tight.** That link points at
-   `<tree>/cache/target`, the release's sibling. A release-rooted `openat2`
+   `deploy/repos/<key>/cache/target`, beside the shared clone. A release-rooted `openat2`
    with `RESOLVE_IN_ROOT` reinterprets an absolute target against the release
    and clamps a relative one climbing out, so the link resolves nowhere useful.
    That was the second attempt. The walk anchors at whichever of the two roots

@@ -220,9 +220,15 @@ async fn land_staged<D: Daemon>(
 ) -> Result<Outcome, Error> {
     let started_at = swap::resolve(&tree.current())?;
     let staged = {
-        let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
+        let (tree, checkout, head, remote) = (
+            tree.clone(),
+            state.checkout.clone(),
+            head.to_owned(),
+            state.remote.clone(),
+        );
         let (app, settings) = (app.clone(), settings.clone());
-        shared::off_thread(move || read_staged(&tree, &checkout, &head, &app, &settings)).await?
+        shared::off_thread(move || read_staged(&tree, &checkout, &head, &remote, &app, &settings))
+            .await?
     };
     refuse_ungated_verification(tree.sheep(), &staged.app, state.verify)?;
     run_release_hook(tree, head, &staged, config).await?;
@@ -241,10 +247,21 @@ async fn build_and_record<D: Daemon>(
 ) -> Result<(), Error> {
     let sheep = tree.sheep();
     let release = tree.release(head);
-    let deploy::Staged { spec, linked, .. } = {
-        let (tree, checkout, head) = (tree.clone(), state.checkout.clone(), head.to_owned());
+    let deploy::Staged {
+        spec,
+        linked,
+        cache,
+        ..
+    } = {
+        let (tree, checkout, head, remote) = (
+            tree.clone(),
+            state.checkout.clone(),
+            head.to_owned(),
+            state.remote.clone(),
+        );
         let (app, settings) = (app.clone(), settings.clone());
-        shared::off_thread(move || stage_release(&tree, &checkout, &head, &app, &settings)).await?
+        shared::off_thread(move || stage_release(&tree, &checkout, &head, &remote, &app, &settings))
+            .await?
     };
     refuse_ungated_verification(sheep, app, state.verify)?;
     let snapshot = linkcheck::Snapshot::before(sheep, &release, &linked);
@@ -254,7 +271,7 @@ async fn build_and_record<D: Daemon>(
         &spec,
         app.user.as_deref(),
         &config.passthrough,
-        &tree.cache_target(),
+        &cache,
         config.build_timeout,
     )
     .await;

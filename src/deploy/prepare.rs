@@ -2,7 +2,7 @@
 //! checking it out, and refusing a configuration that could not verify it.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use shep_client::shep_core::config::AppConfig;
 
@@ -16,17 +16,27 @@ use crate::{git, linkcheck, shared};
 
 /// What [`stage_release`] hands its callers: the app to register, the build
 /// to run and the hooks to run after it (both from the sheep's
-/// [`Settings`]), and the paths linked in from the operator's checkout,
-/// which [`linkcheck::Snapshot`] needs around the build.
+/// [`Settings`]), the paths linked in from the operator's checkout, which
+/// [`linkcheck::Snapshot`] needs around the build, and the build cache the
+/// release's `target` was linked at.
+///
+/// The cache is here rather than re-derived at each use so the directory the
+/// build writes through, the one its artifacts are confined to, and the one
+/// the hooks are handed are the same path, decided once, where the link was
+/// made.
 pub(crate) struct Staged {
     pub(crate) app: AppConfig,
     pub(crate) spec: BuildSpec,
     pub(crate) hooks: Hooks,
     pub(crate) linked: shared::FromCheckout,
+    pub(crate) cache: PathBuf,
 }
 
 /// Everything between a sha and its build: the worktree, the cache link, and
 /// the operator's shared files.
+///
+/// `remote` picks the cache, which is keyed per remote and not per sheep, and
+/// must be the one this tree's clone serves.
 ///
 /// One function because two callers, [`super::attempt`] and
 /// [`crate::optin::prepare_with`], had the same seven lines, and because all of
@@ -42,16 +52,17 @@ pub(crate) fn stage_release(
     tree: &Tree,
     checkout: &Path,
     sha: &str,
+    remote: &str,
     app: &AppConfig,
     settings: &Settings,
 ) -> Result<Staged, Error> {
-    let release = tree.release(sha);
+    let (release, cache) = (tree.release(sha), tree.cache_target(remote));
     checkout_release(tree, sha)?;
-    shared::link_cache(&release, &tree.cache_target())?;
+    shared::link_cache(&release, &cache)?;
     let linked = shared::to_link(checkout)?;
     shared::link_into(&release, checkout, &linked)?;
 
-    let staged = staged(app, settings, linked);
+    let staged = staged(app, settings, linked, cache);
     // Printed here rather than returned, as `build::root_warning` is: nothing
     // is refused, and `deploy` and `setup` both come through this function.
     for warning in linkcheck::warnings(tree.sheep(), &staged.linked, &staged.spec.artifacts) {
@@ -62,7 +73,8 @@ pub(crate) fn stage_release(
 
 /// What [`stage_release`] answers, for a release it staged earlier: the
 /// operator's shared files are linked in again, with no checkout and no cache
-/// link.
+/// link. Its `cache` is the one that link was made at, which is what the
+/// hooks and the artifact copies run against.
 ///
 /// # Errors
 /// As [`stage_release`], less the checkout and the cache link.
@@ -70,21 +82,28 @@ pub(crate) fn read_staged(
     tree: &Tree,
     checkout: &Path,
     sha: &str,
+    remote: &str,
     app: &AppConfig,
     settings: &Settings,
 ) -> Result<Staged, Error> {
     let release = tree.release(sha);
     let linked = shared::to_link(checkout)?;
     shared::link_into(&release, checkout, &linked)?;
-    Ok(staged(app, settings, linked))
+    Ok(staged(app, settings, linked, tree.cache_target(remote)))
 }
 
-fn staged(app: &AppConfig, settings: &Settings, linked: shared::FromCheckout) -> Staged {
+fn staged(
+    app: &AppConfig,
+    settings: &Settings,
+    linked: shared::FromCheckout,
+    cache: PathBuf,
+) -> Staged {
     Staged {
         app: app.clone(),
         spec: settings.build_spec(),
         hooks: settings.hooks(),
         linked,
+        cache,
     }
 }
 
@@ -275,6 +294,7 @@ mod tests {
     };
     use crate::deploy::{Outcome, deploy};
     use crate::fixtures;
+    use crate::paths;
     use crate::swap;
 
     /// fails if a marker the DEPLOYED REPOSITORY committed is trusted.
@@ -416,6 +436,7 @@ mod tests {
             &fixture.tree,
             &fixture.state.checkout,
             &second,
+            &fixture.state.remote,
             &stored,
             &settings,
         )
@@ -427,6 +448,52 @@ mod tests {
         assert_eq!(staged.app, stored);
         assert_eq!(staged.app.script, "./run.sh");
         assert_eq!(staged.app.user, None);
+    }
+
+    /// fails if a release links `target` at a cache of its own, or at one the
+    /// build then writes through a different path. Two sheep of one remote
+    /// would build the same tree once each, and the artifacts a build leaves
+    /// in the cache would be copied from a directory nothing linked.
+    #[test]
+    fn a_release_links_target_at_the_repository_cache() {
+        let fixture = fixture_with_previous_release();
+        let second = commit_on_origin(&fixture, "second.txt");
+        crate::git::fetch(
+            &fixture.tree.git(),
+            &fixture.state.remote,
+            "main",
+            fixtures::TEST_BUDGET,
+        )
+        .expect("fetch");
+        let stored = fixtures::gated_app("web", FIXTURE_TABLE);
+        let settings = crate::settings::from_app("web", &crate::fixtures::no_section(), &stored)
+            .expect("settings");
+
+        let staged = super::stage_release(
+            &fixture.tree,
+            &fixture.state.checkout,
+            &second,
+            &fixture.state.remote,
+            &stored,
+            &settings,
+        )
+        .expect("staged");
+
+        let link = fixture.tree.release(&second).join("target");
+        assert_eq!(fs::read_link(&link).expect("a target link"), staged.cache);
+        assert!(staged.cache.is_dir(), "the cache exists before the link");
+
+        let repos = fixture.home.path().join("deploy").join(paths::REPOS);
+        assert!(
+            staged.cache.starts_with(&repos),
+            "{:?} under {repos:?}",
+            staged.cache
+        );
+        assert!(
+            !staged.cache.starts_with(fixture.tree.root()),
+            "the cache is not inside the tree: {:?}",
+            fixture.tree.root()
+        );
     }
 
     /// fails if a `probed` target with no readiness probe is deployed

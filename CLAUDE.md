@@ -166,7 +166,7 @@ exist and each has a precise edge:
   the CHILD. Anything the parent does afterwards on paths the child chose is
   outside it. A path-traversal in `build.artifacts` exploited exactly that gap
   on 2026-08-28 and reached the tree's own `deploy.toml`. A root dog first
-  hands the release and `cache_target()` itself to `user` (`ownership.rs`),
+  hands the release and `Tree::cache_target(remote)` itself to `user` (`ownership.rs`),
   by descriptor, never by path, skipping symlinks, files with a second hard
   link and the root `.git` file, which it writes back after the build because
   owning the directory lets the build replace it; every other write root makes into a release must stay handle-based too.
@@ -301,6 +301,13 @@ class rather than the instances.
   `remote` is not the one its link was keyed by (`Tree::clone_serves`). Only
   `optin::clone::share_clone` migrates a tree that owns its clone, and only one
   with no record: `prepare` refuses a target, so the poll loop moves nothing.
+- **The build cache is keyed by remote, not by sheep.** `Tree::cache_target(remote)`
+  is `deploy/repos/<key>/cache/target`, the same `<key>` the clone is keyed by
+  (`Tree::repo`), and `shared::link_cache` symlinks `release/target` there, so
+  sheep off one repository share one incremental cache. A tree that owns its
+  clone shares it too. `retention::release_clone` removes the whole repository
+  directory, cache included, and `ownership::hand_over` hands only the cache
+  directory itself to `user`, never what is in it.
 - **Never derive the markers directory from `Tree::completion("")`.** The
   result has a trailing separator and its `parent()` is the tree root; a sweep
   written that way removed `current`. `Tree::completions()` is the directory.

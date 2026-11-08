@@ -3,8 +3,8 @@
 //!
 //! The build runs as `user` in a release the dog created as root, so the
 //! release has to belong to that user for the build to write in it. Only the
-//! release and the build cache directory change hands; everything else in the
-//! tree stays root's. See [`hand_over`].
+//! release and the build cache of the repository it was checked out from
+//! change hands; everything else in the tree stays root's. See [`hand_over`].
 
 use std::ffi::OsStr;
 use std::io;
@@ -129,7 +129,7 @@ fn walk_dir(
     Ok(())
 }
 
-/// Visits the build cache directory itself and nothing under it.
+/// Visits the repository build cache directory itself and nothing under it.
 ///
 /// An absent directory is nothing to hand over: the cache is made when the
 /// release is staged, and a release that brought its own `target` has no use
@@ -153,7 +153,8 @@ pub(crate) fn is_due(euid: Option<u32>, uid: u32) -> bool {
 }
 
 /// Gives `uid` and `gid` the release, the files and directories in it, and
-/// the build cache directory `cache_target`, and nothing else.
+/// the build cache directory `cache_target` of the repository that release
+/// was checked out from, and nothing else.
 ///
 /// The release root is created by the dog, so the build user cannot write in
 /// it until it is handed over. Each entry is changed through a descriptor the
@@ -163,10 +164,12 @@ pub(crate) fn is_due(euid: Option<u32>, uid: u32) -> bool {
 /// so is the `.git` pointer at the release root, which the build can still
 /// replace because it owns the directory; see [`walk_release`] and
 /// [`pin_git_pointer`].
-/// `cache_target` is changed itself and not what is in it.
+/// `cache_target` is changed itself and not what is in it. It is shared by
+/// every sheep that deploys that remote, so what is inside belongs to whoever
+/// built it last.
 ///
-/// Everything else in the tree, including `releases/` above the release,
-/// stays the dog's.
+/// Everything else in the tree, including `releases/` above the release, and
+/// the shared clone beside the cache, stays the dog's.
 ///
 /// # Errors
 /// [`Error::Config`] if `uid` or `gid` is `u32::MAX`, which is no account's.

@@ -237,6 +237,11 @@ the case of its scheme and host folded away, so `https://host/x` and
 `git@host:x` against `https://host/x` stays two. A sheep cannot be called
 `repos`. Fetches into one clone take turns on `git.lock` beside it.
 
+The same key holds the build cache: `deploy/repos/<key>/cache/target`,
+symlinked into every release of every sheep that deploys that remote as
+`target`. Sheep off one repository compile it once between them instead of
+once each, and a build that hardcodes `./target/release/koji` still resolves.
+
 Removing the dog lets go of the link of each sheep it puts back, and of each
 whose cutover never landed; the clone goes with the last link. A sheep left
 running from its tree keeps its link, and so the clone. A deploy whose recorded
@@ -688,8 +693,10 @@ Set `user` on the app and the build drops to that user's uid and primary group,
 with the shepherd's supplementary groups cleared, before it runs anything. A
 compromised build then gets that app's privileges and nothing more.
 
-Under a root shepherd the build user owns its release and its build cache
-directory (`target`, the directory only, not what is in it) and nothing else.
+Under a root shepherd the build user owns its release and the build cache
+directory of the repository it deploys (`target`, the directory only, not what
+is in it) and nothing else. That cache is shared by every sheep deploying that
+remote, so what is inside it belongs to whichever build wrote it last.
 The dog hands those over just before the build, or before the release hook (or the
 after hook) when the app has no build command, through open directory handles
 and never through paths, and skips every symlink, every file with a second
@@ -719,7 +726,8 @@ private repository still clones; only the build loses the socket. Name it in
 `passthrough` if a build genuinely needs it.
 
 `artifacts` may only name paths that really land inside the release or
-the dog's own build cache, resolved rather than spelled. A `..`, an absolute
+the build cache of the repository being deployed, resolved rather than
+spelled. A `..`, an absolute
 path, a committed symlink, or a `CARGO_TARGET_DIR` pointing elsewhere are all
 refused. That is narrower than it was: a build whose output genuinely lands
 outside both is no longer copyable, because the copy runs in the dog's own
