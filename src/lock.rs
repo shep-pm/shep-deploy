@@ -56,6 +56,20 @@
 //! first and this one inside it; nothing holding this one ever waits for a
 //! tree's, or for a record's. A clone a tree still owns by itself has the same
 //! lock beside it, taken by the same fetch, and nobody else contends for it.
+//!
+//! # The fourth lock
+//!
+//! [`hold_build`] is the build turn for one repository, on `git.build.lock`
+//! beside the same resolved clone [`hold_clone`] guards. The tree lock is per
+//! sheep and says nothing between two sheep of one remote: Rin runs `bpm`,
+//! `ctm` and `opm` off one `ReactMap` checkout, and nothing stopped all three
+//! checking out and building at once, each with the machine to itself and each
+//! writing into one clone. Blocking, like the record and clone locks, because
+//! a deploy wants its turn and not a refusal, and bounded because every
+//! holder's build is bounded by `build_timeout`. A deploy takes it inside the
+//! tree lock, after its fetch, and lets go at the swap, so builds of one
+//! repository queue and reloads never do. Nothing holding it waits for a
+//! tree's, a record's or a clone's.
 
 use std::fs::{File, OpenOptions, Permissions};
 use std::io;
@@ -76,6 +90,12 @@ use crate::paths::Tree;
 /// it forever and every deploy of that sheep would report
 /// [`Error::AlreadyDeploying`] against a rival that is not a deploy at all.
 const LOCK_MODE: u32 = 0o600;
+
+/// The clone lock's name beside its clone: `git` becomes `git.lock`.
+const CLONE_LOCK: &str = "lock";
+
+/// The build lock's, beside the same clone: `git.build.lock`.
+const BUILD_LOCK: &str = "build.lock";
 
 /// An exclusive hold on one sheep's deploy tree.
 ///
@@ -162,6 +182,38 @@ pub struct Cloning {
 /// [`Error::Io`], naming the lock file, if it cannot be created or the lock
 /// cannot be taken.
 pub fn hold_clone(git_dir: &std::path::Path) -> Result<Cloning, Error> {
+    hold_beside_clone(git_dir, CLONE_LOCK).map(|_held| Cloning { _held })
+}
+
+/// An exclusive hold on one repository's build turn, for one build.
+///
+/// Released when dropped, and by the kernel if the holder dies. Keyed by
+/// repository rather than by tree because the tree lock is per sheep and two
+/// sheep of one remote have two trees.
+#[derive(Debug)]
+pub struct Building {
+    /// Held for its `Drop`.
+    _held: Flock<File>,
+}
+
+/// Takes the build turn for the repository `tree` fetches from, waiting for
+/// whoever is building it now.
+///
+/// The lock is beside the same resolved clone [`hold_clone`] guards, so two
+/// trees whose `git` links name one clone queue behind each other. A tree that
+/// owns its clone has the turn beside its own clone and contends with nothing.
+///
+/// # Errors
+/// [`Error::Io`], naming the lock file, if it cannot be created or the lock
+/// cannot be taken. Never [`Error::AlreadyDeploying`]: contention here is
+/// waited out, not reported.
+pub fn hold_build(tree: &Tree) -> Result<Building, Error> {
+    hold_beside_clone(&tree.git(), BUILD_LOCK).map(|_held| Building { _held })
+}
+
+/// Holds `lock` beside the clone `git_dir` resolves to, waiting for whoever
+/// has it, and keeping the file that is really at that path.
+fn hold_beside_clone(git_dir: &std::path::Path, lock: &str) -> Result<Flock<File>, Error> {
     use std::os::unix::fs::MetadataExt;
 
     // Made first, so the path resolves the same before the clone exists as
@@ -171,7 +223,7 @@ pub fn hold_clone(git_dir: &std::path::Path) -> Result<Cloning, Error> {
     if let Some(parent) = git_dir.parent() {
         std::fs::create_dir_all(parent).map_err(Error::at(parent))?;
     }
-    let path = crate::shared::resolved(git_dir).with_extension("lock");
+    let path = crate::shared::resolved(git_dir).with_extension(lock);
     loop {
         let file = open_lock_file(&path)?;
         let held = match Flock::lock(file, FlockArg::LockExclusive) {
@@ -190,7 +242,7 @@ pub fn hold_clone(git_dir: &std::path::Path) -> Result<Cloning, Error> {
         let ours = held.metadata().map_err(Error::at(&path))?;
         match std::fs::metadata(&path) {
             Ok(at_path) if (at_path.dev(), at_path.ino()) == (ours.dev(), ours.ino()) => {
-                return Ok(Cloning { _held: held });
+                return Ok(held);
             }
             Ok(_) => {}
             Err(source) if source.kind() == io::ErrorKind::NotFound => {}
@@ -420,6 +472,108 @@ mod tests {
                 fixtures::head_of(origin.path())
             );
         }
+    }
+
+    /// One shared bare clone with two trees whose `git` links name it, and one
+    /// tree with a clone of its own.
+    fn one_clone_two_trees(home: &std::path::Path) -> (Tree, Tree, Tree) {
+        let clone = home.join("repos").join("k").join("git");
+        crate::git::init_bare(&clone).expect("bare");
+        let linked = |name: &str| {
+            let tree = Tree::for_sheep(home, name);
+            std::fs::create_dir_all(tree.root()).expect("tree");
+            std::os::unix::fs::symlink(&clone, tree.git()).expect("link");
+            tree
+        };
+        let own = Tree::for_sheep(home, "own");
+        std::fs::create_dir_all(own.git()).expect("its own clone");
+        (linked("web"), linked("worker"), own)
+    }
+
+    /// fails if two builds of one clone run at once, or if a build of another
+    /// repository waits for them. Two sheep of one remote are two trees, so the
+    /// tree lock never meets between them.
+    #[test]
+    fn a_build_waits_for_the_other_build_of_one_clone() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let (web, worker, other) = one_clone_two_trees(home.path());
+
+        let held = hold_build(&web).expect("the first build");
+
+        let (turn, heard) = std::sync::mpsc::channel();
+        let waiting = std::thread::spawn(move || {
+            let second = hold_build(&worker).expect("the second build");
+            turn.send(()).expect("report");
+            drop(second);
+        });
+        assert!(
+            heard
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "the second build of one clone must wait for the first"
+        );
+
+        let (free, heard_free) = std::sync::mpsc::channel();
+        let elsewhere = std::thread::spawn(move || {
+            let build = hold_build(&other).expect("a build of another repository");
+            free.send(()).expect("report");
+            drop(build);
+        });
+        heard_free
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("a build of another repository does not wait for this one");
+
+        drop(held);
+        heard
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the waiting build gets its turn once the first lets go");
+        waiting.join().expect("thread");
+        elsewhere.join().expect("thread");
+    }
+
+    /// fails if a build holds up a fetch into the same clone, or a fetch holds
+    /// up a build. The poll loop fetches every target on every tick; only the
+    /// builds of one repository queue.
+    #[test]
+    fn a_build_and_a_fetch_into_one_clone_do_not_queue_behind_each_other() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let origin = fixtures::checkout(&[("a", "a")]);
+        let remote = origin.path().to_str().expect("utf-8").to_owned();
+        let clone = home.path().join("repos").join("k").join("git");
+        crate::git::init_bare(&clone).expect("bare");
+        let linked = |name: &str| {
+            let tree = Tree::for_sheep(home.path(), name);
+            std::fs::create_dir_all(tree.root()).expect("tree");
+            std::os::unix::fs::symlink(&clone, tree.git()).expect("link");
+            tree
+        };
+        let (web, worker) = (linked("web"), linked("worker"));
+
+        let building = hold_build(&web).expect("the build");
+        let (fetched, heard) = std::sync::mpsc::channel();
+        let fetching = std::thread::spawn(move || {
+            crate::git::fetch(&worker.git(), &remote, "main", fixtures::TEST_BUDGET)
+                .expect("fetch");
+            fetched.send(()).expect("report");
+        });
+        heard
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("a fetch runs while a build of the same clone holds its turn");
+        fetching.join().expect("thread");
+        drop(building);
+
+        let cloning = hold_clone(&clone).expect("the fetch");
+        let (turn, heard) = std::sync::mpsc::channel();
+        let waiting = std::thread::spawn(move || {
+            let build = hold_build(&web).expect("the build");
+            turn.send(()).expect("report");
+            drop(build);
+        });
+        heard
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a build takes its turn while the clone is held for a fetch");
+        waiting.join().expect("thread");
+        drop(cloning);
     }
 
     /// fails if two holds on one tree can be taken at once.

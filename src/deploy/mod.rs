@@ -46,6 +46,14 @@
 //! silent: a *newer* release, verified and healthy, reverted by an older
 //! deploy's swap with nothing anywhere reporting a problem.
 //!
+//! # Two deploys of one repository
+//!
+//! The tree lock is per sheep, so it says nothing between two sheep whose
+//! remote is one repository: `bpm`, `ctm` and `opm` off one `ReactMap`
+//! checkout are three trees. [`attempt`] takes [`crate::lock::hold_build`]
+//! before the build and lets go at the swap, so the builds of one repository
+//! queue and the reloads never do. See [`crate::lock`].
+//!
 //! # A stale `current.tmp`
 //!
 //! [`crate::swap::point_at`] replaces a temporary symlink left by an
@@ -139,7 +147,7 @@ pub enum Outcome {
 /// recognise it.
 ///
 /// Anything the steps before the swap return - see [`crate::git::fetch`],
-/// [`crate::shared::to_link`] and
+/// [`crate::shared::to_link`], [`crate::lock::hold_build`] and
 /// [`crate::build::run`] - in which case nothing has been disturbed and the
 /// old release is still serving. [`Error::Raced`] if `current` moved while
 /// this deploy was preparing, which is refused rather than swapped over.
@@ -374,6 +382,16 @@ async fn attempt<D: Daemon>(
         shared::off_thread(move || stage_release(&tree, &checkout, &head, &app, &settings)).await?
     };
     refuse_ungated_verification(sheep, &staged.app, state.verify)?;
+    // The build turn for this repository, taken inside the tree lock and let
+    // go at the swap below. The tree lock is per sheep and says nothing
+    // between two sheep of one remote. See [`crate::lock`].
+    //
+    // Off the runtime's thread: the wait is for another sheep's build, which
+    // `build_timeout` bounds at an hour by default.
+    let building = {
+        let tree = tree.clone();
+        shared::off_thread(move || lock::hold_build(&tree)).await?
+    };
     let snapshot = linkcheck::Snapshot::before(sheep, &release, &staged.linked);
     let built = build::run(
         sheep,
@@ -392,12 +410,17 @@ async fn attempt<D: Daemon>(
     }
     built?;
     run_release_hook(tree, head, &staged, config).await?;
+    // Let go at the swap, not at the end of the deploy: the lock is the
+    // build's, and a reload of another sheep of the same repository must never
+    // queue behind one.
+    drop(building);
 
     swap_and_land(daemon, tree, state, head, started_at, &staged, config).await
 }
 
 #[cfg(test)]
 mod tests {
+    mod build_lock;
     mod clones;
     mod hooks;
     mod retarget;
