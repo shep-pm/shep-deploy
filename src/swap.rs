@@ -173,8 +173,14 @@ pub struct Claim {
 /// held.
 ///
 /// Take it under the repository build turn (see [`crate::lock::hold_build`]),
-/// before the release is checked out or reused: the claim is only a witness if
-/// every prune that could remove the release has to queue behind it.
+/// before the release is checked out or reused: [`crate::retention::prune`]
+/// takes that same turn for its whole sweep, so a prune either runs before this
+/// claim exists, in which case the release it removes carries no completion
+/// marker either and the next deploy checks out and builds afresh, or after it,
+/// in which case the claim is a witness. [`crate::stage::promote`] claims
+/// without the turn, and needs no turn to hold the release: what it lands is
+/// already built and already named `staged` in the record, which is a witness on
+/// its own.
 ///
 /// # Errors
 /// [`Error::Io`], naming the claim, if it cannot be written.
