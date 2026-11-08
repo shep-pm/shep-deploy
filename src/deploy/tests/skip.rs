@@ -1,5 +1,6 @@
-//! A push that changes none of a target's declared paths: when the poll loop
-//! leaves it alone, and when it does not.
+//! When the poll loop leaves a push alone, and when it does not: a push that
+//! changes none of a target's declared paths, and a push whose build produced
+//! the script that target is already serving.
 
 use std::fs;
 
@@ -9,7 +10,7 @@ use crate::deploy::test_support::{
 use crate::deploy::{Outcome, deploy, unattended};
 use crate::paths::Tree;
 use crate::state::State;
-use crate::{fixtures, git, swap};
+use crate::{fixtures, git, skip, swap};
 
 /// The `reload` setting of a sheep that runs from `cmd/voting` alone.
 const RELOAD: &str = "reload = ['cmd/voting']\n";
@@ -75,7 +76,8 @@ async fn an_unattended_deploy_skips_a_push_outside_the_paths() {
     assert_eq!(
         outcome,
         Outcome::Skipped {
-            sha: pushed.clone()
+            sha: pushed.clone(),
+            reason: skip::Reason::ReloadPaths
         }
     );
     assert_eq!(shepherd.reload_count(), 0);
@@ -127,7 +129,8 @@ async fn a_skipped_push_counts_toward_the_next_real_one() {
     assert_eq!(
         first,
         Outcome::Skipped {
-            sha: skipped.clone()
+            sha: skipped.clone(),
+            reason: skip::Reason::ReloadPaths
         }
     );
 
@@ -236,7 +239,13 @@ async fn two_sheep_with_different_reload_lists_deploy_only_the_one_the_push_touc
             sha: pushed.clone()
         }
     );
-    assert_eq!(bot_outcome, Outcome::Skipped { sha: pushed });
+    assert_eq!(
+        bot_outcome,
+        Outcome::Skipped {
+            sha: pushed,
+            reason: skip::Reason::ReloadPaths
+        }
+    );
     assert_eq!(voting_daemon.reload_count(), 1);
     assert_eq!(bot_daemon.reload_count(), 0);
 }

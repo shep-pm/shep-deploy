@@ -114,12 +114,15 @@ pub enum Outcome {
         /// Why the new release was rejected.
         why: String,
     },
-    /// The branch moved, but nothing under the target's the sheep's `reload`
-    /// paths changed, so nothing was built or reloaded and the record is as it
-    /// was. Only [`unattended`] answers this.
+    /// The branch moved, but nothing the sheep runs from came with it, so
+    /// nothing was swapped and the record is as it was. Only [`unattended`]
+    /// answers this.
     Skipped {
         /// The head that was left alone.
         sha: String,
+        /// Whether its reload paths were untouched, or its build produced the
+        /// script already serving.
+        reason: skip::Reason,
     },
 }
 
@@ -211,9 +214,9 @@ pub enum Outcome {
 /// never turns a deploy that already succeeded into one this function
 /// reports as failed.
 ///
-/// Every ending that is not [`Outcome::Deployed`] is written into
-/// `state.failed`, which is what [`unattended`] holds on and what an
-/// operator asking by name ignores. See [`record::record`].
+/// Every ending that is neither [`Outcome::Deployed`] nor [`Outcome::Skipped`]
+/// is written into `state.failed`, which is what [`unattended`] holds on and
+/// what an operator asking by name ignores. See [`record::record`].
 pub async fn deploy<D: Daemon>(
     daemon: &D,
     tree: &Tree,
@@ -235,6 +238,15 @@ pub async fn deploy<D: Daemon>(
 /// checked out, built or reloaded, and the record is not written, so the next
 /// comparison is still against the last sha actually deployed. See
 /// [`crate::skip`]. A failure to decide deploys as if there were no table.
+///
+/// A sheep with `reload_script` set is skipped later too, on the bytes its
+/// build produced rather than on the paths a push touched. That one is checked
+/// out and built, and then swaps nothing and records nothing, for the same
+/// reason: the record names what is serving, and `crate::retention` spares the
+/// release it names whatever its age. What it compares against is the digest
+/// that record has been carrying since the last landing, which is the only
+/// thing that identifies this sheep's own binary once the repository's build
+/// cache is shared - see [`crate::skip`].
 ///
 /// # Errors
 /// [`Error::Held`] if the branch head is the sha `state.failed` names, in
@@ -350,11 +362,14 @@ async fn go<D: Daemon>(
     // After the hold, so a sha that already failed is still said once rather
     // than judged again, and only for the poll loop: a hand deploy means now.
     if held == Held::Hold && skip::nothing_changed(tree, state, &settings.reload, &head).await {
-        return Ok(Outcome::Skipped { sha: head });
+        return Ok(Outcome::Skipped {
+            sha: head,
+            reason: skip::Reason::ReloadPaths,
+        });
     }
 
     let outcome = attempt(
-        daemon, tree, state, &head, started_at, &app, &settings, config,
+        daemon, tree, state, &head, started_at, &app, &settings, config, held,
     )
     .await;
     record(daemon, tree, state, &head, &outcome, config).await;
@@ -368,6 +383,15 @@ async fn go<D: Daemon>(
 /// Split out of [`go`] so that recording what the attempt came to has one
 /// place to happen rather than five. See [`deploy`] for what each ending
 /// means.
+///
+/// A sheep with `reload_script` set, asked for by the poll loop rather than by
+/// an operator, ends here before the release hook: its build is compared with
+/// the script its last landing recorded in [`State::served_script`], and an
+/// unchanged one runs no hook, swaps nothing and records nothing.
+///
+/// The digest of this build's script is taken here and nowhere else, inside the
+/// repository's build turn, and handed to [`swap_and_land`] to record beside the
+/// sha it lands.
 #[expect(clippy::too_many_arguments, reason = "one deploy, one call site")]
 async fn attempt<D: Daemon>(
     daemon: &D,
@@ -378,6 +402,7 @@ async fn attempt<D: Daemon>(
     app: &AppConfig,
     settings: &Settings,
     config: &DogConfig,
+    held: Held,
 ) -> Result<Outcome, Error> {
     let sheep = tree.sheep();
     // The build turn for this repository, taken before the release is checked
@@ -434,13 +459,56 @@ async fn attempt<D: Daemon>(
     if !staged.reused {
         mark_built(&staged.marker)?;
     }
+    // The digest of the script this build produced, taken once, here, and
+    // handed to both jobs that need it: the compare just below and the record
+    // the landing writes.
+    //
+    // Inside the build turn, and never re-read once it is let go. A compiled
+    // app's script is a file in the repository's shared build cache, and every
+    // other sheep of this remote can rebuild that file the moment the turn is
+    // not held. Read it after the turn and an operator's `shep-deploy deploy
+    // <other sheep>` landing between this deploy's swap and its record has this
+    // one recording the other's binary as the one it is running - and every
+    // later build matching that binary is then skipped, with the sheep left on
+    // the release it was already serving. Round 4 of #184's review found that
+    // window, and the digest being the one this build wrote is the whole of
+    // what makes the compare mean anything: see [`crate::skip`].
+    //
+    // Ahead of the release hook, so a skip runs none of it and so that the
+    // compared digest and the recorded one are the same stage of the pipeline.
+    let stamp = skip::stamp(&staged.app, &staged.release).await;
+    // Compared with this tree's own record and never with the live release. A
+    // record written before the field, or a tree the cutover has served but no
+    // deploy has landed yet, holds nothing to compare with, and deploys.
+    if held == Held::Hold && settings.reload_script {
+        match &stamp {
+            Ok(stamp) if state.served_script.as_deref() == Some(stamp.as_str()) => {
+                return Ok(Outcome::Skipped {
+                    sha: head.to_owned(),
+                    reason: skip::Reason::UnchangedScript,
+                });
+            }
+            Ok(_) => {}
+            Err(why) => {
+                eprintln!(
+                    "shep-deploy: {sheep}: cannot compare its built script, deploying it: {why}"
+                );
+            }
+        }
+    }
+    // Recorded whether or not the sheep asked for the compare, so turning the
+    // key on needs no deploy first. A script this dog cannot read records none.
+    let stamp = stamp.ok();
     run_release_hook(tree, head, &staged, config).await?;
     // Let go at the swap, not at the end of the deploy: the lock is the
     // build's, and a reload of another sheep of the same repository must never
     // queue behind one.
     drop(building);
 
-    swap_and_land(daemon, tree, state, head, started_at, &staged, config).await
+    swap_and_land(
+        daemon, tree, state, head, started_at, &staged, stamp, config,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -448,6 +516,7 @@ mod tests {
     mod build_lock;
     mod clones;
     mod hooks;
+    mod reload_script;
     mod retarget;
     mod reuse;
     mod settings;

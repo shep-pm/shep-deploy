@@ -297,6 +297,13 @@ pub(crate) struct Shepherd {
     /// reload arrives, standing in for an operator running `--watch manual`
     /// while the deploy is past its build and inside its reload.
     flip_watch: bool,
+    /// Where to put a rival's binary, and what to write there, when the deploy's
+    /// own reload arrives. `None` for no rival.
+    ///
+    /// The one thing a build turn cannot cover from inside: another sheep of the
+    /// same repository taking the turn and rebuilding the shared cache while this
+    /// deploy is past its swap and inside its reload.
+    rivals: Cell<Option<(PathBuf, String)>>,
     /// How many reloads after the first to refuse, standing in for the
     /// shepherd's own refusal to start a reload while one is in flight.
     /// The first is never refused, because that is the deploy's own and
@@ -360,6 +367,7 @@ impl Shepherd {
             describe_fails_from: None,
             plant: None,
             flip_watch: false,
+            rivals: Cell::new(None),
             refusals: Cell::new(0),
             refusal_code: RpcErrorCode::Internal,
             refuse_from_the_first: Cell::new(false),
@@ -537,6 +545,20 @@ impl Shepherd {
         Self {
             plant: Some(plant),
             ..Self::never_ready()
+        }
+    }
+
+    /// The same shepherd, with another sheep of the same repository building
+    /// `bytes` at `path` when this deploy's own reload arrives.
+    ///
+    /// A rival taking the build turn is the only thing that can change the file
+    /// at a release's script path between this deploy's build and its record,
+    /// and the build turn is what keeps them apart. A test that has to show the
+    /// difference cannot build the rival: it has to land one.
+    pub(crate) fn rival_builds(self, path: &Path, bytes: &str) -> Self {
+        Self {
+            rivals: Cell::new(Some((path.to_owned(), bytes.to_owned()))),
+            ..self
         }
     }
 
@@ -753,6 +775,11 @@ impl Daemon for Shepherd {
         self.reloads.set(self.reloads.get() + 1);
         if self.reloads.get() == 2 {
             self.second_reload_at.set(self.describes.get());
+        }
+        // Once, and only on the deploy's own reload: the rival is one build, not
+        // a loop, and a rollback's reload must not be interrupted by it.
+        if let Some((path, bytes)) = self.rivals.take() {
+            fs::write(&path, bytes).expect("the rival's build lands");
         }
 
         let lost = self.replies_lost.get();

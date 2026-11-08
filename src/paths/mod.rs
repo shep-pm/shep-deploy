@@ -63,14 +63,39 @@ use crate::error::Error;
 /// called it. `setup` refuses it.
 pub const REPOS: &str = "repos";
 
-/// 64-bit FNV-1a, the hash [`Repo`]'s key and [`BuildKey`] both carry.
+/// How long every digest this crate stores is: a `u64` in hex.
+const DIGEST_WIDTH: usize = 16;
+
+/// 64-bit FNV-1a over `bytes`, the hash [`Repo`]'s key, [`BuildKey`] and
+/// [`crate::state::State::served_script`] all carry.
 ///
 /// Specified, so a key this crate wrote last release is one it can still
 /// read: `std`'s hashers promise nothing across builds.
-pub(super) fn fnv1a(text: &str) -> u64 {
-    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+pub(super) fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
     })
+}
+
+/// `bytes` as a digest, which is what every stored one of these looks like:
+/// [`fnv1a`] in [`DIGEST_WIDTH`] hex characters.
+///
+/// One function rather than a format string at each site, because each site
+/// reads the stored one back: a release directory name, a repository key, and
+/// `deploy.toml` all have to agree on the spelling.
+#[must_use]
+pub(crate) fn digest(bytes: &[u8]) -> String {
+    format!("{:01$x}", fnv1a(bytes), DIGEST_WIDTH)
+}
+
+/// Whether `text` is a digest as [`digest`] spells one.
+///
+/// What a stored one is checked against on read, so a hand-edited value that
+/// cannot be one is refused where an operator can see it rather than joined
+/// into a path or compared forever.
+#[must_use]
+pub(crate) fn is_digest(text: &str) -> bool {
+    text.len() == DIGEST_WIDTH && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// What is under `<shep_home>/deploy`: every sheep that is a deploy target,
@@ -230,5 +255,19 @@ mod tests {
 
         assert_eq!(found.named, vec!["web".to_owned()]);
         assert_eq!(found.unnamed, vec![deploy.join("bad\nname")]);
+    }
+
+    /// fails if the digest spelling moves. Every one this crate has written is
+    /// read back by name - a repository directory, a release directory, the
+    /// `served_script` of a `deploy.toml` - and `std`'s hashers promise nothing
+    /// across builds, which is why [`fnv1a`] is spelled out here. Both values
+    /// are published vectors of FNV-1a in 64 bits.
+    #[test]
+    fn a_digest_is_fnv1a_in_sixteen_hex_characters() {
+        assert_eq!(digest(b"a"), "af63dc4c8601ec8c");
+        assert_eq!(digest(b""), "cbf29ce484222325");
+        assert!(is_digest(&digest(b"anything at all")));
+        assert!(!is_digest("af63dc4c8601ec8"), "one character short");
+        assert!(!is_digest("af63dc4c8601ec8g"), "not hexadecimal");
     }
 }

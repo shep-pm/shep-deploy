@@ -24,6 +24,17 @@ use crate::{lock, retention, settings, shared};
 /// survives the dog being restarted, which is when a supervisor would
 /// otherwise turn a held sha back into a rebuild loop.
 ///
+/// A skip is the one ending that records nothing. It landed nothing and failed
+/// nothing, and the record already names what is serving; writing the skipped
+/// head into `failed` would hold a commit the loop passed over, and the next
+/// push would be the first thing it looked at again.
+///
+/// An ending that landed nothing drops `served_script` as well. A rollback has
+/// put back a release whose bytes the shared build cache no longer holds, and
+/// clearing the digest for every such ending, rather than telling a rollback
+/// apart from a build that never touched the running process, is the cheap side
+/// of that trade: the next landing records one.
+///
 /// Retention runs on every ending for the same shape of reason: the target
 /// that keeps failing is the one building a fresh worktree for every commit
 /// somebody pushes, and pruning only after a verify left exactly that one
@@ -45,16 +56,38 @@ pub(crate) async fn record<D: Daemon>(
     config: &DogConfig,
 ) {
     let sheep = tree.sheep();
-    let landed = matches!(outcome, Ok(Outcome::Deployed { .. }));
     // `Raced` is held like any other ending. It was nearly exempted on
     // 2026-09-04 as "transient", and it is not: the tree lock means no rival
     // deploy can move `current` under this one any more, so what is left
     // moving it is an operator's hand or the release's own build command,
     // and a build that repoints `current` on every run would otherwise be
     // rebuilt every tick forever, the exact loop `failed` exists to stop.
-    let failed = (!landed).then(|| head.to_owned());
+    //
+    // A skip is neither an ending nor a failure, so it changes nothing here:
+    // the record names what is serving, and a `failed` naming the skipped head
+    // would hold a commit the loop chose to leave alone until somebody pushed
+    // again. The release a script skip built is on disk all the same, which is
+    // why the prune below still runs for it.
+    let failed = match outcome {
+        Ok(Outcome::Deployed { .. }) => None,
+        Ok(Outcome::Skipped { .. }) => state.failed.clone(),
+        _ => Some(head.to_owned()),
+    };
 
-    if state.failed != failed {
+    // `served_script` describes the bytes this sheep's process is running, and
+    // only a landing records one. A rollback has just put back a release whose
+    // bytes this module cannot name, because the shared build cache was rebuilt
+    // after the digest was taken; a build that failed never touched the running
+    // process, and its digest would still be true. Both are cleared rather than
+    // told apart: telling them apart means matching four error variants, and
+    // what it buys is at most one reload that could have been skipped, since the
+    // next landing records a digest either way.
+    let serving = match outcome {
+        Ok(Outcome::Deployed { .. } | Outcome::Skipped { .. }) => state.served_script.clone(),
+        _ => None,
+    };
+
+    if state.failed != failed || state.served_script != serving {
         // Re-read before writing, because this process may not be the only
         // one writing this record. `state` here is whatever THIS process
         // read at its own start, and `State::write` replaces the whole
@@ -79,6 +112,7 @@ pub(crate) async fn record<D: Daemon>(
                 }
                 None => {
                     state.failed = failed;
+                    state.served_script = serving;
                     if let Err(err) = state.write(&tree.state_file()) {
                         eprintln!(
                             "shep-deploy: {sheep}: could not record what {head} came to: {err}"
@@ -165,12 +199,23 @@ async fn adopt_operator_fields<D: Daemon>(
 /// both is refused by [`State::write`], so the one write meant to record the
 /// deploy was the one that failed.
 ///
+/// `stamp` goes into `served_script` beside the sha it was built with: what
+/// `reload_script` compares every later build against. `None` when the caller
+/// could not read the script at all, which leaves the record describing a
+/// release with no digest rather than a wrong one.
+///
 /// # Errors
 /// Whatever [`write_record`] returns.
-pub(super) fn record_landing(tree: &Tree, state: &mut State, head: &str) -> Result<(), Error> {
+pub(super) fn record_landing(
+    tree: &Tree,
+    state: &mut State,
+    head: &str,
+    stamp: Option<String>,
+) -> Result<(), Error> {
     state.deployed = Some(head.to_owned());
     let held = state.failed.take();
     let staged = state.staged.take();
+    let serving = std::mem::replace(&mut state.served_script, stamp);
     let written = write_record(tree, state);
     if written.is_err() {
         // The hold is still on disk, so memory keeps saying so: `record`
@@ -178,6 +223,7 @@ pub(super) fn record_landing(tree: &Tree, state: &mut State, head: &str) -> Resu
         // would otherwise find nothing to do.
         state.failed = held;
         state.staged = staged;
+        state.served_script = serving;
     }
     written
 }
@@ -307,9 +353,12 @@ mod tests {
     use crate::deploy::{Outcome, deploy, unattended};
     use crate::error::Error;
     use crate::state::{State, Watch};
-    use crate::{fixtures, swap};
+    use crate::{fixtures, skip, swap};
 
     use super::*;
+
+    /// A script digest, as [`crate::paths::digest`] spells one: FNV-1a of `a`.
+    const STAMP: &str = "af63dc4c8601ec8c";
 
     /// fails if a straggler process can mark a sha failed that another
     /// process already deployed.
@@ -470,6 +519,101 @@ mod tests {
         );
     }
 
+    /// fails if a skip is recorded as a failure. The loop holds whatever
+    /// `failed` names until the branch moves, so the next tick would refuse
+    /// the very commit the loop chose to pass over, and the record would name
+    /// a sha nothing ever served.
+    #[tokio::test(start_paused = true)]
+    async fn a_skip_records_nothing() {
+        let mut fixture = fixture_with_previous_release();
+        let live = fixture.state.deployed.clone().expect("a previous release");
+        let head = commit_on_origin(&fixture, "second.txt");
+        let before = fs::read(fixture.tree.state_file()).expect("deploy.toml");
+
+        record(
+            &Shepherd::ready(),
+            &fixture.tree,
+            &mut fixture.state,
+            &head,
+            &Ok(Outcome::Skipped {
+                sha: head.clone(),
+                reason: skip::Reason::UnchangedScript,
+            }),
+            &fixtures::dog_config(),
+        )
+        .await;
+
+        assert_eq!(
+            fs::read(fixture.tree.state_file()).expect("deploy.toml"),
+            before,
+            "the record is not touched at all"
+        );
+        assert_eq!(fixture.state.failed, None, "and nothing was held");
+        assert_eq!(fixture.state.deployed.as_deref(), Some(live.as_str()));
+    }
+
+    /// fails if a landing leaves the script digest out of the record. Every
+    /// later `reload_script` compare is against what this tree recorded, so a
+    /// landing that records none is a sheep that asked for the compare and can
+    /// never get one.
+    #[tokio::test(start_paused = true)]
+    async fn a_landing_records_the_script_digest() {
+        let mut fixture = fixture_with_previous_release();
+        let head = commit_on_origin(&fixture, "second.txt");
+
+        record_landing(
+            &fixture.tree,
+            &mut fixture.state,
+            &head,
+            Some(STAMP.to_owned()),
+        )
+        .expect("recorded");
+
+        assert_eq!(fixture.state.served_script.as_deref(), Some(STAMP));
+        assert_eq!(
+            State::read(&fixture.tree.state_file())
+                .expect("reads")
+                .served_script
+                .as_deref(),
+            Some(STAMP),
+            "and it is on disk, where the next run reads it"
+        );
+    }
+
+    /// fails if an ending that landed nothing keeps the digest of the release
+    /// it just replaced. The repository's shared build cache has been rebuilt
+    /// since that digest was taken, so a later build matching it would skip a
+    /// reload against bytes nothing is running.
+    #[tokio::test(start_paused = true)]
+    async fn an_ending_that_landed_nothing_drops_the_script_digest() {
+        let mut fixture = fixture_with_previous_release();
+        let live = fixture.state.deployed.clone().expect("a previous release");
+        fixture.state.served_script = Some(STAMP.to_owned());
+        let head = commit_on_origin(&fixture, "second.txt");
+
+        record(
+            &Shepherd::ready(),
+            &fixture.tree,
+            &mut fixture.state,
+            &head,
+            &Ok(Outcome::RolledBack {
+                to: live,
+                why: "it did not come up".to_owned(),
+            }),
+            &fixtures::dog_config(),
+        )
+        .await;
+
+        assert_eq!(fixture.state.served_script, None, "memory says so");
+        assert_eq!(
+            State::read(&fixture.tree.state_file())
+                .expect("reads")
+                .served_script,
+            None,
+            "and so does the record"
+        );
+    }
+
     /// fails if a deploy that LANDS ignores a `watch` the operator set in
     /// the sheep's table while it ran. The deploy holds its `State` from its
     /// first read to its last use, and the poll loop paints and decides from
@@ -588,7 +732,7 @@ mod tests {
             .write(&fixture.tree.state_file())
             .expect("the hold is on disk");
 
-        record_landing(&fixture.tree, &mut fixture.state, &head)
+        record_landing(&fixture.tree, &mut fixture.state, &head, None)
             .expect("the landing is recorded at the first attempt");
 
         let written = State::read(&fixture.tree.state_file()).expect("reads");
@@ -610,7 +754,7 @@ mod tests {
         fs::remove_file(&record).expect("drop the record");
         fs::create_dir(&record).expect("a directory where the record goes");
 
-        record_landing(&fixture.tree, &mut fixture.state, &head)
+        record_landing(&fixture.tree, &mut fixture.state, &head, None)
             .expect_err("the record cannot be written");
 
         assert_eq!(

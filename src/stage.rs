@@ -240,7 +240,13 @@ async fn land_staged<D: Daemon>(
     };
     refuse_ungated_verification(tree.sheep(), &staged.app, state.verify)?;
     run_release_hook(tree, head, &staged, config).await?;
-    swap_and_land(daemon, tree, state, head, started_at, &staged, config).await
+    // No script digest, and none is the honest answer here. A promote builds
+    // nothing and holds no build turn, so the file at the release's script path
+    // belongs to whichever sheep of this repository built last, and a digest
+    // read now could be recorded as this sheep's own. The next deploy records
+    // one, and a record with none never matches, so the worst a promote costs is
+    // one reload that could have been skipped.
+    swap_and_land(daemon, tree, state, head, started_at, &staged, None, config).await
 }
 
 /// The release, its build, and the record write, for one sha.

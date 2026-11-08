@@ -62,6 +62,8 @@ pub fn code_for(err: &Error) -> u8 {
 mod tests {
     use std::path::PathBuf;
 
+    use crate::skip::Reason;
+
     use super::*;
 
     /// fails if a rolled-back deploy stops being distinguishable from a
@@ -180,14 +182,18 @@ mod tests {
         );
     }
 
-    /// fails if a push the dog chose not to deploy is reported as a failure.
-    /// Nothing went wrong: the target is exactly as it was.
+    /// fails if a deploy the dog chose not to make is reported as a failure.
+    /// Nothing went wrong: the target is exactly as it was, whichever of the
+    /// two reasons it was left alone for.
     #[test]
-    fn a_skipped_deploy_exits_zero() {
-        let outcome = Outcome::Skipped {
-            sha: "new".to_owned(),
-        };
-        assert_eq!(code_for_outcome(&outcome), 0);
+    fn a_skipped_deploy_exits_zero_whichever_way_it_was_skipped() {
+        for reason in [Reason::ReloadPaths, Reason::UnchangedScript] {
+            let outcome = Outcome::Skipped {
+                sha: "new".to_owned(),
+                reason,
+            };
+            assert_eq!(code_for_outcome(&outcome), 0, "{reason:?}");
+        }
     }
 
     /// fails if a refused handshake stops being an error at all, or starts

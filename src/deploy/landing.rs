@@ -54,10 +54,18 @@ pub(crate) async fn run_release_hook(
 /// refused if it names something else now. `staged` is what
 /// [`super::stage_release`] read from the release.
 ///
+/// `stamp` is this release's built script as its caller digested it, and goes
+/// into [`State::served_script`] beside the sha. It is the caller's rather than
+/// read here because the only moment the file belongs to this deploy is inside
+/// the repository's build turn, which this function runs after: see
+/// [`super::attempt`]. `None` from a caller that built nothing, which records a
+/// release with no digest rather than one belonging to whoever built last.
+///
 /// # Errors
 /// [`Error::Raced`] if `current` moved since `started_at` was read. Then as
 /// the tail of [`super::deploy`]: see its `# Errors` for the rollback
 /// endings, which are the same here.
+#[expect(clippy::too_many_arguments, reason = "one landing, two call sites")]
 pub(crate) async fn swap_and_land<D: Daemon>(
     daemon: &D,
     tree: &Tree,
@@ -65,6 +73,7 @@ pub(crate) async fn swap_and_land<D: Daemon>(
     head: &str,
     started_at: Option<PathBuf>,
     staged: &Staged,
+    stamp: Option<String>,
     config: &DogConfig,
 ) -> Result<Outcome, Error> {
     let sheep = tree.sheep();
@@ -106,13 +115,24 @@ pub(crate) async fn swap_and_land<D: Daemon>(
         // sha into `failed` next to the same sha in `deployed`: a record
         // that said the release was serving and held at once.
         Landed::Verified => {
+            // What this deploy's own build produced, recorded beside the sha it
+            // is running it from. `reload_script` compares every later build
+            // with this and with nothing else, because the file at the script
+            // path is this repository's shared build cache and another sheep's
+            // build replaces it. It was digested in the build turn, above the
+            // swap, and is carried through rather than re-read here: by now a
+            // rival sheep of this remote may have rebuilt the cache, and a
+            // digest read at this moment describes its binary, not this one.
+            //
+            // `None` stays `None`, unsaid rather than wrong.
+            //
             // After the record write, so the record names the new sha even
             // when the hook fails, and only when it does: a hook that reads
             // `deploy.toml` would otherwise see the previous sha. Like the
             // write, the hook cannot change the outcome: the release is live
             // and verified, and undoing it would take a healthy release out
             // of service.
-            match record_landing(tree, state, head) {
+            match record_landing(tree, state, head, stamp) {
                 Ok(()) => {
                     if let Err(err) = hook::run_after(
                         &hooks.after,

@@ -145,6 +145,59 @@ reload = ["cmd/voting", "internal/voting", "pkg", "go.mod"]
 - `shep-deploy deploy <sheep>` by hand never skips. It is you asking for a
   deploy now.
 
+## Skipping a reload when the build produced the same binary
+
+A commit that changes a comment still recompiles a Go app to the same machine
+code, and the sheep gets restarted for nothing. `reload_script` lets the poll
+loop leave that commit alone: the build runs, and the file its `script` names is
+compared with the digest `deploy.toml` recorded when this sheep last landed a
+release. Equal bytes mean no swap, no reload and no record.
+
+```toml
+# the sheep's own config
+[[app]]
+name = "api"
+script = "./app"
+
+[app.dogs.deploy]
+command = "go build -buildvcs=false -o app ./cmd/app"
+reload_script = true
+```
+
+- Both sides of the compare are digests, each taken inside the repository's
+  build turn, and neither is the live release. A release's `target` is a symlink
+  at that cache, so a `script` under it is one file every release of the remote
+  resolves to, and whichever sheep built last owns its bytes. The second sheep of
+  a repository would read the first one's binary through its own live release and
+  skip the reload it needs, and the first would do the same a moment after it let
+  go of the build turn, to a hand deploy of the other. `deploy.toml` carries
+  `served_script`, the digest of the script this sheep's own build produced the
+  last time it landed a release. Every landing writes one, whether or not the key
+  is set, and an ending that landed nothing drops it.
+- A sheep with nothing recorded yet deploys. A record written before the key, or
+  one the cutover wrote and no deploy has landed since, has no digest to match.
+- `deploy <sheep> --promote` records none. It builds nothing and holds no build
+  turn, so it has no bytes it can call its own, and the next deploy records one.
+- It fits a compiled app, and it is exact for one: the file the sheep is
+  launched from is the file the build produced. An interpreted app's `script`
+  is one file and the ones it imports are not compared, so a change to any of
+  them reads as unchanged.
+- Go stamps the commit and the build time into every binary it builds in a git
+  checkout, so the bytes differ on every commit unless the build passes
+  `-buildvcs=false`. The dog never touches your build flags.
+- The build still runs. This skips the reload, not the build, because nothing
+  but running it says what it produces. A release built and skipped is reclaimed
+  by `retention` like any other.
+- A skip runs no `[release]` hook, swaps nothing and leaves `deploy.toml` as it
+  was, so the next comparison is still against the sha actually serving.
+- Off by default, and per sheep. In `[deploy]`, every sheep this dog serves
+  takes it.
+- `shep-deploy deploy <sheep>` by hand never skips on the script.
+- The log says `<sheep> skipped <sha>, its built script is unchanged`, once,
+  then again about once an hour while it stays skipped. The exit status is 0.
+- If the dog cannot compare, because `script` is an absolute path or starts with
+  `~`, or either file cannot be read, it deploys and says why.
+
 ## Purging a cache after the swap
 
 An after hook is a command that runs once per deploy, after the new release is
@@ -379,8 +432,8 @@ variables and never carries their values.
 ### Setting a key once, for every sheep
 
 `[deploy]` holds more than those five keys. `branch`, `watch`, `verify`,
-`command`, `artifacts`, `reload`, `release` and `after` can be set there too,
-and every sheep this dog serves takes the value:
+`command`, `artifacts`, `reload`, `reload_script`, `release` and `after` can be
+set there too, and every sheep this dog serves takes the value:
 
 ```toml
 # $SHEP_HOME/dogs.toml

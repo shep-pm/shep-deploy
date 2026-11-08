@@ -113,6 +113,7 @@ pub fn state() -> State {
         checkout: PathBuf::from("/srv/x"),
         origin: None,
         staged: None,
+        served_script: None,
     }
 }
 
