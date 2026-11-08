@@ -364,8 +364,9 @@ class rather than the instances.
   it at the swap, not at the end of the deploy; nothing else takes it, and
   nothing holding it waits for a tree's, a record's or a clone's. A tree that
   still owns its clone has the turn beside its own clone and contends with
-  nothing, and `stage` does not take it at all, so a `--stage` build of one
-  repository can run beside a deploy's. A write to the sheep's table
+  nothing, and `stage` and `optin::prepare` build without it, so a `--stage`
+  build or a first cutover of one repository can run beside a deploy's. A write
+  to the sheep's table
   is one request and takes no lock. The
   cutover's promotion writes `watch = auto` to the table on the clean path
   only, over whatever `prepare` left there, so a `--watch manual` typed during
