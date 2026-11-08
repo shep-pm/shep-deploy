@@ -20,6 +20,7 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use super::process::run_git;
+use super::resolved;
 use super::shepignore::{pattern_matches, shepignore_patterns};
 use crate::error::Error;
 
@@ -223,25 +224,83 @@ pub fn link_into(release: &Path, checkout: &Path, paths: &FromCheckout) -> Resul
 /// rather than here where it cannot.
 ///
 /// A release that already has a `target` path is left exactly as it is and
-/// gets no cache. That is a repository which committed the directory, which
-/// is unusual and its own business; overruling it would be this crate
-/// deciding the repository's layout for it.
+/// gets no cache, with one exception: a link naming `superseded`, the cache
+/// directory this dog kept in the tree before the cache moved to
+/// [`crate::paths::Repo::cache`]. That link is this dog's own doing, and
+/// leaving it is not neutral. `checkout_release` reuses a finished checkout,
+/// so the first release built after the upgrade arrives with the old link
+/// still on it while the build is confined to the new cache, and every
+/// artifact of the form `target/release/app` is then refused as landing
+/// outside both roots. A release that used to deploy stops deploying.
+///
+/// A `target` the repository itself ships is still left alone, directory or
+/// link. Overruling it would be this crate deciding the repository's layout
+/// for it, and `build::contain::lands_within` is what covers a committed link
+/// walking out of the release.
 ///
 /// # Errors
 /// [`Error::Io`], naming the cache, if it cannot be created; naming the
-/// link, if the symlink cannot be made for any reason other than something
-/// already being there.
-pub fn link_cache(release: &Path, cache_target: &Path) -> Result<(), Error> {
+/// link, if it cannot be read, removed, or made.
+pub fn link_cache(release: &Path, cache_target: &Path, superseded: &Path) -> Result<(), Error> {
     let link = release.join("target");
-    // `symlink_metadata` answers for a directory, a file, a live link and a
-    // dangling one alike, which is every "something is already there".
-    if link.symlink_metadata().is_ok() {
+    if existing_target(&link, cache_target, superseded)? == Target::Leave {
         return Ok(());
     }
 
     fs::create_dir_all(cache_target).map_err(Error::at(cache_target))?;
 
     symlink(cache_target, &link).map_err(Error::at(link))
+}
+
+/// What [`link_cache`] does with whatever is already at `release/target`.
+#[derive(Debug, PartialEq, Eq)]
+enum Target {
+    /// Nothing is there, or what is there is this dog's own link at the cache
+    /// it used before the cache moved per repository. Both end with a link at
+    /// `cache_target`.
+    Relink,
+    /// A directory or file the release ships, a link naming some other place,
+    /// or already this dog's link at `cache_target`.
+    Leave,
+}
+
+/// What is already at `link`, decided as [`Target`].
+///
+/// `superseded` is the only thing that decides it: a link naming a place
+/// outside it is somebody else's, and this crate does not move what it did not
+/// make. Every path is compared by [`resolved`], because the dog and the daemon
+/// can reach one directory through different spellings of `$SHEP_HOME`.
+fn existing_target(link: &Path, cache_target: &Path, superseded: &Path) -> Result<Target, Error> {
+    // `symlink_metadata` answers for a directory, a file, a live link and a
+    // dangling one alike, which is every "something is already there".
+    let here = match link.symlink_metadata() {
+        Ok(here) => here,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Target::Relink),
+        Err(source) => return Err(Error::at(link)(source)),
+    };
+    if !here.file_type().is_symlink() {
+        return Ok(Target::Leave);
+    }
+    let named = fs::read_link(link).map_err(Error::at(link))?;
+    if resolved(&named) == resolved(cache_target) {
+        return Ok(Target::Leave);
+    }
+    // The link an earlier version of this dog made named `<tree>/cache/target`
+    // and nothing else, so what identifies it is the directory its own parent
+    // resolves to. Comparing the parent rather than the whole target is what
+    // keeps a dangling one recognisable: neither it nor its cache canonicalizes,
+    // and two spellings of one directory only agree one level up.
+    let superseded = resolved(superseded);
+    let made_here = named
+        .parent()
+        .is_some_and(|parent| resolved(parent) == superseded);
+    if !made_here {
+        return Ok(Target::Leave);
+    }
+    // The old link is gone before the new one is made, so the two are never
+    // both at the path, and `symlink` below cannot fail with `EEXIST`.
+    fs::remove_file(link).map_err(Error::at(link))?;
+    Ok(Target::Relink)
 }
 
 #[cfg(test)]
@@ -417,21 +476,138 @@ mod tests {
         assert!(!linked.contains(&PathBuf::from("packages/dist")));
     }
 
+    /// The cache directory a tree's releases linked at before the cache moved
+    /// beside the shared clone, spelled the way `Tree::superseded_cache` spells
+    /// it.
+    fn superseded(root: &std::path::Path) -> PathBuf {
+        root.join("deploy/web/cache")
+    }
+
     /// fails if a release does not get a `target` pointing at the dog's own
     /// cache. Without it every deploy of a Rust project is a from-scratch
     /// build, which the design calls not acceptable for Koji specifically.
     #[test]
     fn a_release_gets_target_linked_at_the_cache() {
         let root = tempfile::tempdir().expect("tempdir");
-        let release = root.path().join("release");
-        let cache = root.path().join("cache/target");
+        let release = root.path().join("deploy/web/releases/abc");
+        let cache = root.path().join("deploy/repos/k/cache/target");
         fs::create_dir_all(&release).expect("release dir");
 
-        link_cache(&release, &cache).expect("links");
+        link_cache(&release, &cache, &superseded(root.path())).expect("links");
 
         let link = release.join("target");
         assert_eq!(fs::read_link(&link).expect("a symlink"), cache);
         assert!(cache.is_dir(), "the cache itself must be created");
+    }
+
+    /// fails if a release checked out before the cache moved keeps its old
+    /// `target` link. `checkout_release` reuses a finished checkout, so the
+    /// first build after the upgrade lands on a release carrying a link at the
+    /// cache this dog used to keep in the tree, while the build is confined to
+    /// the one beside the clone. Every artifact spelled `target/release/app`
+    /// then resolves outside both approved roots and is refused, so a release
+    /// that used to deploy stops deploying.
+    #[test]
+    fn a_target_link_at_the_superseded_cache_is_repointed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (release, old, cache) = (
+            root.path().join("deploy/web/releases/abc"),
+            superseded(root.path()).join("target"),
+            root.path().join("deploy/repos/k/cache/target"),
+        );
+        fs::create_dir_all(&release).expect("release dir");
+        fs::create_dir_all(&old).expect("the cache the old link names");
+        symlink(&old, release.join("target")).expect("the link an older version made");
+
+        link_cache(&release, &cache, &superseded(root.path())).expect("repoints");
+
+        assert_eq!(
+            fs::read_link(release.join("target")).expect("a symlink"),
+            cache,
+            "the link follows the cache it was moved to"
+        );
+        assert!(cache.is_dir(), "the new cache is created");
+        assert!(old.is_dir(), "nothing removes what the old cache holds");
+    }
+
+    /// fails if a dangling link at the superseded cache is treated as
+    /// something already there. A cache removed by hand is exactly the release
+    /// the next build has to fix, and leaving the link leaves the build writing
+    /// through nothing.
+    #[test]
+    fn a_dangling_link_at_the_superseded_cache_is_repointed_too() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (release, cache) = (
+            root.path().join("deploy/web/releases/abc"),
+            root.path().join("deploy/repos/k/cache/target"),
+        );
+        fs::create_dir_all(&release).expect("release dir");
+        symlink(
+            superseded(root.path()).join("target"),
+            release.join("target"),
+        )
+        .expect("a link whose cache is gone");
+
+        link_cache(&release, &cache, &superseded(root.path())).expect("repoints");
+
+        assert_eq!(
+            fs::read_link(release.join("target")).expect("a symlink"),
+            cache
+        );
+    }
+
+    /// fails if a `target` link this dog never made is repointed anyway. A
+    /// repository can commit one, and moving it would be this crate deciding
+    /// the repository's layout for it; `build::contain::lands_within` is what
+    /// covers where such a link walks.
+    #[test]
+    fn a_target_link_at_somewhere_else_is_left_alone() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (release, elsewhere, cache) = (
+            root.path().join("deploy/web/releases/abc"),
+            root.path().join("somewhere/else"),
+            root.path().join("deploy/repos/k/cache/target"),
+        );
+        fs::create_dir_all(&release).expect("release dir");
+        fs::create_dir_all(&elsewhere).expect("what the committed link names");
+        symlink(&elsewhere, release.join("target")).expect("a link of the repository's");
+
+        link_cache(&release, &cache, &superseded(root.path())).expect("does nothing");
+
+        assert_eq!(
+            fs::read_link(release.join("target")).expect("still a symlink"),
+            elsewhere,
+            "a link this dog did not make stays where it is"
+        );
+        assert!(!cache.exists(), "and no cache is made beside it");
+    }
+
+    /// fails if relinking a release that already links at the right cache
+    /// churns, or refuses. Every later build of that release comes through
+    /// here, and one that replaced its own link would throw away the incremental
+    /// cache the link exists to keep warm.
+    #[test]
+    fn a_target_link_at_the_cache_is_left_as_it_is() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (release, cache) = (
+            root.path().join("deploy/web/releases/abc"),
+            root.path().join("deploy/repos/k/cache/target"),
+        );
+        fs::create_dir_all(&release).expect("release dir");
+        fs::create_dir_all(&cache).expect("the cache, already warm");
+        fs::write(cache.join("artifact"), "warm").expect("something in it");
+        symlink(&cache, release.join("target")).expect("the link this dog made");
+
+        link_cache(&release, &cache, &superseded(root.path())).expect("does nothing");
+
+        assert_eq!(
+            fs::read_link(release.join("target")).expect("still the same link"),
+            cache
+        );
+        assert!(
+            cache.join("artifact").is_file(),
+            "the warm cache is not thrown away"
+        );
     }
 
     /// fails if a release that ships its own tracked `target/` is treated
@@ -445,7 +621,7 @@ mod tests {
         fs::create_dir_all(release.join("target")).expect("a committed target");
         let cache = root.path().join("cache/target");
 
-        link_cache(&release, &cache).expect("does nothing, successfully");
+        link_cache(&release, &cache, &superseded(root.path())).expect("does nothing, successfully");
 
         assert!(
             release.join("target").is_dir(),
@@ -470,7 +646,12 @@ mod tests {
         let checkout = root.path().join("checkout");
         fs::create_dir_all(&release).expect("release");
         fs::create_dir_all(checkout.join("target")).expect("their own target");
-        link_cache(&release, &root.path().join("cache/target")).expect("links");
+        link_cache(
+            &release,
+            &root.path().join("cache/target"),
+            &superseded(root.path()),
+        )
+        .expect("links");
 
         let err = link_into(
             &release,

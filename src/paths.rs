@@ -14,6 +14,9 @@
 //! ├── current -> releases/<sha>   swapped with rename(2) at cutover
 //! ├── complete/<sha>       per-release completion marker, kept outside the
 //! │                        release on purpose - see `Tree::completion`
+//! ├── cache/               a build cache left behind by the version that kept
+//! │                        one per sheep. Nothing writes here any more, and
+//! │                        nothing removes it - see `Tree::superseded_cache`
 //! ├── deploy.lock          exclusive flock so only one deploy runs at once
 //! └── deploy.toml          the sheep's `State` - see `crate::state`
 //!
@@ -462,6 +465,22 @@ impl Tree {
     #[must_use]
     pub fn cache_target(&self, remote: &str) -> PathBuf {
         self.repo(remote).cache_target()
+    }
+
+    /// Where this tree's build cache lived before it moved to [`Repo::cache`].
+    ///
+    /// Nothing writes here. It is named for one question, asked at one place:
+    /// whether a release's `target` link is the one an earlier version of this
+    /// dog made here, which [`crate::shared::link_cache`] then repoints at
+    /// [`Repo::cache_target`]. A release checked out before the move keeps its
+    /// old link, and a build writing through it lands outside both roots the
+    /// artifacts are confined to, so the link has to follow the cache.
+    ///
+    /// Nothing removes the directory. A live release's `target` may still name
+    /// what is in it, and the app is serving from that release.
+    #[must_use]
+    pub fn superseded_cache(&self) -> PathBuf {
+        self.root.join("cache")
     }
 }
 

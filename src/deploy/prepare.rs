@@ -45,6 +45,11 @@ pub(crate) struct Staged {
 /// stored `app`, and whose build and hooks are `settings`'. Nothing in the
 /// release is read.
 ///
+/// A release already checked out gets its `target` relinked here, which is the
+/// only thing that makes a retry of a pre-upgrade release build: the cache it
+/// was linked at moved, and the build is confined to the one it moved to. See
+/// [`shared::link_cache`].
+///
 /// # Errors
 /// Whatever [`checkout_release`], [`shared::link_cache`], [`shared::to_link`]
 /// and [`shared::link_into`] return.
@@ -58,7 +63,7 @@ pub(crate) fn stage_release(
 ) -> Result<Staged, Error> {
     let (release, cache) = (tree.release(sha), tree.cache_target(remote));
     checkout_release(tree, sha)?;
-    shared::link_cache(&release, &cache)?;
+    shared::link_cache(&release, &cache, &tree.superseded_cache())?;
     let linked = shared::to_link(checkout)?;
     shared::link_into(&release, checkout, &linked)?;
 
@@ -493,6 +498,63 @@ mod tests {
             !staged.cache.starts_with(fixture.tree.root()),
             "the cache is not inside the tree: {:?}",
             fixture.tree.root()
+        );
+    }
+
+    /// fails if a release checked out BEFORE the cache moved cannot be built
+    /// again. `checkout_release` reuses a finished checkout and `link_cache`
+    /// used to return early for any `target` already there, so the first
+    /// attempt at a pre-upgrade release after the upgrade carried a link at the
+    /// cache that used to live in the tree while `Staged.cache`, and with it
+    /// both roots the artifacts are confined to, named the one beside the clone.
+    /// An artifact spelled `target/release/app` then resolves outside both and
+    /// `copy_artifact` refuses it: a release that used to deploy fails every
+    /// time it is retried.
+    #[test]
+    fn a_release_checked_out_before_the_cache_moved_is_relinked() {
+        let fixture = fixture_with_previous_release();
+        let second = commit_on_origin(&fixture, "second.txt");
+        crate::git::fetch(
+            &fixture.tree.git(),
+            &fixture.state.remote,
+            "main",
+            fixtures::TEST_BUDGET,
+        )
+        .expect("fetch");
+
+        // The release as the previous version left it: a finished checkout,
+        // its marker, and `target` linked at the cache inside the tree.
+        let (release, old) = (
+            fixture.tree.release(&second),
+            fixture.tree.superseded_cache().join("target"),
+        );
+        crate::git::worktree_add(&fixture.tree.git(), &release, &second).expect("worktree");
+        fs::create_dir_all(fixture.tree.completions()).expect("markers");
+        fs::write(fixture.tree.completion(&second), "").expect("the checkout finished");
+        fs::create_dir_all(&old).expect("the cache the old link names");
+        std::os::unix::fs::symlink(&old, release.join("target")).expect("the old link");
+
+        let stored = fixtures::gated_app("web", FIXTURE_TABLE);
+        let settings = crate::settings::from_app("web", &crate::fixtures::no_section(), &stored)
+            .expect("settings");
+        let staged = super::stage_release(
+            &fixture.tree,
+            &fixture.state.checkout,
+            &second,
+            &fixture.state.remote,
+            &stored,
+            &settings,
+        )
+        .expect("staged");
+
+        assert_eq!(
+            fs::read_link(release.join("target")).expect("the link is the new one"),
+            staged.cache,
+            "the reused release builds against the cache its build is confined to"
+        );
+        assert!(
+            old.is_dir(),
+            "the old cache is left where a live release may still be serving from it"
         );
     }
 
