@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-08
+
+### Added
+
+- Spare a shared build another sheep names
+- Take build_env with secret references resolved
+
+### Changed
+
+- Move its tests to their own file
+
+
 ## [0.7.5] - 2026-11-08
 
 ### Fixed
