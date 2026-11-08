@@ -303,3 +303,43 @@ async fn a_failed_relink_cleanup_invalidates_the_release_before_retrying_setup()
     );
     assert!(!tree.completion(&old_sha).exists());
 }
+
+#[test]
+fn changing_remotes_retries_release_cleanup_before_switching_clones() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let origin = fixtures::checkout(&[("run.sh", "#!/bin/sh\necho hi\n")]);
+    let old_remote = origin.path().to_str().expect("utf-8");
+    let new_remote = "https://example.com/new";
+    let tree = Tree::for_sheep(home.path(), "web");
+    std::fs::create_dir_all(tree.root()).expect("tree");
+    share_clone(&tree, home.path(), old_remote).expect("shares old clone");
+    let old = Repo::for_remote(home.path(), old_remote);
+    git::fetch(&tree.git(), old_remote, "main", fixtures::TEST_BUDGET).expect("fetch");
+    let sha = git::remote_head(&tree.git(), "main").expect("head");
+    let release = tree.release(&sha);
+    git::worktree_add(&tree.git(), &release, &sha).expect("worktree");
+    std::fs::create_dir_all(tree.completions()).expect("complete/");
+    std::fs::write(tree.completion(&sha), b"").expect("marker");
+    let permissions = std::fs::metadata(&release).expect("metadata").permissions();
+    std::fs::set_permissions(&release, std::fs::Permissions::from_mode(0o555))
+        .expect("refuse cleanup");
+
+    let result = share_clone(&tree, home.path(), new_remote);
+
+    std::fs::set_permissions(&release, permissions).expect("restore permissions");
+    assert!(matches!(result, Err(Error::Io { .. })), "{result:?}");
+    assert_eq!(tree.linked_clone(), Some(old.clone()));
+    assert!(old.git().join("HEAD").is_file(), "the old clone is kept");
+    assert!(!tree.completion(&sha).exists());
+
+    share_clone(&tree, home.path(), new_remote).expect("retries cleanup and relinks");
+
+    assert!(!release.exists(), "the retry removes the obsolete release");
+    assert!(!old.root().exists(), "the unused old clone is released");
+    assert_eq!(
+        tree.linked_clone(),
+        Some(Repo::for_remote(home.path(), new_remote))
+    );
+}

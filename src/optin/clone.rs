@@ -31,24 +31,17 @@ pub(super) fn share_clone(tree: &Tree, shep_home: &Path, remote: &str) -> Result
     if tree.owns_clone() {
         return relink_owned_clone(tree, shep_home, &repo);
     }
-    // A retry after the remote changed: the link to the old clone goes, and
-    // the old clone with it when nothing else links to it. A tree with no
-    // clone at all has nothing registered anywhere either.
-    let changed = match tree.linked_clone() {
+    match tree.linked_clone() {
         Some(old) if old != repo => {
+            drop_unregistered_releases(tree)?;
             retention::release_clone(shep_home, tree)?;
-            true
         }
-        Some(_) => false,
-        None => true,
-    };
+        Some(_) => {}
+        None => drop_unregistered_releases(tree)?,
+    }
     let _cloning = lock::hold_clone(&repo.git())?;
     git::init_bare(&repo.git())?;
-    tree.link_clone(&repo)?;
-    if changed {
-        return drop_unregistered_releases(tree);
-    }
-    Ok(())
+    tree.link_clone(&repo)
 }
 
 /// Move `tree` off a clone of its own and onto `repo`, removing the clone it
