@@ -122,7 +122,7 @@ jobs:
     permissions:
       contents: write
       actions: read
-    uses: shep-pm/shep/.github/workflows/dog-release.yml@a7f820b77087377bd254e919e859e611a2e90264
+    uses: shep-pm/shep/.github/workflows/dog-release.yml@89952a434c44a0842b9f957f7173714beafa1fe9
     with:
       package: shep-deploy
       tag: ${{ needs.release-plz-release.outputs.tag }}
@@ -142,7 +142,7 @@ jobs:
     permissions:
       contents: write
       actions: read
-    uses: shep-pm/shep/.github/workflows/dog-release.yml@a7f820b77087377bd254e919e859e611a2e90264
+    uses: shep-pm/shep/.github/workflows/dog-release.yml@89952a434c44a0842b9f957f7173714beafa1fe9
     with:
       package: shep-deploy
       tag: ${{ inputs.dry-run-tag }}
