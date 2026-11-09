@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-11-08
+
+### Added
+
+- Share a build between every sheep of one remote
+- Skip a reload when the build produced the same script
+
+### Fixed
+
+- Take the build turn before setup checks a release out
+- Key a build by its checkout, and hold it for the deploy landing it
+- Find a recorded release under the build key that built it
+- Compare the script skip against a per-sheep digest
+- Take the script digest inside the build turn
+
+
 ## [0.7.6] - 2026-11-08
 
 ### Added
